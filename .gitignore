@@ -1,0 +1,24 @@
+# Node.js
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.*
+
+# Python
+backend/venv/
+backend/__pycache__/
+*.pyc
+backend/.env
+
+# Database
+backend/resumes.db
+backend/history.csv
+
+# User Data & Generated Outputs
+backend/original/
+backend/trailerd/
+backend/output_resumes/
+
+# OS Files
+.DS_Store
+Thumbs.db
