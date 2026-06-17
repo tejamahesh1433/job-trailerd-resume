@@ -1,0 +1,9 @@
+venv/
+__pycache__/
+*.pyc
+.env
+resumes.db
+history.csv
+original/
+trailerd/
+output_resumes/

@@ -2,6 +2,7 @@ import os
 from google import genai
 from google.genai import types
 import json
+from services.usage_tracker import log_api_call
 
 def analyze_resume(resume_text: str, jd_text: str) -> dict:
     api_key = os.getenv("GEMINI_API_KEY")
@@ -20,8 +21,14 @@ def analyze_resume(resume_text: str, jd_text: str) -> dict:
     {resume_text}
 
     Task 1: Calculate the ATS match score (0-100) based on how well the resume matches the job description.
-    Task 2: Extract the Company Name from the Job Description. If not found, return "Unknown_Company".
-    Task 3: If the score is below 85, identify up to 5 bullet points in the resume to rewrite to better match the JD. Provide the exact original text and the new tailored text. "original" MUST be the exact literal text found in the resume.
+    Task 2: Extract the ACTUAL HIRING COMPANY NAME from the Job Description. READ THE ENTIRE JD, including the very bottom — company names and recruiter signatures are often at the end. Look for:
+    - Company name from email signatures at the bottom (e.g., sharma.gopal@net2source.com means company is "Net2Source")
+    - "Company Inc." / "Company LLC" / "Company Ltd" patterns anywhere in the text
+    - "Web: www.company.com" or website URLs
+    - "About [Company]" sections or explicit "Company:" fields
+    - Recruiter signature blocks with company names
+    IMPORTANT: Do NOT confuse technology platforms/tools (DigitalOcean, AWS, Azure, Kubernetes, Docker, Terraform, GitHub, Datadog, etc.) with the hiring company. These are technologies mentioned in requirements, NOT the employer. If truly not found anywhere, return "Unknown_Company".
+    Task 3: ALWAYS identify up to 5 bullet points in the resume to rewrite to better match the JD, regardless of the score. Even if the score is high, there are always improvements to make. Provide the exact original text and the new tailored text. "original" MUST be the EXACT, CHARACTER-FOR-CHARACTER literal text found in the resume — copy-paste it exactly, including all punctuation and spacing. Do NOT paraphrase or shorten the original.
     Task 4: Estimate the new ATS score (0-100) after these replacements are applied (after_score). If no replacements, after_score equals the original score.
     Task 5: Identify up to 10 keywords from the JD that are missing from the resume.
     Task 6: Break down the original score into 4 section scores (0-100): "Skills", "Experience", "Education", "Summary".
@@ -62,13 +69,20 @@ def analyze_resume(resume_text: str, jd_text: str) -> dict:
     
     try:
         response = client.models.generate_content(
-            model='gemini-flash-latest',
+            model='gemini-2.5-pro',
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 temperature=0.2
             ),
         )
+        usage = response.usage_metadata
+        if usage:
+            log_api_call("gemini-2.5-pro", "scan_resume",
+                         input_tokens=usage.prompt_token_count or 0,
+                         output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
+        else:
+            log_api_call("gemini-2.5-pro", "scan_resume", input_tokens=8000, output_tokens=500)
         return json.loads(response.text)
     except Exception as e:
         print(f"Error during AI analysis: {e}")
@@ -104,9 +118,16 @@ def generate_cover_letter(resume_text: str, jd_text: str, company_name: str) -> 
 """
     try:
         response = client.models.generate_content(
-            model='gemini-flash-latest',
+            model='gemini-2.5-pro',
             contents=prompt,
         )
+        usage = response.usage_metadata
+        if usage:
+            log_api_call("gemini-2.5-pro", "cover_letter",
+                         input_tokens=usage.prompt_token_count or 0,
+                         output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
+        else:
+            log_api_call("gemini-2.5-pro", "cover_letter", input_tokens=8000, output_tokens=400)
         return response.text.strip()
     except Exception as e:
         print(f"Error generating cover letter: {e}")

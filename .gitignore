@@ -13,11 +13,17 @@ backend/.env
 # Database
 backend/resumes.db
 backend/history.csv
+backend/data/
 
 # User Data & Generated Outputs
 backend/original/
 backend/trailerd/
 backend/output_resumes/
+
+# Logs
+backend/logs/
+backend/app.log
+*.log
 
 # OS Files
 .DS_Store

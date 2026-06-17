@@ -115,8 +115,31 @@ export default function App() {
   // Active record for panels 03 + 04
   const [activeRecordId, setActiveRecordId] = useState(null);
   const [activeCompanyName, setActiveCompanyName] = useState(null);
+  // Personal profile
+  const [profileText, setProfileText] = useState('');
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileLoaded, setProfileLoaded] = useState(false);
+  const [profileUploading, setProfileUploading] = useState(false);
+  const [profileUploadMsg, setProfileUploadMsg] = useState(null);
+  // API Usage
+  const [usageStats, setUsageStats] = useState(null);
+  const [usageOpen, setUsageOpen] = useState(false);
+  // Gmail integration
+  const [gmailConnected, setGmailConnected] = useState(false);
+  const [gmailEmail, setGmailEmail] = useState('');
+  const [savingToGmail, setSavingToGmail] = useState(false);
+  const [gmailSaved, setGmailSaved] = useState(false);
 
-  useEffect(() => { fetchHistory(); fetchResumes(); }, []);
+  useEffect(() => { fetchHistory(); fetchResumes(); checkGmailStatus(); fetchProfile(); fetchUsage(); }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('gmail') === 'connected') {
+      checkGmailStatus();
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, []);
   useEffect(() => { setHistoryPage(1); }, [historySearch, historyStatusFilter]);
 
   // Derived history values
@@ -141,6 +164,105 @@ export default function App() {
       }
     } catch (err) {
       console.error('Failed to fetch resumes:', err);
+    }
+  };
+
+  const checkGmailStatus = async () => {
+    try {
+      const res = await fetch('http://localhost:8000/api/gmail/status');
+      if (res.ok) {
+        const data = await res.json();
+        setGmailConnected(data.connected);
+        setGmailEmail(data.email || '');
+      }
+    } catch (_) {}
+  };
+
+  const handleSaveToGmail = async () => {
+    if (!mailDraft || !activeRecordId) return;
+    setSavingToGmail(true);
+    setGmailSaved(false);
+    try {
+      const res = await fetch('http://localhost:8000/api/gmail/save-draft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to_emails: mailDraft.to_emails || [],
+          subject: mailDraft.subject,
+          body: mailDraft.body,
+          record_id: activeRecordId,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data.detail || 'Failed to save to Gmail'); return; }
+      setGmailSaved(true);
+      setTimeout(() => setGmailSaved(false), 5000);
+    } catch (err) {
+      setError('Failed to save draft to Gmail');
+    } finally {
+      setSavingToGmail(false);
+    }
+  };
+
+  const handleDisconnectGmail = async () => {
+    try {
+      await fetch('http://localhost:8000/api/gmail/disconnect', { method: 'POST' });
+      setGmailConnected(false);
+      setGmailEmail('');
+    } catch (_) {}
+  };
+
+  const fetchUsage = async () => {
+    try {
+      const res = await fetch('http://localhost:8000/api/usage');
+      if (res.ok) setUsageStats(await res.json());
+    } catch (_) {}
+  };
+
+  const fetchProfile = async () => {
+    try {
+      const res = await fetch('http://localhost:8000/api/profile');
+      if (res.ok) {
+        const data = await res.json();
+        setProfileText(data.content || '');
+        setProfileLoaded(data.exists);
+      }
+    } catch (_) {}
+  };
+
+  const handleSaveProfile = async () => {
+    setProfileSaving(true);
+    try {
+      const res = await fetch('http://localhost:8000/api/profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: profileText }),
+      });
+      if (res.ok) setProfileLoaded(true);
+    } catch (_) {}
+    finally { setProfileSaving(false); }
+  };
+
+  const handleProfileUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setProfileUploading(true);
+    setProfileUploadMsg(null);
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const res = await fetch('http://localhost:8000/api/profile/upload', { method: 'POST', body: form });
+      const data = await res.json();
+      if (!res.ok) { setProfileUploadMsg(data.detail || 'Upload failed'); return; }
+      setProfileText(data.profile || '');
+      setProfileLoaded(true);
+      setProfileUploadMsg(data.message || 'Facts extracted and merged into profile.');
+      setTimeout(() => setProfileUploadMsg(null), 5000);
+    } catch (err) {
+      setProfileUploadMsg('Failed to process document.');
+    } finally {
+      setProfileUploading(false);
+      e.target.value = '';
     }
   };
 
@@ -223,7 +345,7 @@ export default function App() {
     } catch (err) {
       setError('An error occurred. Check your connection or API limits.');
     } finally {
-      setLoading(false);
+      setLoading(false); fetchUsage();
     }
   };
 
@@ -262,7 +384,7 @@ export default function App() {
     } catch (err) {
       setError('Failed to generate cover letter. The AI provider might be overloaded.');
     } finally {
-      setGeneratingCL(false);
+      setGeneratingCL(false); fetchUsage();
     }
   };
 
@@ -355,7 +477,7 @@ export default function App() {
     } catch (err) {
       setError('Failed to generate mail draft. Make sure Ollama is running: ollama serve');
     } finally {
-      setGeneratingMail(false);
+      setGeneratingMail(false); fetchUsage();
     }
   };
 
@@ -457,7 +579,81 @@ export default function App() {
         <div className="mode-tabs">
           <button className={`mode-tab${!batchMode ? ' active' : ''}`} onClick={() => { setBatchMode(false); setError(null); }}>Single Scan</button>
           <button className={`mode-tab${batchMode ? ' active' : ''}`} onClick={() => { setBatchMode(true); setError(null); }}>⚡ Batch Mode</button>
+          <button className={`mode-tab usage-tab${usageOpen ? ' active' : ''}`} onClick={() => { setUsageOpen(u => !u); fetchUsage(); }}>
+            $ Usage {usageStats ? `($${usageStats.all_time?.cost?.toFixed(2) || '0.00'})` : ''}
+          </button>
         </div>
+
+        {usageOpen && usageStats && (
+          <div className="usage-dashboard">
+            <div className="usage-cards">
+              <div className="usage-card">
+                <div className="usage-card-label">Today</div>
+                <div className="usage-card-cost">${usageStats.today?.cost?.toFixed(4) || '0.0000'}</div>
+                <div className="usage-card-calls">{usageStats.today?.calls || 0} calls</div>
+              </div>
+              <div className="usage-card">
+                <div className="usage-card-label">This Week</div>
+                <div className="usage-card-cost">${usageStats.week?.cost?.toFixed(4) || '0.0000'}</div>
+                <div className="usage-card-calls">{usageStats.week?.calls || 0} calls</div>
+              </div>
+              <div className="usage-card">
+                <div className="usage-card-label">This Month</div>
+                <div className="usage-card-cost">${usageStats.month?.cost?.toFixed(4) || '0.0000'}</div>
+                <div className="usage-card-calls">{usageStats.month?.calls || 0} calls</div>
+              </div>
+              <div className="usage-card">
+                <div className="usage-card-label">All Time</div>
+                <div className="usage-card-cost">${usageStats.all_time?.cost?.toFixed(4) || '0.0000'}</div>
+                <div className="usage-card-calls">{usageStats.all_time?.calls || 0} calls</div>
+              </div>
+            </div>
+            {usageStats.all_time?.by_model && (
+              <div className="usage-breakdown">
+                <div className="usage-breakdown-title">By Model</div>
+                <div className="usage-breakdown-rows">
+                  {Object.entries(usageStats.all_time.by_model).map(([model, info]) => (
+                    <div key={model} className="usage-row">
+                      <span className="usage-row-model">{model}</span>
+                      <span className="usage-row-calls">{info.calls} calls</span>
+                      <span className="usage-row-cost">${info.cost?.toFixed(4)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {usageStats.all_time?.by_operation && (
+              <div className="usage-breakdown">
+                <div className="usage-breakdown-title">By Operation</div>
+                <div className="usage-breakdown-rows">
+                  {Object.entries(usageStats.all_time.by_operation).map(([op, count]) => (
+                    <div key={op} className="usage-row">
+                      <span className="usage-row-model">{op.replace(/_/g, ' ')}</span>
+                      <span className="usage-row-calls">{count} calls</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {usageStats.daily_breakdown && Object.keys(usageStats.daily_breakdown).length > 0 && (
+              <div className="usage-breakdown">
+                <div className="usage-breakdown-title">Daily (Last 7 Days)</div>
+                <div className="usage-breakdown-rows">
+                  {Object.entries(usageStats.daily_breakdown).sort((a, b) => b[0].localeCompare(a[0])).map(([day, info]) => (
+                    <div key={day} className="usage-row">
+                      <span className="usage-row-model">{day}</span>
+                      <span className="usage-row-calls">{info.calls} calls</span>
+                      <span className="usage-row-cost">${info.cost?.toFixed(4)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div className="usage-projected">
+              Projected monthly: <strong>${usageStats.projected_monthly?.toFixed(2) || '0.00'}</strong> (based on today's usage)
+            </div>
+          </div>
+        )}
 
         <div className="workspace" style={{ display: batchMode ? 'none' : 'grid' }}>
 
@@ -513,6 +709,35 @@ export default function App() {
                   <input type="file" accept=".docx" onChange={e => { handleAddResume(e.target.files?.[0]); e.target.value = ''; }} />
                 </label>
               </div>
+            </div>
+
+            <div className="field">
+              <button className="profile-toggle" onClick={() => setProfileOpen(p => !p)}>
+                {profileOpen ? '▾' : '▸'} Personal Profile {profileLoaded && <span className="profile-badge">●</span>}
+              </button>
+              {profileOpen && (
+                <div className="profile-editor">
+                  <div className="profile-hint">Upload personal docs (DL, GC, etc.) to auto-extract key facts, or type them manually. Raw files are never stored — only the extracted facts are saved.</div>
+                  <div className="profile-upload-row">
+                    <label className="profile-upload-btn">
+                      {profileUploading ? '⏳ Extracting…' : '📄 Upload Document'}
+                      <input type="file" accept=".pdf,.docx,.png,.jpg,.jpeg,.webp,.bmp" onChange={handleProfileUpload} disabled={profileUploading} hidden />
+                    </label>
+                    <span className="profile-upload-hint">PDF, DOCX, or Image</span>
+                  </div>
+                  {profileUploadMsg && <div className="profile-upload-msg">{profileUploadMsg}</div>}
+                  <textarea
+                    className="field-textarea profile-textarea"
+                    placeholder={"Work Authorization: US Green Card holder\nLocation: Open to relocation\nAvailability: Immediate\nNotice Period: None\nWilling to Travel: Yes\nPreferred Work Mode: Hybrid or Remote"}
+                    value={profileText}
+                    onChange={e => setProfileText(e.target.value)}
+                    rows={6}
+                  />
+                  <button className="profile-save-btn" onClick={handleSaveProfile} disabled={profileSaving}>
+                    {profileSaving ? '…' : '💾 Save Profile'}
+                  </button>
+                </div>
+              )}
             </div>
 
             <div className="btn-row">
@@ -717,7 +942,22 @@ export default function App() {
                         ↓ Download .txt
                       </a>
                     )}
+                    {gmailConnected ? (
+                      <button className="mail-act-btn mail-gmail-btn" onClick={handleSaveToGmail} disabled={savingToGmail}>
+                        {savingToGmail ? '…' : gmailSaved ? '✓ Saved to Gmail' : '✉ Save to Gmail Drafts'}
+                      </button>
+                    ) : (
+                      <a href="http://localhost:8000/api/gmail/auth" className="mail-act-btn mail-gmail-connect-btn">
+                        ✉ Connect Gmail
+                      </a>
+                    )}
                   </div>
+                  {gmailConnected && (
+                    <div className="gmail-status">
+                      <span className="gmail-status-dot">●</span> Connected: {gmailEmail}
+                      <button className="gmail-disconnect-btn" onClick={handleDisconnectGmail}>Disconnect</button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

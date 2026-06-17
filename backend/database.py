@@ -2,7 +2,15 @@ import sqlite3
 from datetime import datetime
 import os
 
-DB_FILE = "resumes.db"
+DATA_DIR = os.getenv("DATA_DIR", "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_FILE = os.path.join(DATA_DIR, "resumes.db")
+
+def sanitize_csv_field(field: str) -> str:
+    """Prevent CSV injection attacks by prefixing dangerous characters with single quote."""
+    if isinstance(field, str) and field and field[0] in '=+-@':
+        return "'" + field  # Prefix with single quote to prevent formula execution
+    return field
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)

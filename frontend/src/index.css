@@ -1752,6 +1752,99 @@ body {
 .mail-dl-btn { color: var(--cream-dim); }
 .mail-dl-btn:hover { background: var(--surface-alt); }
 
+/* ── Usage Dashboard ────────────────── */
+.usage-tab { margin-left: auto; font-size: 0.72rem; opacity: 0.7; }
+.usage-tab.active { opacity: 1; }
+
+.usage-dashboard {
+  background: var(--surface); border: 1px solid var(--border-warm);
+  border-radius: 6px; padding: 16px; margin-bottom: 18px;
+}
+.usage-cards {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px;
+}
+.usage-card {
+  background: var(--surface-alt); border: 1px solid var(--border-warm);
+  border-radius: 5px; padding: 10px; text-align: center;
+}
+.usage-card-label { font-size: 0.68rem; color: var(--cream-dim); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+.usage-card-cost { font-size: 1.1rem; font-weight: 700; color: var(--accent); }
+.usage-card-calls { font-size: 0.68rem; color: var(--cream-dim); margin-top: 2px; }
+
+.usage-breakdown { margin-bottom: 10px; }
+.usage-breakdown-title { font-size: 0.72rem; color: var(--cream-dim); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+.usage-breakdown-rows { display: flex; flex-direction: column; gap: 3px; }
+.usage-row {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 0.74rem; padding: 3px 8px; border-radius: 3px;
+  background: var(--surface-alt);
+}
+.usage-row-model { flex: 1; color: var(--cream); }
+.usage-row-calls { color: var(--cream-dim); font-size: 0.68rem; }
+.usage-row-cost { color: var(--accent); font-weight: 600; min-width: 60px; text-align: right; }
+
+.usage-projected {
+  font-size: 0.74rem; color: var(--cream-dim); margin-top: 10px;
+  padding-top: 10px; border-top: 1px solid var(--border-warm);
+}
+.usage-projected strong { color: var(--accent); }
+
+@media (max-width: 600px) {
+  .usage-cards { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ── Personal Profile ────────────────── */
+.profile-toggle {
+  background: none; border: none; color: var(--cream-dim);
+  font-size: 0.78rem; cursor: pointer; padding: 4px 0;
+  display: flex; align-items: center; gap: 6px;
+}
+.profile-toggle:hover { color: var(--cream); }
+.profile-badge { color: var(--success); font-size: 0.55rem; }
+.profile-editor { margin-top: 6px; }
+.profile-hint {
+  font-size: 0.68rem; color: var(--cream-dim); opacity: 0.7;
+  margin-bottom: 6px; line-height: 1.4;
+}
+.profile-textarea { min-height: 100px; font-size: 0.78rem; }
+.profile-upload-row {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+}
+.profile-upload-btn {
+  background: transparent; border: 1px dashed var(--border-warm);
+  color: var(--cream); font-size: 0.74rem; padding: 6px 14px;
+  border-radius: 4px; cursor: pointer; transition: all 0.2s;
+}
+.profile-upload-btn:hover { background: var(--surface-alt); border-color: var(--accent); }
+.profile-upload-hint { font-size: 0.65rem; color: var(--cream-dim); opacity: 0.6; }
+.profile-upload-msg {
+  font-size: 0.72rem; color: var(--success); padding: 4px 0; margin-bottom: 4px;
+}
+.profile-save-btn {
+  background: transparent; border: 1px solid var(--border-warm);
+  color: var(--success); font-size: 0.72rem; padding: 4px 12px;
+  border-radius: 4px; cursor: pointer; margin-top: 6px;
+}
+.profile-save-btn:hover:not(:disabled) { background: rgba(46,189,115,0.06); }
+
+.mail-gmail-btn { color: #d44638; border-color: rgba(212,70,56,0.3); }
+.mail-gmail-btn:hover:not(:disabled) { background: rgba(212,70,56,0.06); }
+.mail-gmail-connect-btn { color: #d44638; border-color: rgba(212,70,56,0.3); text-decoration: none; text-align: center; }
+.mail-gmail-connect-btn:hover { background: rgba(212,70,56,0.06); }
+
+.gmail-status {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 0.72rem; color: var(--cream-dim);
+  margin-top: 6px; padding: 4px 0;
+}
+.gmail-status-dot { color: var(--success); font-size: 0.6rem; }
+.gmail-disconnect-btn {
+  background: none; border: none; color: var(--cream-dim);
+  font-size: 0.68rem; cursor: pointer; opacity: 0.7;
+  text-decoration: underline;
+}
+.gmail-disconnect-btn:hover { opacity: 1; color: #d44638; }
+
 /* ── Mail Draft — history row button ────────────────── */
 .mail-hist-btn {
   background: transparent;

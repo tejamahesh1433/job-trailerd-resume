@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  backend-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: job-trailerd-backend
+    ports:
+      - "8000:8000"
+    environment:
+      # If using Ollama locally on Windows, the container needs to hit the host machine.
+      # host.docker.internal resolves to the host machine's localhost.
+      - OLLAMA_URL=http://host.docker.internal:11434
+      # Security: Set environment for production
+      - ENVIRONMENT=development
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - ./backend/.env
+    volumes:
+      # All writable data in one directory (db, csv, logs)
+      - ./backend/data:/app/data
+      # Output folders
+      - ./backend/original:/app/original
+      - ./backend/trailerd:/app/trailerd
+    restart: unless-stopped
+    # Security: Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    # Security: Health check
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8000/"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  frontend-ui:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: job-trailerd-frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      # Mount src and public so you can still edit React code and see live changes!
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+    depends_on:
+      backend-api:
+        condition: service_healthy
+    restart: unless-stopped
+    environment:
+      - VITE_API_URL=http://localhost:8000
