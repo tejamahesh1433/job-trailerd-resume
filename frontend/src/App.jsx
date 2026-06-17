@@ -96,10 +96,12 @@ export default function App() {
   const [batchText, setBatchText] = useState('');
   const [batchJobs, setBatchJobs] = useState([]);
   const [batchRunning, setBatchRunning] = useState(false);
-  // History search / filter / pagination
+  // History search / filter / pagination / sort
   const [historySearch, setHistorySearch] = useState('');
   const [historyStatusFilter, setHistoryStatusFilter] = useState('');
   const [historyPage, setHistoryPage] = useState(1);
+  const [historySortBy, setHistorySortBy] = useState('date');
+  const [historySortDir, setHistorySortDir] = useState('desc');
   const [expandedJdId, setExpandedJdId] = useState(null);
   // Mail draft — results panel
   const [mailDraft, setMailDraft] = useState(null);
@@ -203,10 +205,22 @@ export default function App() {
   // Derived history values — historyPage resets are computed, not effectful
   const filteredHistory = history
     .filter(item => !historySearch || (item.company_name || '').toLowerCase().includes(historySearch.toLowerCase()))
-    .filter(item => !historyStatusFilter || item.status === historyStatusFilter);
+    .filter(item => !historyStatusFilter || item.status === historyStatusFilter)
+    .sort((a, b) => {
+      const dir = historySortDir === 'asc' ? 1 : -1;
+      if (historySortBy === 'score') return (a.score - b.score) * dir;
+      if (historySortBy === 'company') return (a.company_name || '').localeCompare(b.company_name || '') * dir;
+      if (historySortBy === 'status') return (a.status || '').localeCompare(b.status || '') * dir;
+      return ((a.created_at || '') < (b.created_at || '') ? -1 : 1) * dir;
+    });
   const totalPages = Math.ceil(filteredHistory.length / HISTORY_PAGE_SIZE) || 1;
   const computedPage = historyPage > totalPages ? 1 : historyPage;
   const pagedHistory = filteredHistory.slice((computedPage - 1) * HISTORY_PAGE_SIZE, computedPage * HISTORY_PAGE_SIZE);
+
+  const toggleSort = (field) => {
+    if (historySortBy === field) setHistorySortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setHistorySortBy(field); setHistorySortDir('desc'); }
+  };
 
   const handleSaveToGmail = async () => {
     if (!mailDraft || !activeRecordId) return;
@@ -344,6 +358,9 @@ export default function App() {
       setResult(data);
       setActiveRecordId(data.id);
       setActiveCompanyName(data.company_name);
+      if (data.duplicate) {
+        setError(`Note: ${data.company_name} was scanned before (previous score: ${data.previous_score}%). A new entry has been added.`);
+      }
       fetchHistory();
     } catch {
       setError('An error occurred. Check your connection or API limits.');
@@ -510,6 +527,25 @@ export default function App() {
     setCoverLetterPath(null);
     setMailDraft(null);
     setDraftPath(null);
+
+    // Populate Post-Production panel with this record's stored scan data
+    const sr = item.scan_result || {};
+    setResult({
+      id: item.id,
+      score: sr.score || item.score,
+      after_score: sr.after_score || item.score,
+      company_name: item.company_name,
+      file_path: item.file_path,
+      missing_keywords: sr.missing_keywords || [],
+      section_scores: sr.section_scores || {},
+      contact_info: sr.contact_info || {},
+      replacements: sr.replacements || [],
+      tailored: (sr.replacements || []).length > 0,
+    });
+
+    // Switch to Single Scan view if in batch mode
+    if (batchMode) setBatchMode(false);
+
     try {
       const res = await fetch(`http://localhost:8000/api/history/${item.id}/content`);
       if (res.ok) {
@@ -518,7 +554,11 @@ export default function App() {
         if (data.mail_draft) { setMailDraft(data.mail_draft); setDraftPath(data.draft_path); }
       }
     } catch { /* ignore */ }
-    document.getElementById('panels-cl-mail')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    // Scroll to Post-Production panel
+    setTimeout(() => {
+      document.getElementById('panel-post-production')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 50);
   };
 
   const handleHistoryMail = async (id, companyName) => {
@@ -716,7 +756,7 @@ export default function App() {
 
             <div className="field">
               <button className="profile-toggle" onClick={() => setProfileOpen(p => !p)}>
-                {profileOpen ? '▾' : '▸'} Personal Profile {profileLoaded && <span className="profile-badge">●</span>}
+                {profileOpen ? '▾' : '▸'} Personal Profile {profileLoaded ? <span className="profile-badge" title="Profile saved and active">● Active</span> : <span className="profile-badge-empty" title="No profile yet — add your details">○ Not set</span>}
               </button>
               {profileOpen && (
                 <div className="profile-editor">
@@ -754,7 +794,7 @@ export default function App() {
           </div>
 
           {/* ── Right: Results Panel ── */}
-          <div className="panel panel-enter" style={{ animationDelay: '80ms' }}>
+          <div id="panel-post-production" className="panel panel-enter" style={{ animationDelay: '80ms' }}>
             <div className="panel-tag">
               <span className="panel-num">02</span>
               <span className="panel-title">Post-Production</span>
@@ -796,7 +836,7 @@ export default function App() {
                       ↓ Download Tailored Resume
                     </a>
                     <div className="file-dl-row">
-                      <a href={`http://localhost:8000/api/download/${result.file_path.replace('tejamahesh_resume.docx', 'jd_info.txt').replace(/^trailerd\//, '')}`} className="file-dl-link" download>
+                      <a href={`http://localhost:8000/api/download/${result.file_path.replace(/[^/]+\.docx$/, 'jd_info.txt').replace(/^trailerd\//, '')}`} className="file-dl-link" download>
                         ↓ jd_info.txt
                       </a>
                     </div>
@@ -842,7 +882,7 @@ export default function App() {
 
                 {result.replacements?.length > 0 && (
                   <div className="diff-section">
-                    <div className="diff-header">AI Changes — {result.replacements.length} edit{result.replacements.length !== 1 ? 's' : ''}</div>
+                    <div className="diff-header">AI Changes — {result.replacements.length} edit{result.replacements.length !== 1 ? 's' : ''} {result.replacements.length > 1 && <span className="diff-scroll-hint">↕ scroll for more</span>}</div>
                     <div className="diff-list">
                       {result.replacements.map((rep, idx) => (
                         <div key={idx} className="diff-item">
@@ -933,9 +973,20 @@ export default function App() {
                     </div>
                   </div>
                   <div className="mail-draft-actions">
-                    <button className="mail-act-btn" onClick={() => { navigator.clipboard.writeText(mailDraft.body); setCopiedField('body'); setTimeout(() => setCopiedField(null), 2000); }}>
-                      {copiedField === 'body' ? '✓ Copied' : '↑ Copy Body'}
+                    <button className="mail-act-btn" onClick={() => {
+                      const full = `To: ${(mailDraft.to_emails || []).join(', ')}\nSubject: ${mailDraft.subject}\n\n${mailDraft.body}`;
+                      navigator.clipboard.writeText(full); setCopiedField('all'); setTimeout(() => setCopiedField(null), 2000);
+                    }}>
+                      {copiedField === 'all' ? '✓ Copied All' : '↑ Copy All'}
                     </button>
+                    {mailDraft.to_emails?.length > 0 && (
+                      <a
+                        href={`mailto:${mailDraft.to_emails.join(',')}?subject=${encodeURIComponent(mailDraft.subject)}&body=${encodeURIComponent(mailDraft.body)}`}
+                        className="mail-act-btn mail-mailto-btn"
+                      >
+                        ✉ Open in Mail App
+                      </a>
+                    )}
                     {!draftPath ? (
                       <button className="mail-act-btn mail-save-btn" onClick={handleSaveDraft} disabled={savingDraft}>
                         {savingDraft ? '…' : '💾 Save to Folder'}
@@ -1019,10 +1070,10 @@ export default function App() {
                         </div>
                         <div className="batch-job-meta">
                           {job.status === 'done' && <span className="batch-job-score" style={{ color: scoreAccent(job.result.score) }}>{job.result.score}%</span>}
-                          {job.status === 'done' && job.result?.file_path && (
+                          {job.status === 'done' && job.result?.id && (
                             <>
                               <a href={`http://localhost:8000/api/download/${job.result.file_path.replace(/^trailerd\//, '')}`} className="dl-link" download title="Resume">↓</a>
-                              <a href={`http://localhost:8000/api/download/${job.result.file_path.replace('tejamahesh_resume.docx', 'jd_info.txt').replace(/^trailerd\//, '')}`} className="dl-link" download title="JD Info">JD</a>
+                              <button className="dl-link" title="Open CL & Email panels" onClick={() => { setBatchMode(false); handleSelectRecord(job.result); }}>CL+✉</button>
                             </>
                           )}
                         </div>
@@ -1088,10 +1139,10 @@ export default function App() {
                 <thead>
                   <tr>
                     <th>#</th>
-                    <th>Company</th>
-                    <th>Date</th>
-                    <th>Score</th>
-                    <th>Status</th>
+                    <th className="sortable-th" onClick={() => toggleSort('company')}>Company {historySortBy === 'company' ? (historySortDir === 'asc' ? '↑' : '↓') : ''}</th>
+                    <th className="sortable-th" onClick={() => toggleSort('date')}>Date {historySortBy === 'date' ? (historySortDir === 'asc' ? '↑' : '↓') : ''}</th>
+                    <th className="sortable-th" onClick={() => toggleSort('score')}>Score {historySortBy === 'score' ? (historySortDir === 'asc' ? '↑' : '↓') : ''}</th>
+                    <th className="sortable-th" onClick={() => toggleSort('status')}>Status {historySortBy === 'status' ? (historySortDir === 'asc' ? '↑' : '↓') : ''}</th>
                     <th></th>
                   </tr>
                 </thead>
@@ -1131,6 +1182,9 @@ export default function App() {
                             <option value="Offer">Offer</option>
                             <option value="Rejected">Rejected</option>
                           </select>
+                          {item.status_updated_at && (
+                            <div className="status-date">{new Date(item.status_updated_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
+                          )}
                         </td>
                         <td className="actions-col">
                           {item.file_path && (

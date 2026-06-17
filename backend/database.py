@@ -25,24 +25,43 @@ def init_db():
             created_at TEXT
         )
     ''')
-    try:
-        c.execute('ALTER TABLE resumes ADD COLUMN status TEXT DEFAULT "Scanned"')
-    except sqlite3.OperationalError:
-        pass # Column already exists
+    migrations = [
+        'ALTER TABLE resumes ADD COLUMN status TEXT DEFAULT "Scanned"',
+        'ALTER TABLE resumes ADD COLUMN status_updated_at TEXT',
+        'ALTER TABLE resumes ADD COLUMN scan_result TEXT',
+    ]
+    for sql in migrations:
+        try:
+            c.execute(sql)
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
     conn.close()
 
-def save_resume_record(company_name: str, jd_text: str, score: int, file_path: str):
+def save_resume_record(company_name: str, jd_text: str, score: int, file_path: str, scan_result: str = None):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''
-        INSERT INTO resumes (company_name, jd_text, score, file_path, created_at, status)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (company_name, jd_text, score, file_path, datetime.now().isoformat(), "Scanned"))
+        INSERT INTO resumes (company_name, jd_text, score, file_path, created_at, status, scan_result)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (company_name, jd_text, score, file_path, datetime.now().isoformat(), "Scanned", scan_result))
     record_id = c.lastrowid
     conn.commit()
     conn.close()
     return record_id
+
+def _parse_record(row):
+    """Convert a database row to dict, parsing scan_result JSON if present."""
+    if row is None:
+        return None
+    d = dict(row)
+    if d.get('scan_result'):
+        try:
+            import json
+            d['scan_result'] = json.loads(d['scan_result'])
+        except (json.JSONDecodeError, TypeError):
+            d['scan_result'] = None
+    return d
 
 def get_resume_by_id(record_id: int):
     conn = sqlite3.connect(DB_FILE)
@@ -51,7 +70,7 @@ def get_resume_by_id(record_id: int):
     c.execute('SELECT * FROM resumes WHERE id = ?', (record_id,))
     row = c.fetchone()
     conn.close()
-    return dict(row) if row else None
+    return _parse_record(row)
 
 def get_all_resumes(limit: int = 50, offset: int = 0):
     conn = sqlite3.connect(DB_FILE)
@@ -60,7 +79,17 @@ def get_all_resumes(limit: int = 50, offset: int = 0):
     c.execute('SELECT * FROM resumes ORDER BY created_at DESC LIMIT ? OFFSET ?', (limit, offset))
     rows = c.fetchall()
     conn.close()
-    return [dict(row) for row in rows]
+    return [_parse_record(row) for row in rows]
+
+def find_existing_company(company_name: str):
+    """Check if a record with the same company name already exists."""
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute('SELECT id, score, created_at FROM resumes WHERE LOWER(company_name) = LOWER(?) ORDER BY created_at DESC LIMIT 1', (company_name,))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 def delete_resume_record(record_id: int):
     conn = sqlite3.connect(DB_FILE)
@@ -72,6 +101,7 @@ def delete_resume_record(record_id: int):
 def update_resume_status(record_id: int, status: str):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('UPDATE resumes SET status = ? WHERE id = ?', (status, record_id))
+    c.execute('UPDATE resumes SET status = ?, status_updated_at = ? WHERE id = ?',
+              (status, datetime.now().isoformat(), record_id))
     conn.commit()
     conn.close()

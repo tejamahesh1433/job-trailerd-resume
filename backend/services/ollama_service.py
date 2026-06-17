@@ -15,6 +15,14 @@ SIGNATURE = (
 )
 
 
+_COMPANY_SUFFIXES = re.compile(
+    r'\b(Inc\.?|LLC|Ltd\.?|Corp\.?|Corporation|Pvt|Private|Limited|Group|'
+    r'Consulting|Solutions|Technologies|Services|Staffing|Systems)\b', re.IGNORECASE
+)
+_ROLE_KEYWORDS = re.compile(
+    r'\b(Recruiter|Talent|Acquisition|HR|Manager|Director|Lead|Coordinator|Staffing)\b', re.IGNORECASE
+)
+
 def _extract_recruiter_name(jd_text: str) -> str:
     """Extract the recruiter/hiring manager name from the JD signature block."""
     lines = jd_text.strip().split('\n')
@@ -23,19 +31,37 @@ def _extract_recruiter_name(jd_text: str) -> str:
                          'thank you', 'cheers', 'warm regards', 'kind regards']
     for i, line in enumerate(lines):
         if line.strip().lower().rstrip(',') in greeting_patterns:
-            for j in range(i + 1, min(i + 4, len(lines))):
-                candidate = lines[j].strip()
-                if candidate and not candidate.startswith(('http', 'www', 'Email', 'Web', 'Phone', 'Tel', 'Address', 'Global')):
-                    if re.match(r'^[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3}$', candidate):
-                        return candidate.split()[0]
+            for j in range(i + 1, min(i + 6, len(lines))):
+                candidate = lines[j].strip().rstrip(',')
+                if not candidate:
+                    continue
+                # Skip lines that are clearly not names
+                if candidate.startswith(('http', 'www', 'Email', 'Web', 'Phone', 'Tel',
+                                         'Address', 'Global', 'USA', 'India', '+1', '--')):
+                    continue
+                # Skip company names (contain Inc, LLC, etc.)
+                if _COMPANY_SUFFIXES.search(candidate):
+                    continue
+                # Skip role/title lines
+                if _ROLE_KEYWORDS.search(candidate):
+                    continue
+                # A person's name: 2-4 words, each starting with uppercase (allow single initials like "J")
+                if re.match(r'^[A-Z][a-z]*(?:\s+[A-Z][a-z]*){0,3}$', candidate):
+                    # Return first name (skip single-letter initials)
+                    parts = candidate.split()
+                    for part in parts:
+                        if len(part) > 1:
+                            return part
+                    return parts[0]
             break
 
+    # Fallback: extract from email prefix like shanmukhj@ -> Shanmukh
     email_match = re.search(r'([\w.+-]+)@[\w-]+\.\w{2,}', jd_text)
     if email_match:
         prefix = email_match.group(1)
         parts = re.split(r'[._]', prefix)
         for part in parts:
-            if len(part) > 2 and part.isalpha() and part[0].islower():
+            if len(part) > 2 and part.isalpha():
                 return part.title()
 
     return ""

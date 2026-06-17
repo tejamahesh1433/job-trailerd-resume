@@ -28,16 +28,23 @@ def analyze_resume(resume_text: str, jd_text: str) -> dict:
     - "About [Company]" sections or explicit "Company:" fields
     - Recruiter signature blocks with company names
     IMPORTANT: Do NOT confuse technology platforms/tools (DigitalOcean, AWS, Azure, Kubernetes, Docker, Terraform, GitHub, Datadog, etc.) with the hiring company. These are technologies mentioned in requirements, NOT the employer. If truly not found anywhere, return "Unknown_Company".
-    Task 3: ALWAYS identify up to 5 bullet points in the resume to rewrite to better match the JD, regardless of the score. Even if the score is high, there are always improvements to make. Provide the exact original text and the new tailored text. "original" MUST be the EXACT, CHARACTER-FOR-CHARACTER literal text found in the resume — copy-paste it exactly, including all punctuation and spacing. Do NOT paraphrase or shorten the original.
-    Task 4: Estimate the new ATS score (0-100) after these replacements are applied (after_score). If no replacements, after_score equals the original score.
+    Task 3: Identify bullet points in the resume to rewrite so the TAILORED resume scores AT LEAST 80% ATS match.
+    - Provide up to 10 replacements. More replacements = better match.
+    - Include rewrites for the Skills/Summary section to incorporate key JD keywords.
+    - "original" MUST be the EXACT, CHARACTER-FOR-CHARACTER literal text found in the resume — copy-paste it exactly, including all punctuation and spacing. Do NOT paraphrase or shorten the original.
+    - "new" should weave in the JD's specific technologies and keywords naturally into the existing bullet point.
+    - If the original score is already 80+, still provide 3-5 replacements to push it higher.
+    Task 4: Estimate the new ATS score (0-100) after ALL replacements are applied (after_score). The after_score MUST be at least 80. If your replacements don't achieve 80, add more replacements until they do.
     Task 5: Identify up to 10 keywords from the JD that are missing from the resume.
     Task 6: Break down the original score into 4 section scores (0-100): "Skills", "Experience", "Education", "Summary".
     Task 7: Extract the candidate's contact info from the resume: full name, email address, and phone number. Return null for any field not found.
 
     CRITICAL CONSTRAINT ON REPLACEMENTS:
-    - This is a DevOps resume. ONLY emphasize DevOps-related skills (CI/CD, AWS, Kubernetes, Terraform, Infrastructure, Automation).
-    - DO NOT add, invent, or emphasize non-DevOps skills like "Full Stack", "Java", "Frontend", or general application development, even if the JD explicitly asks for them.
-    - NEVER hallucinate experiences. Only reword existing bullet points to highlight the candidate's DevOps capabilities.
+    - The candidate is a DevOps/Cloud/Infrastructure engineer. Reword existing bullet points to highlight overlap with the JD's specific technologies.
+    - Map the candidate's existing experience to the JD's domain. For example: if the JD asks for VMware and the resume has cloud infrastructure experience, reword to emphasize virtualization, hypervisor management, infrastructure orchestration, etc.
+    - NEVER invent experiences the candidate doesn't have. Only reword existing bullet points to highlight relevant transferable skills.
+    - ALWAYS rewrite the Skills line to include the top 5-8 JD keywords that the candidate could plausibly claim.
+    - DO NOT add skills like "Full Stack", "Java", "Frontend" unless the JD specifically requires them AND the resume has related experience.
 
     Return the result strictly in the following JSON format:
     {{

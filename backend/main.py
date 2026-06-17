@@ -10,6 +10,7 @@ import difflib
 import csv
 import shutil
 import docx
+import json
 import logging
 import hashlib
 import sys
@@ -27,7 +28,7 @@ from services.docx_service import extract_text_from_docx, create_tailored_docx
 from services import gmail_service
 from services.profile_service import process_uploaded_doc
 from services.usage_tracker import get_usage_stats
-from database import init_db, save_resume_record, get_all_resumes, delete_resume_record, update_resume_status, get_resume_by_id, sanitize_csv_field
+from database import init_db, save_resume_record, get_all_resumes, delete_resume_record, update_resume_status, get_resume_by_id, find_existing_company, sanitize_csv_field
 
 DATA_DIR = os.getenv("DATA_DIR", "data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -445,20 +446,28 @@ async def scan_resume(request: Request, jd_text: str = Form(...), resume: Option
             f.write("Job Description:\n")
             f.write(jd_text)
 
-        record_id = save_resume_record(company_name, jd_text, after_score, file_path)
-        append_to_csv(company_name, jd_text, score, after_score, original_filename, file_path)
+        existing = find_existing_company(company_name)
 
-        return {
-            "id": record_id,
+        scan_data = {
             "score": score,
             "after_score": after_score,
-            "company_name": company_name,
-            "file_path": file_path,
             "missing_keywords": result.get('missing_keywords', []),
             "section_scores": result.get('section_scores', {}),
             "contact_info": contact_info,
             "replacements": replacements,
-            "tailored": len(replacements) > 0
+        }
+
+        record_id = save_resume_record(company_name, jd_text, after_score, file_path, json.dumps(scan_data))
+        append_to_csv(company_name, jd_text, score, after_score, original_filename, file_path)
+
+        return {
+            "id": record_id,
+            "company_name": company_name,
+            "file_path": file_path,
+            "tailored": len(replacements) > 0,
+            "duplicate": existing is not None,
+            "previous_score": existing['score'] if existing else None,
+            **scan_data,
         }
 
     except HTTPException:
@@ -501,7 +510,7 @@ async def patch_history_status(request: Request, record_id: int, status_update: 
         if record_id <= 0:
             raise HTTPException(status_code=400, detail="Invalid record ID")
         # Validate status value
-        valid_statuses = ["Scanned", "Applied", "Rejected", "Accepted"]
+        valid_statuses = ["Scanned", "Applied", "Phone Screen", "Interview", "Offer", "Rejected"]
         if status_update.status not in valid_statuses:
             raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {', '.join(valid_statuses)}")
         update_resume_status(record_id, status_update.status)

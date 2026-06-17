@@ -1062,6 +1062,11 @@ body {
   color: var(--muted);
   text-transform: uppercase;
   border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; align-items: center;
+}
+.diff-scroll-hint {
+  font-weight: 400; letter-spacing: 0; text-transform: none;
+  font-size: 0.6rem; opacity: 0.6;
 }
 
 .diff-list {
@@ -1195,6 +1200,9 @@ body {
 }
 
 .history-table th:first-child { padding-left: 0; }
+.sortable-th { cursor: pointer; user-select: none; }
+.sortable-th:hover { color: var(--accent); }
+.status-date { font-size: 0.6rem; color: var(--cream-dim); opacity: 0.7; margin-top: 2px; }
 
 .history-row td {
   padding: 0.95rem 1rem;
@@ -1800,7 +1808,8 @@ body {
   display: flex; align-items: center; gap: 6px;
 }
 .profile-toggle:hover { color: var(--cream); }
-.profile-badge { color: var(--success); font-size: 0.55rem; }
+.profile-badge { color: var(--success); font-size: 0.6rem; }
+.profile-badge-empty { color: var(--cream-dim); font-size: 0.6rem; opacity: 0.6; }
 .profile-editor { margin-top: 6px; }
 .profile-hint {
   font-size: 0.68rem; color: var(--cream-dim); opacity: 0.7;
@@ -1826,6 +1835,9 @@ body {
   border-radius: 4px; cursor: pointer; margin-top: 6px;
 }
 .profile-save-btn:hover:not(:disabled) { background: rgba(46,189,115,0.06); }
+
+.mail-mailto-btn { color: var(--accent); border-color: rgba(var(--accent-rgb, 200,170,110), 0.3); text-decoration: none; }
+.mail-mailto-btn:hover { background: rgba(200,170,110,0.06); }
 
 .mail-gmail-btn { color: #d44638; border-color: rgba(212,70,56,0.3); }
 .mail-gmail-btn:hover:not(:disabled) { background: rgba(212,70,56,0.06); }
