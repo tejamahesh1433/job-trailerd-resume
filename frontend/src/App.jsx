@@ -131,24 +131,6 @@ export default function App() {
   const [savingToGmail, setSavingToGmail] = useState(false);
   const [gmailSaved, setGmailSaved] = useState(false);
 
-  useEffect(() => { fetchHistory(); fetchResumes(); checkGmailStatus(); fetchProfile(); fetchUsage(); }, []);
-
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get('gmail') === 'connected') {
-      checkGmailStatus();
-      window.history.replaceState({}, '', window.location.pathname);
-    }
-  }, []);
-  useEffect(() => { setHistoryPage(1); }, [historySearch, historyStatusFilter]);
-
-  // Derived history values
-  const filteredHistory = history
-    .filter(item => !historySearch || (item.company_name || '').toLowerCase().includes(historySearch.toLowerCase()))
-    .filter(item => !historyStatusFilter || item.status === historyStatusFilter);
-  const totalPages = Math.ceil(filteredHistory.length / HISTORY_PAGE_SIZE) || 1;
-  const pagedHistory = filteredHistory.slice((historyPage - 1) * HISTORY_PAGE_SIZE, historyPage * HISTORY_PAGE_SIZE);
-
   const fetchResumes = async () => {
     try {
       const res = await fetch('http://localhost:8000/api/resumes');
@@ -162,9 +144,14 @@ export default function App() {
           localStorage.setItem('selectedResume', data[0].filename);
         }
       }
-    } catch (err) {
-      console.error('Failed to fetch resumes:', err);
-    }
+    } catch { /* ignore */ }
+  };
+
+  const fetchHistory = async () => {
+    try {
+      const res = await fetch('http://localhost:8000/api/history?limit=200');
+      if (res.ok) setHistory(await res.json());
+    } catch { /* ignore */ }
   };
 
   const checkGmailStatus = async () => {
@@ -175,8 +162,51 @@ export default function App() {
         setGmailConnected(data.connected);
         setGmailEmail(data.email || '');
       }
-    } catch (_) {}
+    } catch { /* ignore */ }
   };
+
+  const fetchUsage = async () => {
+    try {
+      const res = await fetch('http://localhost:8000/api/usage');
+      if (res.ok) setUsageStats(await res.json());
+    } catch { /* ignore */ }
+  };
+
+  const fetchProfile = async () => {
+    try {
+      const res = await fetch('http://localhost:8000/api/profile');
+      if (res.ok) {
+        const data = await res.json();
+        setProfileText(data.content || '');
+        setProfileLoaded(data.exists);
+      }
+    } catch { /* ignore */ }
+  };
+
+  const initialized = useRef(false);
+  useEffect(() => {
+    if (initialized.current) return;
+    initialized.current = true;
+
+    fetchHistory();
+    fetchResumes();
+    checkGmailStatus();
+    fetchProfile();
+    fetchUsage();
+
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('gmail') === 'connected') {
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  });
+
+  // Derived history values — historyPage resets are computed, not effectful
+  const filteredHistory = history
+    .filter(item => !historySearch || (item.company_name || '').toLowerCase().includes(historySearch.toLowerCase()))
+    .filter(item => !historyStatusFilter || item.status === historyStatusFilter);
+  const totalPages = Math.ceil(filteredHistory.length / HISTORY_PAGE_SIZE) || 1;
+  const computedPage = historyPage > totalPages ? 1 : historyPage;
+  const pagedHistory = filteredHistory.slice((computedPage - 1) * HISTORY_PAGE_SIZE, computedPage * HISTORY_PAGE_SIZE);
 
   const handleSaveToGmail = async () => {
     if (!mailDraft || !activeRecordId) return;
@@ -197,7 +227,7 @@ export default function App() {
       if (!res.ok) { setError(data.detail || 'Failed to save to Gmail'); return; }
       setGmailSaved(true);
       setTimeout(() => setGmailSaved(false), 5000);
-    } catch (err) {
+    } catch {
       setError('Failed to save draft to Gmail');
     } finally {
       setSavingToGmail(false);
@@ -209,25 +239,7 @@ export default function App() {
       await fetch('http://localhost:8000/api/gmail/disconnect', { method: 'POST' });
       setGmailConnected(false);
       setGmailEmail('');
-    } catch (_) {}
-  };
-
-  const fetchUsage = async () => {
-    try {
-      const res = await fetch('http://localhost:8000/api/usage');
-      if (res.ok) setUsageStats(await res.json());
-    } catch (_) {}
-  };
-
-  const fetchProfile = async () => {
-    try {
-      const res = await fetch('http://localhost:8000/api/profile');
-      if (res.ok) {
-        const data = await res.json();
-        setProfileText(data.content || '');
-        setProfileLoaded(data.exists);
-      }
-    } catch (_) {}
+    } catch { /* ignore */ }
   };
 
   const handleSaveProfile = async () => {
@@ -239,7 +251,7 @@ export default function App() {
         body: JSON.stringify({ content: profileText }),
       });
       if (res.ok) setProfileLoaded(true);
-    } catch (_) {}
+    } catch { /* ignore */ }
     finally { setProfileSaving(false); }
   };
 
@@ -258,20 +270,11 @@ export default function App() {
       setProfileLoaded(true);
       setProfileUploadMsg(data.message || 'Facts extracted and merged into profile.');
       setTimeout(() => setProfileUploadMsg(null), 5000);
-    } catch (err) {
+    } catch {
       setProfileUploadMsg('Failed to process document.');
     } finally {
       setProfileUploading(false);
       e.target.value = '';
-    }
-  };
-
-  const fetchHistory = async () => {
-    try {
-      const res = await fetch('http://localhost:8000/api/history?limit=200');
-      if (res.ok) setHistory(await res.json());
-    } catch (err) {
-      console.error('Failed to fetch history', err);
     }
   };
 
@@ -288,7 +291,7 @@ export default function App() {
       await fetchResumes();
       setSelectedResumeName(data.filename);
       localStorage.setItem('selectedResume', data.filename);
-    } catch (err) {
+    } catch {
       setError('Upload failed. Check your connection.');
     } finally {
       setUploadingResume(false);
@@ -342,7 +345,7 @@ export default function App() {
       setActiveRecordId(data.id);
       setActiveCompanyName(data.company_name);
       fetchHistory();
-    } catch (err) {
+    } catch {
       setError('An error occurred. Check your connection or API limits.');
     } finally {
       setLoading(false); fetchUsage();
@@ -381,7 +384,7 @@ export default function App() {
       if (!res.ok) { setError(data.detail || `Error ${res.status}`); return; }
       setCoverLetter(data.cover_letter);
       setCoverLetterPath(data.cl_path || null);
-    } catch (err) {
+    } catch {
       setError('Failed to generate cover letter. The AI provider might be overloaded.');
     } finally {
       setGeneratingCL(false); fetchUsage();
@@ -399,7 +402,7 @@ export default function App() {
       }
       const data = await res.json();
       setHistoryCLModal({ cover_letter: data.cover_letter, cl_path: data.cl_path, company_name: companyName });
-    } catch (err) {
+    } catch {
       setError('Failed to generate cover letter.');
     } finally {
       setLoadingCLId(null);
@@ -445,7 +448,7 @@ export default function App() {
         } else {
           setBatchJobs(prev => prev.map((j, idx) => idx === i ? { ...j, status: 'done', result: data } : j));
         }
-      } catch (err) {
+      } catch {
         setBatchJobs(prev => prev.map((j, idx) => idx === i ? { ...j, status: 'error', error: 'Network error' } : j));
       }
       if (i < jds.length - 1) await new Promise(r => setTimeout(r, 2000));
@@ -471,11 +474,11 @@ export default function App() {
     try {
       const res = await fetch(`http://localhost:8000/api/history/${activeRecordId}/mail-draft`, { method: 'POST' });
       const data = await res.json();
-      if (!res.ok) { setError(data.detail || `Ollama error ${res.status} — make sure Ollama is running: ollama serve`); return; }
+      if (!res.ok) { setError(data.detail || `Mail draft error (${res.status})`); return; }
       setMailDraft(data);
       setDraftPath(null);
-    } catch (err) {
-      setError('Failed to generate mail draft. Make sure Ollama is running: ollama serve');
+    } catch {
+      setError('Failed to generate mail draft.');
     } finally {
       setGeneratingMail(false); fetchUsage();
     }
@@ -493,7 +496,7 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) { setError(data.detail || 'Save failed'); return; }
       setDraftPath(data.draft_path);
-    } catch (err) {
+    } catch {
       setError('Failed to save draft.');
     } finally {
       setSavingDraft(false);
@@ -514,7 +517,7 @@ export default function App() {
         if (data.cover_letter) { setCoverLetter(data.cover_letter); setCoverLetterPath(data.cl_path); }
         if (data.mail_draft) { setMailDraft(data.mail_draft); setDraftPath(data.draft_path); }
       }
-    } catch (_) {}
+    } catch { /* ignore */ }
     document.getElementById('panels-cl-mail')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
@@ -526,8 +529,8 @@ export default function App() {
       if (!res.ok) { setError(data.detail || `Error ${res.status}`); return; }
       setHistoryMailModal({ ...data, company_name: companyName, record_id: id });
       setHistoryDraftPath(null);
-    } catch (err) {
-      setError('Failed to generate mail draft. Make sure Ollama is running.');
+    } catch {
+      setError('Failed to generate mail draft.');
     } finally {
       setLoadingMailId(null);
     }
@@ -545,7 +548,7 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) { setError(data.detail || 'Save failed'); return; }
       setHistoryDraftPath(data.draft_path);
-    } catch (err) {
+    } catch {
       setError('Failed to save draft.');
     } finally {
       setHistoryDraftSaving(false);
@@ -895,7 +898,7 @@ export default function App() {
               <div className="panel-tag">
                 <span className="panel-num">04</span>
                 <span className="panel-title">Email Draft</span>
-                <span className="mail-ollama-badge" style={{ marginLeft: '0.5rem' }}>via Ollama</span>
+                <span className="mail-ollama-badge" style={{ marginLeft: '0.5rem' }}>via OpenAI</span>
                 {activeCompanyName && <span className="panel-active-co">{activeCompanyName}</span>}
               </div>
               {!activeRecordId ? (
@@ -1204,7 +1207,7 @@ export default function App() {
             <div className="cl-modal-header">
               <div className="mail-modal-title">
                 <span>Email Draft</span>
-                <span className="mail-ollama-badge">via Ollama</span>
+                <span className="mail-ollama-badge">via OpenAI</span>
               </div>
               <button className="cl-modal-close" onClick={() => { setHistoryMailModal(null); setCopiedField(null); setHistoryDraftPath(null); }}>×</button>
             </div>
