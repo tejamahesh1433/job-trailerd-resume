@@ -74,26 +74,33 @@ def analyze_resume(resume_text: str, jd_text: str) -> dict:
     }}
     """
     
-    try:
-        response = client.models.generate_content(
-            model='gemini-2.5-pro',
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.2
-            ),
-        )
-        usage = response.usage_metadata
-        if usage:
-            log_api_call("gemini-2.5-pro", "scan_resume",
-                         input_tokens=usage.prompt_token_count or 0,
-                         output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
-        else:
-            log_api_call("gemini-2.5-pro", "scan_resume", input_tokens=8000, output_tokens=500)
-        return json.loads(response.text)
-    except Exception as e:
-        print(f"Error during AI analysis: {e}")
-        raise RuntimeError(f"API Error: {str(e)}")
+    models_to_try = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash']
+    last_error = None
+    for model_name in models_to_try:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.2
+                ),
+            )
+            usage = response.usage_metadata
+            if usage:
+                log_api_call(model_name, "scan_resume",
+                             input_tokens=usage.prompt_token_count or 0,
+                             output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
+            else:
+                log_api_call(model_name, "scan_resume", input_tokens=8000, output_tokens=500)
+            return json.loads(response.text)
+        except Exception as e:
+            last_error = e
+            if "503" in str(e) or "UNAVAILABLE" in str(e) or "429" in str(e):
+                print(f"{model_name} unavailable, trying next model...")
+                continue
+            raise RuntimeError(f"API Error: {str(e)}")
+    raise RuntimeError(f"All models unavailable: {str(last_error)}")
 
 def generate_cover_letter(resume_text: str, jd_text: str, company_name: str) -> str:
     api_key = os.getenv("GEMINI_API_KEY")

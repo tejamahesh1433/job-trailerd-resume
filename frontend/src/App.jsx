@@ -93,7 +93,7 @@ export default function App() {
   const [loadingCLId, setLoadingCLId] = useState(null);
   const [historyCLModal, setHistoryCLModal] = useState(null);
   const [batchMode, setBatchMode] = useState(false);
-  const [batchText, setBatchText] = useState('');
+  const [batchJds, setBatchJds] = useState(['']);
   const [batchJobs, setBatchJobs] = useState([]);
   const [batchRunning, setBatchRunning] = useState(false);
   // History search / filter / pagination / sort
@@ -444,31 +444,34 @@ export default function App() {
       setError('Batch mode requires a stored base resume. Add one in Single Scan mode first.');
       return;
     }
-    const jds = batchText.split(/\n[ \t]*---[ \t]*\n/).map(j => j.trim()).filter(j => j.length > 50);
+    const jds = batchJds.map(j => j.trim()).filter(j => j.length > 50);
     if (jds.length === 0) {
-      setError('No valid JDs found. Separate multiple JDs with a line containing only ---');
+      setError('No valid JDs found. Each box needs at least 50 characters.');
       return;
     }
     setError(null);
-    setBatchJobs(jds.map((jd, i) => ({ id: i, jd, status: 'pending', result: null, error: null })));
+    setBatchJobs(jds.map((jd, i) => ({ id: i, jd, status: 'processing', result: null, error: null })));
     setBatchRunning(true);
-    for (let i = 0; i < jds.length; i++) {
-      setBatchJobs(prev => prev.map((j, idx) => idx === i ? { ...j, status: 'processing' } : j));
-      try {
-        const formData = new FormData();
-        formData.append('jd_text', jds[i]);
-        if (selectedResumeName) formData.append('selected_resume', selectedResumeName);
-        const res = await fetch('http://localhost:8000/api/scan', { method: 'POST', body: formData });
-        const data = await res.json();
-        if (!res.ok) {
-          setBatchJobs(prev => prev.map((j, idx) => idx === i ? { ...j, status: 'error', error: res.status === 429 ? 'Rate limit — wait and retry' : (data.detail || `Error ${res.status}`) } : j));
-        } else {
-          setBatchJobs(prev => prev.map((j, idx) => idx === i ? { ...j, status: 'done', result: data } : j));
-        }
-      } catch {
-        setBatchJobs(prev => prev.map((j, idx) => idx === i ? { ...j, status: 'error', error: 'Network error' } : j));
+    try {
+      const res = await fetch('http://localhost:8000/api/batch-scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jd_texts: jds, selected_resume: selectedResumeName }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.detail || `Batch error (${res.status})`);
+        setBatchJobs(prev => prev.map(j => ({ ...j, status: 'error', error: data.detail || 'Batch failed' })));
+      } else {
+        setBatchJobs(prev => prev.map((j, idx) => {
+          const r = data.results.find(x => x.index === idx);
+          if (!r) return { ...j, status: 'error', error: 'No result returned' };
+          if (r.skipped) return { ...j, status: 'skipped', error: r.reason };
+          return { ...j, status: 'done', result: r };
+        }));
       }
-      if (i < jds.length - 1) await new Promise(r => setTimeout(r, 2000));
+    } catch {
+      setBatchJobs(prev => prev.map(j => ({ ...j, status: 'error', error: 'Network error' })));
     }
     setBatchRunning(false);
     fetchHistory();
@@ -478,7 +481,15 @@ export default function App() {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = ev => setBatchText(ev.target.result || '');
+    reader.onload = ev => {
+      const text = ev.target.result || '';
+      const parts = text.split(/\n[ \t]*---[ \t]*\n/).map(j => j.trim()).filter(Boolean);
+      if (parts.length > 0) {
+        setBatchJds(parts.slice(0, 10));
+      } else {
+        setBatchJds([text]);
+      }
+    };
     reader.readAsText(file);
   };
 
@@ -1030,26 +1041,40 @@ export default function App() {
             )}
             <div className="batch-workspace">
               <div className="batch-input-col">
-                <label className="field-label">Job Descriptions</label>
-                <p className="batch-hint">Separate multiple JDs with a line containing only <span className="batch-sep">---</span></p>
-                <div className="textarea-wrap">
-                  <textarea
-                    className="field-textarea batch-textarea"
-                    placeholder={"Paste first JD here...\n\n---\n\nPaste second JD here...\n\n---\n\nAnd so on..."}
-                    value={batchText}
-                    onChange={e => setBatchText(e.target.value)}
-                    disabled={batchRunning}
-                  />
-                  {batchText.trim().length > 0 && (
-                    <span className="char-count">{batchText.split(/\n[ \t]*---[ \t]*\n/).filter(j => j.trim().length > 50).length} JDs detected</span>
-                  )}
+                <div className="batch-input-header">
+                  <label className="field-label" style={{ margin: 0 }}>Job Descriptions</label>
+                  <span className="batch-counter" style={batchJds.length >= 10 ? { color: '#ff6b6b' } : undefined}>{batchJds.filter(j => j.trim().length > 50).length} / 10 JDs</span>
                 </div>
+                <p className="batch-hint">Paste one JD per box · skips JDs requiring &gt;10 yrs experience</p>
+                <div className="batch-boxes">
+                  {batchJds.map((jd, idx) => (
+                    <div key={idx} className="batch-box">
+                      <div className="batch-box-header">
+                        <span className="batch-box-label">JD #{idx + 1}</span>
+                        {jd.trim().length > 0 && <span className="batch-box-chars">{jd.trim().length} chars</span>}
+                        {batchJds.length > 1 && (
+                          <button className="batch-box-remove" title="Remove" disabled={batchRunning} onClick={() => setBatchJds(prev => prev.filter((_, i) => i !== idx))}>✕</button>
+                        )}
+                      </div>
+                      <textarea
+                        className="field-textarea batch-box-textarea"
+                        placeholder={`Paste job description #${idx + 1} here...`}
+                        value={jd}
+                        onChange={e => setBatchJds(prev => prev.map((v, i) => i === idx ? e.target.value : v))}
+                        disabled={batchRunning}
+                      />
+                    </div>
+                  ))}
+                </div>
+                {batchJds.length < 10 && (
+                  <button className="batch-add-btn" onClick={() => setBatchJds(prev => [...prev, ''])} disabled={batchRunning}>+ Add JD</button>
+                )}
                 <div className="batch-btn-row">
                   <label className="batch-upload-label">
                     ↑ Upload .txt
                     <input type="file" accept=".txt,.text" onChange={handleBatchFileUpload} disabled={batchRunning} />
                   </label>
-                  <button className={`action-btn${batchRunning ? ' loading' : ''}`} onClick={handleBatchRun} disabled={batchRunning || !batchText.trim() || !selectedResumeName} style={{ flex: 2 }}>
+                  <button className={`action-btn${batchRunning ? ' loading' : ''}`} onClick={handleBatchRun} disabled={batchRunning || batchJds.every(j => j.trim().length <= 50) || !selectedResumeName} style={{ flex: 2 }}>
                     {batchRunning ? <span className="btn-loading"><span className="spin-icon">▶</span> Processing…</span> : '▶ Run Batch'}
                   </button>
                 </div>
@@ -1058,7 +1083,11 @@ export default function App() {
                 <div className="batch-results-col">
                   <div className="batch-results-header">
                     <span className="field-label" style={{ margin: 0 }}>Progress</span>
-                    <span className="batch-summary">{batchJobs.filter(j => j.status === 'done').length} / {batchJobs.length} complete</span>
+                    <span className="batch-summary">
+                      {batchJobs.filter(j => j.status === 'done').length} done
+                      {batchJobs.filter(j => j.status === 'skipped').length > 0 && ` · ${batchJobs.filter(j => j.status === 'skipped').length} skipped`}
+                      {' '}/ {batchJobs.length}
+                    </span>
                   </div>
                   <div className="batch-job-list">
                     {batchJobs.map((job, idx) => (
@@ -1067,6 +1096,7 @@ export default function App() {
                         <div className="batch-job-body">
                           <span className="batch-job-company">{job.result?.company_name || `JD #${idx + 1}`}</span>
                           {job.status === 'error' && <span className="batch-job-err">{job.error}</span>}
+                          {job.status === 'skipped' && <span className="batch-job-err" style={{ color: '#f0a500' }}>{job.error}</span>}
                         </div>
                         <div className="batch-job-meta">
                           {job.status === 'done' && <span className="batch-job-score" style={{ color: scoreAccent(job.result.score) }}>{job.result.score}%</span>}
@@ -1081,6 +1111,7 @@ export default function App() {
                           {job.status === 'pending' && <span className="batch-dot pending">○</span>}
                           {job.status === 'processing' && <span className="batch-dot processing spin-icon">▶</span>}
                           {job.status === 'done' && <span className="batch-dot done">✓</span>}
+                          {job.status === 'skipped' && <span className="batch-dot error" title="Skipped">⊘</span>}
                           {job.status === 'error' && <span className="batch-dot error">✕</span>}
                         </span>
                       </div>

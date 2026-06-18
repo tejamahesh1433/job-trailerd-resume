@@ -14,7 +14,8 @@ import json
 import logging
 import hashlib
 import sys
-from typing import Optional
+import time
+from typing import Optional, List
 from datetime import datetime
 from dotenv import load_dotenv
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -80,6 +81,10 @@ def _extract_company_name(jd_text: str) -> str:
         r'(?:Company|Employer|Organization|Firm|Client)(?:\s+Name)?[:\s]+([^\n]{2,60})',
         r'^([A-Z][A-Za-z0-9\s&.,\-]+?)\s+(?:is hiring|is looking|is seeking|seeks|are hiring)',
         r'(?:About|Join)\s+([A-Z][A-Za-z0-9\s&.,\-]{2,40}?)(?:\s*[\n:]|\s+is\b|\s+are\b)',
+        r'(?:at|@)\s+([A-Z][A-Za-z0-9\s&.\-]{2,40}?)(?:\s*[\n,.]|\s+in\b|\s+for\b|\s*$)',
+        r'(?:Role|Position|Title|Job)\s*(?:at|with|@|[-–])\s*([A-Z][A-Za-z0-9\s&.\-]{2,40})',
+        r'^([A-Z][A-Za-z0-9\s&.\-]{2,40}?)\s*[-–|]\s*(?:Job|Role|Position|Career|Hiring)',
+        r'(?:Location|Employer|Hiring\s+Company)[:\s]+([^\n]{2,60})',
     ]
     for pattern in company_patterns:
         m = re.search(pattern, jd_text, re.MULTILINE)
@@ -113,6 +118,13 @@ def _extract_company_name(jd_text: str) -> str:
         if domain.lower() not in _GENERIC_EMAIL and len(domain) > 2:
             return domain.replace('-', ' ').title()
 
+    # Priority 5: Any URL in the text (e.g. https://company.com/careers)
+    url_match = re.search(r'https?://(?:www\.)?([a-zA-Z0-9-]+)\.(?:com|io|org|co|net|ai)\b', jd_text, re.IGNORECASE)
+    if url_match:
+        domain = url_match.group(1).strip()
+        if domain.lower() not in _GENERIC_EMAIL and domain.lower() not in {'linkedin', 'indeed', 'glassdoor', 'ziprecruiter', 'lever', 'greenhouse', 'workday', 'icims', 'smartrecruiters', 'jobvite', 'google', 'apply'} and len(domain) > 2:
+            return domain.replace('-', ' ').title()
+
     return "Unknown_Company"
 
 def get_output_filename(filename_type: str, record_id: int = 0) -> str:
@@ -132,6 +144,37 @@ def get_output_filename(filename_type: str, record_id: int = 0) -> str:
 class StatusUpdate(BaseModel):
     status: str
 
+class BatchScanRequest(BaseModel):
+    jd_texts: List[str]
+    selected_resume: str
+
+def _extract_experience_years(jd_text: str) -> int:
+    """Extract the minimum years of experience required. For '10+' or '10-15', returns 10 (the starting number)."""
+    text_lower = jd_text.lower()
+    max_years = 0
+    range_pattern = r'(\d{1,2})\s*[\-–to]+\s*\d{1,2}\s*(?:years?|yrs?)(?:\s+of)?(?:\s+\w+){0,3}\s*(?:experience|exp\b)'
+    for m in re.finditer(range_pattern, text_lower):
+        years = int(m.group(1))
+        if 1 <= years <= 30:
+            max_years = max(max_years, years)
+    text_no_ranges = re.sub(r'\d{1,2}\s*[\-–to]+\s*\d{1,2}\s*(?:years?|yrs?)', '', text_lower)
+    patterns = [
+        r'(\d{1,2})\s*\+?\s*(?:years?|yrs?)(?:\s+of)?(?:\s+\w+){0,3}\s*(?:experience|exp\b|professional)',
+        r'(?:minimum|min\.?|at\s+least|over|requires?|must\s+have)\s*(\d{1,2})\s*\+?\s*(?:years?|yrs?)',
+        r'(?:experience|exp)\s*(?:required)?[:\s]+(\d{1,2})\s*\+?\s*(?:years?|yrs?)',
+        r'(\d{1,2})\s*\+?\s*(?:years?|yrs?)\s+(?:in\s+(?:the\s+)?(?:industry|field|role|domain|it\b|devops|cloud|software))',
+        r'(\d{1,2})\s*\+?\s*(?:years?|yrs?)\s+(?:working|hands[\-\s]on|relevant|total|overall|progressive)',
+    ]
+    for pattern in patterns:
+        for m in re.finditer(pattern, text_no_ranges):
+            years = int(m.group(1))
+            if 1 <= years <= 30:
+                max_years = max(max_years, years)
+    return max_years
+
+def _csv_header():
+    return ["Timestamp", "Company Name", "Before Score", "After Score", "Status", "Skip Reason", "Original Resume", "Tailored Resume", "JD Info", "Cover Letter", "Mail Draft", "Job Description"]
+
 def append_to_csv(company_name, jd_text, before_score, after_score, original_path, tailored_path):
     csv_file = os.path.join(DATA_DIR, "history.csv")
     file_exists = os.path.exists(csv_file)
@@ -139,12 +182,11 @@ def append_to_csv(company_name, jd_text, before_score, after_score, original_pat
     with open(csv_file, mode='a', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         if not file_exists:
-            writer.writerow(["Timestamp", "Company Name", "Before Score", "After Score", "Original Resume", "Tailored Resume", "JD Info", "Cover Letter", "Mail Draft", "Job Description"])
+            writer.writerow(_csv_header())
 
         abs_orig = os.path.abspath(original_path) if original_path else ""
         abs_tail = os.path.abspath(tailored_path) if tailored_path else ""
 
-        # Derive paths for other files assuming they are in the same folder as the tailored resume
         tail_dir = os.path.dirname(abs_tail) if abs_tail else ""
         abs_jd = os.path.join(tail_dir, "jd_info.txt") if tail_dir else ""
         abs_cl_search = [f for f in os.listdir(tail_dir) if f.startswith("cover_letter_")] if tail_dir and os.path.isdir(tail_dir) else []
@@ -153,7 +195,6 @@ def append_to_csv(company_name, jd_text, before_score, after_score, original_pat
         abs_cl = os.path.join(tail_dir, abs_cl_search[0]) if abs_cl_search else ""
         abs_mail = os.path.join(tail_dir, abs_mail_search[0]) if abs_mail_search else ""
 
-        # Format for Excel hyperlinks - sanitize CSV injection
         orig_link = f'=HYPERLINK("file:///{abs_orig.replace(chr(92), "/")}", "Open Original")' if abs_orig else "N/A"
         tail_link = f'=HYPERLINK("file:///{abs_tail.replace(chr(92), "/")}", "Open Tailored")' if abs_tail else "N/A"
         jd_link = f'=HYPERLINK("file:///{abs_jd.replace(chr(92), "/")}", "Open JD Info")' if abs_jd else "N/A"
@@ -165,12 +206,39 @@ def append_to_csv(company_name, jd_text, before_score, after_score, original_pat
             sanitize_csv_field(company_name),
             sanitize_csv_field(f"{before_score}%"),
             sanitize_csv_field(f"{after_score}%"),
+            "Processed",
+            "",
             orig_link,
             tail_link,
             jd_link,
             cl_link,
             mail_link,
-            sanitize_csv_field(jd_text[:1000])  # Limit JD length in CSV
+            sanitize_csv_field(jd_text[:1000])
+        ])
+
+def append_skipped_to_csv(jd_text, skip_reason):
+    csv_file = os.path.join(DATA_DIR, "history.csv")
+    file_exists = os.path.exists(csv_file)
+
+    with open(csv_file, mode='a', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(_csv_header())
+
+        company_name = _extract_company_name(jd_text) if len(jd_text) >= 50 else "Unknown"
+        writer.writerow([
+            sanitize_csv_field(datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            sanitize_csv_field(company_name),
+            "N/A",
+            "N/A",
+            "Skipped",
+            sanitize_csv_field(skip_reason),
+            "N/A",
+            "N/A",
+            "N/A",
+            "N/A",
+            "N/A",
+            sanitize_csv_field(jd_text[:1000])
         ])
 
 # Ensure output directory exists
@@ -425,17 +493,32 @@ async def scan_resume(request: Request, jd_text: str = Form(...), resume: Option
         jd_path = f"{company_dir}/jd_info.txt"
 
         replacements = result.get('replacements', [])
+        diff_path = f"{company_dir}/difference.txt"
+        
         if replacements:
             tailored_stream = create_tailored_docx(file_bytes, replacements)
             with open(file_path, "wb") as f:
                 f.write(tailored_stream.read())
             after_score = result.get('after_score', score)
             logger.info(f"Applied {len(replacements)} replacements for {company_name}")
+            
+            # Write the difference file
+            with open(diff_path, "w", encoding="utf-8") as f:
+                f.write(f"Resume Tailoring Differences for {company_name}\n")
+                f.write("=" * 60 + "\n\n")
+                for i, rep in enumerate(replacements, 1):
+                    f.write(f"--- REPLACEMENT #{i} ---\n")
+                    f.write(f"REMOVED:\n{rep.get('original', 'N/A')}\n\n")
+                    f.write(f"ADDED:\n{rep.get('new', 'N/A')}\n")
+                    f.write("=" * 60 + "\n\n")
         else:
             with open(file_path, "wb") as f:
                 f.write(file_bytes)
             after_score = score
             logger.info(f"No replacements needed for {company_name} (score: {score})")
+            
+            with open(diff_path, "w", encoding="utf-8") as f:
+                f.write("No changes were needed. The resume already matched the job description well.\n")
 
         contact_info = result.get('contact_info', {})
         with open(jd_path, "w", encoding="utf-8") as f:
@@ -475,6 +558,173 @@ async def scan_resume(request: Request, jd_text: str = Form(...), resume: Option
     except Exception as e:
         logger.error(f"Scan resume error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to process resume. Please try again later.")
+
+def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str) -> dict:
+    resume_text = extract_text_from_docx(file_bytes)
+
+    all_history = get_all_resumes(limit=1000)
+    best_match = None
+    best_cached_ratio = 0.0
+    for item in all_history:
+        if not item.get('file_path') or not os.path.exists(item['file_path']):
+            continue
+        ratio = difflib.SequenceMatcher(None, jd_text, item.get('jd_text', '')).ratio()
+        if ratio > best_cached_ratio:
+            best_cached_ratio = ratio
+            best_match = item
+
+    if best_match and best_cached_ratio >= 0.80 and best_match.get('score', 0) >= 85:
+        company_name = _extract_company_name(jd_text)
+        safe_company_name = "".join([c for c in company_name if c.isalpha() or c.isdigit() or c == ' ']).strip()
+        if not safe_company_name:
+            safe_company_name = "Company"
+        company_dir = f"trailerd/{safe_company_name.replace(' ', '_')}"
+        os.makedirs(company_dir, exist_ok=True)
+        file_path = f"{company_dir}/resume.docx"
+        jd_path = f"{company_dir}/jd_info.txt"
+        if os.path.abspath(best_match['file_path']).lower() != os.path.abspath(file_path).lower():
+            shutil.copy(best_match['file_path'], file_path)
+        with open(jd_path, "w", encoding="utf-8") as f:
+            f.write("Job Description:\n")
+            f.write(jd_text)
+        record_id = save_resume_record(company_name, jd_text, best_match['score'], file_path)
+        append_to_csv(company_name, jd_text, best_match['score'], best_match['score'], original_filename, file_path)
+        return {
+            "id": record_id, "score": best_match['score'], "after_score": best_match['score'],
+            "company_name": company_name, "file_path": file_path, "missing_keywords": [],
+            "section_scores": {}, "contact_info": {}, "replacements": [], "tailored": False
+        }
+
+    result = None
+    for attempt in range(3):
+        try:
+            result = analyze_resume(resume_text, jd_text)
+            break
+        except RuntimeError as e:
+            if attempt < 2 and ("503" in str(e) or "UNAVAILABLE" in str(e) or "429" in str(e) or "All models" in str(e)):
+                wait = (attempt + 1) * 10
+                logger.warning(f"AI unavailable (attempt {attempt + 1}/3), retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                raise
+    if result is None:
+        raise RuntimeError("AI unavailable after 3 attempts")
+    score = result.get('score', 0)
+    ai_company = result.get('company_name', '')
+    local_company = _extract_company_name(jd_text)
+    if ai_company and ai_company not in ('Unknown_Company', 'Unknown', ''):
+        company_name = ai_company
+    elif local_company != 'Unknown_Company':
+        company_name = local_company
+    else:
+        company_name = ai_company or local_company
+    safe_company_name = "".join([c for c in company_name if c.isalpha() or c.isdigit() or c == ' ']).strip()
+    company_dir = f"trailerd/{safe_company_name.replace(' ', '_')}"
+    os.makedirs(company_dir, exist_ok=True)
+    file_path = f"{company_dir}/resume.docx"
+    jd_path = f"{company_dir}/jd_info.txt"
+
+    replacements = result.get('replacements', [])
+    if replacements:
+        tailored_stream = create_tailored_docx(file_bytes, replacements)
+        with open(file_path, "wb") as f:
+            f.write(tailored_stream.read())
+        after_score = result.get('after_score', score)
+    else:
+        with open(file_path, "wb") as f:
+            f.write(file_bytes)
+        after_score = score
+
+    contact_info = result.get('contact_info', {})
+    with open(jd_path, "w", encoding="utf-8") as f:
+        f.write("Contact Info:\n")
+        f.write(f"Name: {contact_info.get('name', 'N/A')}\n")
+        f.write(f"Email: {contact_info.get('email', 'N/A')}\n")
+        f.write(f"Phone: {contact_info.get('phone', 'N/A')}\n\n")
+        f.write("Job Description:\n")
+        f.write(jd_text)
+
+    existing = find_existing_company(company_name)
+    scan_data = {
+        "score": score, "after_score": after_score,
+        "missing_keywords": result.get('missing_keywords', []),
+        "section_scores": result.get('section_scores', {}),
+        "contact_info": contact_info, "replacements": replacements,
+    }
+    record_id = save_resume_record(company_name, jd_text, after_score, file_path, json.dumps(scan_data))
+    append_to_csv(company_name, jd_text, score, after_score, original_filename, file_path)
+    return {
+        "id": record_id, "company_name": company_name, "file_path": file_path,
+        "tailored": len(replacements) > 0, "duplicate": existing is not None,
+        "previous_score": existing['score'] if existing else None, **scan_data,
+    }
+
+@app.post("/api/batch-scan")
+@limiter.limit("3/minute")
+async def batch_scan(request: Request, body: BatchScanRequest):
+    try:
+        if len(body.jd_texts) > 10:
+            raise HTTPException(status_code=400, detail="Maximum 10 JDs per batch")
+        if len(body.jd_texts) == 0:
+            raise HTTPException(status_code=400, detail="No JDs provided")
+
+        safe = os.path.basename(body.selected_resume)
+        resume_path = os.path.join("original", safe)
+        abs_path = os.path.abspath(resume_path)
+        abs_base = os.path.abspath("original")
+        if not abs_path.startswith(abs_base):
+            raise HTTPException(status_code=400, detail="Resume not found")
+        if not os.path.exists(resume_path):
+            raise HTTPException(status_code=400, detail="Resume not found")
+        if os.path.getsize(resume_path) > 5 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="Resume file too large")
+
+        with open(resume_path, "rb") as f:
+            file_bytes = f.read()
+
+        results = []
+
+        for idx, jd_text in enumerate(body.jd_texts):
+            if not jd_text or len(jd_text) < 50:
+                reason = "JD too short (min 50 chars)"
+                results.append({"index": idx, "skipped": True, "reason": reason})
+                append_skipped_to_csv(jd_text or "", reason)
+                continue
+            if len(jd_text) > 50000:
+                reason = "JD too long (max 50000 chars)"
+                results.append({"index": idx, "skipped": True, "reason": reason})
+                append_skipped_to_csv(jd_text[:50000], reason)
+                continue
+
+            years = _extract_experience_years(jd_text)
+            if years > 10:
+                reason = f"Requires {years}+ years experience (max allowed: 10)"
+                results.append({"index": idx, "skipped": True, "reason": reason})
+                append_skipped_to_csv(jd_text, reason)
+                continue
+
+            try:
+                result = _process_single_jd(jd_text, file_bytes, resume_path)
+                result["index"] = idx
+                result["skipped"] = False
+                results.append(result)
+                logger.info(f"Batch JD #{idx + 1} done: {result.get('company_name', 'Unknown')}")
+            except Exception as e:
+                logger.error(f"Batch scan error for JD #{idx}: {e}", exc_info=True)
+                reason = f"Processing failed: {str(e)}"
+                results.append({"index": idx, "skipped": True, "reason": reason})
+                append_skipped_to_csv(jd_text, reason)
+
+            if idx < len(body.jd_texts) - 1:
+                time.sleep(2)
+        logger.info(f"Batch scan completed: {len(body.jd_texts)} JDs, {sum(1 for r in results if not r.get('skipped'))} processed, {sum(1 for r in results if r.get('skipped'))} skipped")
+        return {"results": results, "total": len(body.jd_texts), "processed": sum(1 for r in results if not r.get('skipped')), "skipped": sum(1 for r in results if r.get('skipped'))}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Batch scan error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Batch processing failed. Please try again later.")
 
 @app.get("/api/history")
 @limiter.limit("60/minute")
