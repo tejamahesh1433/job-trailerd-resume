@@ -78,6 +78,7 @@ const HISTORY_PAGE_SIZE = 20;
 
 export default function App() {
   const [jdText, setJdText] = useState('');
+  const [aiNotes, setAiNotes] = useState('');
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [history, setHistory] = useState([]);
@@ -132,6 +133,18 @@ export default function App() {
   const [gmailEmail, setGmailEmail] = useState('');
   const [savingToGmail, setSavingToGmail] = useState(false);
   const [gmailSaved, setGmailSaved] = useState(false);
+  // Follow-up mail
+  const [followUpEmail, setFollowUpEmail] = useState('');
+  const [followUpDraft, setFollowUpDraft] = useState(null);
+  const [generatingFollowUp, setGeneratingFollowUp] = useState(false);
+  const [savingFollowUp, setSavingFollowUp] = useState(false);
+  const [followUpGmailSaved, setFollowUpGmailSaved] = useState(false);
+  const [inboxMessages, setInboxMessages] = useState([]);
+  const [inboxLoading, setInboxLoading] = useState(false);
+  const [inboxOpen, setInboxOpen] = useState(false);
+  const [inboxSearch, setInboxSearch] = useState('');
+  const [selectedMsgId, setSelectedMsgId] = useState(null);
+  const [loadingMsgId, setLoadingMsgId] = useState(null);
 
   const fetchResumes = async () => {
     try {
@@ -347,6 +360,7 @@ export default function App() {
     setDraftPath(null);
     const formData = new FormData();
     formData.append('jd_text', jdText);
+    if (aiNotes.trim()) formData.append('ai_notes', aiNotes.trim());
     if (selectedResumeName) formData.append('selected_resume', selectedResumeName);
     try {
       const res = await fetch('http://localhost:8000/api/scan', { method: 'POST', body: formData });
@@ -371,6 +385,7 @@ export default function App() {
 
   const handleReset = () => {
     setJdText('');
+    setAiNotes('');
     setResult(null);
     setError(null);
     setCoverLetter(null);
@@ -379,6 +394,11 @@ export default function App() {
     setDraftPath(null);
     setActiveRecordId(null);
     setActiveCompanyName(null);
+    setFollowUpEmail('');
+    setFollowUpDraft(null);
+    setInboxMessages([]);
+    setInboxOpen(false);
+    setSelectedMsgId(null);
   };
 
   const handleDeleteHistory = async (id) => {
@@ -456,7 +476,7 @@ export default function App() {
       const res = await fetch('http://localhost:8000/api/batch-scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jd_texts: jds, selected_resume: selectedResumeName }),
+        body: JSON.stringify({ jd_texts: jds, selected_resume: selectedResumeName, ai_notes: aiNotes.trim() || undefined }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -538,6 +558,11 @@ export default function App() {
     setCoverLetterPath(null);
     setMailDraft(null);
     setDraftPath(null);
+    setFollowUpEmail('');
+    setFollowUpDraft(null);
+    setInboxMessages([]);
+    setInboxOpen(false);
+    setSelectedMsgId(null);
 
     // Populate Post-Production panel with this record's stored scan data
     const sr = item.scan_result || {};
@@ -603,6 +628,87 @@ export default function App() {
       setError('Failed to save draft.');
     } finally {
       setHistoryDraftSaving(false);
+    }
+  };
+
+  const handleFetchInbox = async (query) => {
+    setInboxLoading(true);
+    try {
+      const q = query || inboxSearch || (activeCompanyName ? activeCompanyName : '');
+      const res = await fetch(`http://localhost:8000/api/gmail/inbox?q=${encodeURIComponent(q)}`);
+      const data = await res.json();
+      if (res.ok) setInboxMessages(data.messages || []);
+      else setError(data.detail || 'Failed to fetch inbox');
+    } catch {
+      setError('Failed to fetch inbox.');
+    } finally {
+      setInboxLoading(false);
+    }
+  };
+
+  const handleSelectInboxMsg = async (msgId) => {
+    setLoadingMsgId(msgId);
+    try {
+      const res = await fetch(`http://localhost:8000/api/gmail/message/${msgId}`);
+      const data = await res.json();
+      if (res.ok) {
+        setFollowUpEmail(data.body || '');
+        setSelectedMsgId(msgId);
+        setInboxOpen(false);
+      } else {
+        setError(data.detail || 'Failed to read message');
+      }
+    } catch {
+      setError('Failed to read message.');
+    } finally {
+      setLoadingMsgId(null);
+    }
+  };
+
+  const handleGenerateFollowUp = async () => {
+    if (!activeRecordId) { setError('Select a company first.'); return; }
+    if (!followUpEmail.trim()) { setError('Paste or select the received email first.'); return; }
+    setGeneratingFollowUp(true);
+    setError(null);
+    try {
+      const res = await fetch(`http://localhost:8000/api/history/${activeRecordId}/follow-up`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ received_email: followUpEmail }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data.detail || `Error ${res.status}`); return; }
+      setFollowUpDraft(data);
+    } catch {
+      setError('Failed to generate follow-up.');
+    } finally {
+      setGeneratingFollowUp(false); fetchUsage();
+    }
+  };
+
+  const handleSaveFollowUpToGmail = async () => {
+    if (!followUpDraft || !activeRecordId) return;
+    setSavingFollowUp(true);
+    setFollowUpGmailSaved(false);
+    try {
+      const res = await fetch('http://localhost:8000/api/gmail/save-draft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to_emails: followUpDraft.to_emails || [],
+          subject: followUpDraft.subject,
+          body: followUpDraft.body,
+          record_id: activeRecordId,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data.detail || 'Failed to save to Gmail'); return; }
+      setFollowUpGmailSaved(true);
+      setTimeout(() => setFollowUpGmailSaved(false), 5000);
+    } catch {
+      setError('Failed to save follow-up to Gmail.');
+    } finally {
+      setSavingFollowUp(false);
     }
   };
 
@@ -719,6 +825,17 @@ export default function App() {
             </div>
 
             {error && <div className="error-banner">⚠ {error}</div>}
+
+            <div className="field">
+              <label className="field-label">AI Notes <span style={{ fontWeight: 400, opacity: 0.5 }}>(optional)</span></label>
+              <textarea
+                className="field-textarea ai-notes-textarea"
+                placeholder="e.g. Keep ATS score 100, focus on Kubernetes experience, emphasize CI/CD pipelines…"
+                value={aiNotes}
+                onChange={e => setAiNotes(e.target.value)}
+                rows={2}
+              />
+            </div>
 
             <div className="field">
               <label className="field-label">Job Description</label>
@@ -1028,11 +1145,123 @@ export default function App() {
             </div>
           </div>
 
+        {/* ── Follow-Up Mail ── */}
+        <div className="panel panel-wide panel-enter" style={{ animationDelay: '140ms' }}>
+          <div className="panel-tag">
+            <span className="panel-num">05</span>
+            <span className="panel-title">Follow-Up</span>
+            <span className="mail-ollama-badge" style={{ marginLeft: '0.5rem' }}>via OpenAI</span>
+            {activeCompanyName && <span className="panel-active-co">{activeCompanyName}</span>}
+          </div>
+          {!activeRecordId ? (
+            <p className="panel-placeholder">Run a scan or click a company name in the Production Log.</p>
+          ) : (
+            <div className="follow-up-section">
+              <div className="follow-up-input">
+                <label className="field-label">Received Email</label>
+                {gmailConnected && (
+                  <div className="inbox-picker">
+                    <button className="inbox-toggle-btn" onClick={() => { if (!inboxOpen) { handleFetchInbox(activeCompanyName || ''); } setInboxOpen(o => !o); }}>
+                      {inboxOpen ? '▾ Hide Inbox' : '▸ Select from Gmail'}
+                    </button>
+                    {inboxOpen && (
+                      <div className="inbox-dropdown">
+                        <div className="inbox-search-row">
+                          <input
+                            type="text"
+                            className="inbox-search-input"
+                            placeholder="Search inbox…"
+                            value={inboxSearch}
+                            onChange={e => setInboxSearch(e.target.value)}
+                            onKeyDown={e => { if (e.key === 'Enter') handleFetchInbox(inboxSearch); }}
+                          />
+                          <button className="inbox-search-btn" onClick={() => handleFetchInbox(inboxSearch)} disabled={inboxLoading}>
+                            {inboxLoading ? '…' : '⌕'}
+                          </button>
+                        </div>
+                        {inboxMessages.length === 0 && !inboxLoading && <p className="inbox-empty">No messages found</p>}
+                        <div className="inbox-list">
+                          {inboxMessages.map(msg => (
+                            <button
+                              key={msg.id}
+                              className={`inbox-msg${selectedMsgId === msg.id ? ' selected' : ''}`}
+                              onClick={() => handleSelectInboxMsg(msg.id)}
+                              disabled={loadingMsgId === msg.id}
+                            >
+                              <span className="inbox-msg-from">{msg.from?.replace(/<.*>/, '').trim() || 'Unknown'}</span>
+                              <span className="inbox-msg-subject">{msg.subject || '(no subject)'}</span>
+                              <span className="inbox-msg-snippet">{msg.snippet}</span>
+                              {loadingMsgId === msg.id && <span className="inbox-msg-loading">Loading…</span>}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+                <textarea
+                  className="field-textarea follow-up-textarea"
+                  placeholder="Paste the email you received from the company here, or select one from Gmail above…"
+                  value={followUpEmail}
+                  onChange={e => setFollowUpEmail(e.target.value)}
+                  rows={5}
+                />
+              </div>
+              <button className="action-btn" onClick={handleGenerateFollowUp} disabled={generatingFollowUp || !followUpEmail.trim()} style={{ marginTop: '0.5rem' }}>
+                {generatingFollowUp ? <span className="btn-loading"><span className="spin-icon">▶</span> Generating…</span> : '▶ Generate Follow-Up'}
+              </button>
+              {followUpDraft && (
+                <div className="mail-draft-section" style={{ marginTop: '1rem' }}>
+                  <div className="mail-draft-body">
+                    {followUpDraft.to_emails?.length > 0 && (
+                      <div className="mail-field">
+                        <span className="mail-field-label">To</span>
+                        <div className="mail-to-chips">
+                          {followUpDraft.to_emails.map((email, i) => <span key={i} className="mail-to-chip">{email}</span>)}
+                        </div>
+                      </div>
+                    )}
+                    <div className="mail-field">
+                      <span className="mail-field-label">Subject</span>
+                      <div className="mail-subject-text">{followUpDraft.subject}</div>
+                    </div>
+                    <div className="mail-field">
+                      <span className="mail-field-label">Body</span>
+                      <div className="mail-body-text">{followUpDraft.body}</div>
+                    </div>
+                  </div>
+                  <div className="mail-draft-actions">
+                    <button className="mail-act-btn" onClick={() => {
+                      const full = `Subject: ${followUpDraft.subject}\n\n${followUpDraft.body}`;
+                      navigator.clipboard.writeText(full); setCopiedField('fu'); setTimeout(() => setCopiedField(null), 2000);
+                    }}>
+                      {copiedField === 'fu' ? '✓ Copied' : '↑ Copy All'}
+                    </button>
+                    {followUpDraft.to_emails?.length > 0 && (
+                      <a
+                        href={`mailto:${followUpDraft.to_emails.join(',')}?subject=${encodeURIComponent(followUpDraft.subject)}&body=${encodeURIComponent(followUpDraft.body)}`}
+                        className="mail-act-btn mail-mailto-btn"
+                      >
+                        ✉ Open in Mail App
+                      </a>
+                    )}
+                    {gmailConnected && (
+                      <button className="mail-act-btn mail-gmail-btn" onClick={handleSaveFollowUpToGmail} disabled={savingFollowUp}>
+                        {savingFollowUp ? '…' : followUpGmailSaved ? '✓ Saved to Gmail' : '✉ Save to Gmail Drafts'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
         {/* ── Batch Mode ── */}
         {batchMode && (
           <div className="panel panel-wide panel-enter">
             <div className="panel-tag">
-              <span className="panel-num">04</span>
+              <span className="panel-num">05</span>
               <span className="panel-title">Batch Production</span>
             </div>
             {error && <div className="error-banner">⚠ {error}</div>}
@@ -1127,7 +1356,7 @@ export default function App() {
         <div className="panel panel-wide panel-enter" style={{ animationDelay: '160ms' }}>
           <div className="panel-top-row">
             <div className="panel-tag inline">
-              <span className="panel-num">05</span>
+              <span className="panel-num">06</span>
               <span className="panel-title">Production Log</span>
             </div>
             {history.length > 0 && (

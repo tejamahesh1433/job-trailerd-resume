@@ -24,7 +24,7 @@ from slowapi.errors import RateLimitExceeded
 
 from fastapi.responses import RedirectResponse
 from services.ai_service import analyze_resume, generate_cover_letter
-from services.ollama_service import generate_mail_draft
+from services.ollama_service import generate_mail_draft, generate_follow_up
 from services.docx_service import extract_text_from_docx, create_tailored_docx
 from services import gmail_service
 from services.profile_service import process_uploaded_doc
@@ -68,6 +68,28 @@ _TECH_TOOLS = {
     "heroku", "vercel", "netlify", "firebase", "supabase",
 }
 
+_JOB_TITLE_WORDS = {
+    "senior", "junior", "lead", "staff", "principal", "manager", "director",
+    "engineer", "developer", "architect", "analyst", "administrator", "admin",
+    "devops", "sre", "cloud", "software", "platform", "infrastructure",
+    "backend", "frontend", "full stack", "fullstack", "remote", "hybrid",
+    "onsite", "contract", "full time", "part time", "position", "role",
+    "job description", "job title", "responsibilities", "requirements",
+    "qualifications", "experience", "we are looking", "about the role",
+}
+
+def _is_valid_company_name(name: str) -> bool:
+    """Filter out names that are job titles, tech tools, or generic words."""
+    lower = name.lower().strip()
+    if len(lower) < 3 or len(lower) > 60:
+        return False
+    if lower in _TECH_TOOLS:
+        return False
+    words = set(lower.split())
+    if words & _JOB_TITLE_WORDS and len(words - _JOB_TITLE_WORDS) == 0:
+        return False
+    return True
+
 def _extract_company_name(jd_text: str) -> str:
     """Best-effort local extraction of company name — no API call.
     Searches the ENTIRE JD text including signatures at the bottom."""
@@ -78,31 +100,31 @@ def _extract_company_name(jd_text: str) -> str:
 
     # Priority 1: Look for explicit company name lines (often near signatures)
     company_patterns = [
-        r'(?:Company|Employer|Organization|Firm|Client)(?:\s+Name)?[:\s]+([^\n]{2,60})',
-        r'^([A-Z][A-Za-z0-9\s&.,\-]+?)\s+(?:is hiring|is looking|is seeking|seeks|are hiring)',
-        r'(?:About|Join)\s+([A-Z][A-Za-z0-9\s&.,\-]{2,40}?)(?:\s*[\n:]|\s+is\b|\s+are\b)',
+        r'(?:Company|Employer|Organization|Firm|Client|Hiring\s+Company)(?:\s+Name)?[:\s]+([^\n]{2,60})',
+        r'^([A-Z][A-Za-z0-9\s&.,\-]+?)\s+(?:is hiring|is looking|is seeking|seeks|are hiring|has an opening)',
+        r'(?:About|Join|Work\s+at|Working\s+at)\s+([A-Z][A-Za-z0-9\s&.,\-]{2,40}?)(?:\s*[\n:]|\s+is\b|\s+are\b)',
         r'(?:at|@)\s+([A-Z][A-Za-z0-9\s&.\-]{2,40}?)(?:\s*[\n,.]|\s+in\b|\s+for\b|\s*$)',
-        r'(?:Role|Position|Title|Job)\s*(?:at|with|@|[-–])\s*([A-Z][A-Za-z0-9\s&.\-]{2,40})',
-        r'^([A-Z][A-Za-z0-9\s&.\-]{2,40}?)\s*[-–|]\s*(?:Job|Role|Position|Career|Hiring)',
+        r'(?:Role|Position|Title|Job|Opportunity)\s*(?:at|with|@|[-–])\s*([A-Z][A-Za-z0-9\s&.\-]{2,40})',
+        r'^([A-Z][A-Za-z0-9\s&.\-]{2,40}?)\s*[-–|]\s*(?:Job|Role|Position|Career|Hiring|Opening)',
         r'(?:Location|Employer|Hiring\s+Company)[:\s]+([^\n]{2,60})',
+        r'(?:on behalf of|client|end[\s-]?client)[:\s]+([^\n]{2,60})',
     ]
     for pattern in company_patterns:
-        m = re.search(pattern, jd_text, re.MULTILINE)
+        m = re.search(pattern, jd_text, re.MULTILINE | re.IGNORECASE)
         if m:
             name = m.group(1).strip().strip('.,')
-            if 2 < len(name) < 60 and name.lower() not in _TECH_TOOLS:
+            if _is_valid_company_name(name):
                 return name
 
     # Priority 2: Extract from "Company Inc/LLC/Ltd/Corp" patterns anywhere in text
-    # Search line by line to avoid cross-line matches
     for line in jd_text.split('\n'):
         corp_match = re.search(
-            r'([A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+)*)\s+(?:Inc\.?|LLC|Ltd\.?|Corp\.?|Corporation|Pvt|Private|Limited|Group|Consulting|Solutions|Technologies|Services)',
+            r'([A-Z][A-Za-z0-9]+(?:[\s&]+[A-Z][A-Za-z0-9]+)*)\s+(?:Inc\.?|LLC|Ltd\.?|Corp\.?|Corporation|Pvt\.?|Private|Limited|Group|Consulting|Solutions|Technologies|Services|Staffing|Partners|Associates)',
             line.strip()
         )
         if corp_match:
             name = corp_match.group(0).strip().strip('.,')
-            if name.lower() not in _TECH_TOOLS and len(name) < 60:
+            if _is_valid_company_name(name):
                 return name
 
     # Priority 3: Extract from email domain (search ALL emails in the JD)
@@ -112,20 +134,45 @@ def _extract_company_name(jd_text: str) -> str:
             return domain.replace('-', ' ').title()
 
     # Priority 4: Look for "Web: www.company.com" or website patterns near signatures
-    web_match = re.search(r'(?:Web|Website|URL)[:\s]+(?:https?://)?(?:www\.)?([a-zA-Z0-9-]+)\.\w{2,}', jd_text, re.IGNORECASE)
+    web_match = re.search(r'(?:Web|Website|URL|Visit\s+us)[:\s]+(?:https?://)?(?:www\.)?([a-zA-Z0-9-]+)\.\w{2,}', jd_text, re.IGNORECASE)
     if web_match:
         domain = web_match.group(1).strip()
         if domain.lower() not in _GENERIC_EMAIL and len(domain) > 2:
             return domain.replace('-', ' ').title()
 
     # Priority 5: Any URL in the text (e.g. https://company.com/careers)
+    _URL_BLACKLIST = {'linkedin', 'indeed', 'glassdoor', 'ziprecruiter', 'lever',
+                      'greenhouse', 'workday', 'icims', 'smartrecruiters', 'jobvite',
+                      'google', 'apply', 'dice', 'monster', 'careerbuilder', 'hired',
+                      'angel', 'wellfound', 'simplyhired', 'recruiter', 'zoom', 'teams'}
     url_match = re.search(r'https?://(?:www\.)?([a-zA-Z0-9-]+)\.(?:com|io|org|co|net|ai)\b', jd_text, re.IGNORECASE)
     if url_match:
         domain = url_match.group(1).strip()
-        if domain.lower() not in _GENERIC_EMAIL and domain.lower() not in {'linkedin', 'indeed', 'glassdoor', 'ziprecruiter', 'lever', 'greenhouse', 'workday', 'icims', 'smartrecruiters', 'jobvite', 'google', 'apply'} and len(domain) > 2:
+        if domain.lower() not in _GENERIC_EMAIL and domain.lower() not in _URL_BLACKLIST and len(domain) > 2:
             return domain.replace('-', ' ').title()
 
+    # Priority 6: Phone number with company signature — look for a name on the line before a phone
+    lines = jd_text.strip().split('\n')
+    for i, line in enumerate(lines):
+        if re.search(r'\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}', line):
+            if i > 0:
+                prev = lines[i - 1].strip()
+                if prev and len(prev) < 50 and not re.match(r'^[\d(+]', prev):
+                    candidate = re.sub(r'[,|–\-].*$', '', prev).strip()
+                    if _is_valid_company_name(candidate) and not re.search(r'@', candidate):
+                        return candidate
+
     return "Unknown_Company"
+
+def _make_company_dir(company_name: str) -> str:
+    """Build a unique trailerd/<company> directory path. Appends a short hash for Unknown_Company to avoid collisions."""
+    safe = "".join([c for c in company_name if c.isalpha() or c.isdigit() or c == ' ']).strip()
+    if not safe or safe in ("Unknown Company", "UnknownCompany", "Unknown"):
+        ts_hash = hashlib.sha256(str(datetime.now().timestamp()).encode()).hexdigest()[:6]
+        safe = f"Unknown_{ts_hash}"
+    company_dir = f"trailerd/{safe.replace(' ', '_')}"
+    os.makedirs(company_dir, exist_ok=True)
+    return company_dir
 
 def get_output_filename(filename_type: str, record_id: int = 0) -> str:
     """Generate non-revealing output filenames using record ID hash."""
@@ -147,6 +194,7 @@ class StatusUpdate(BaseModel):
 class BatchScanRequest(BaseModel):
     jd_texts: List[str]
     selected_resume: str
+    ai_notes: Optional[str] = None
 
 def _extract_experience_years(jd_text: str) -> int:
     """Extract the minimum years of experience required. For '10+' or '10-15', returns 10 (the starting number)."""
@@ -171,6 +219,63 @@ def _extract_experience_years(jd_text: str) -> int:
             if 1 <= years <= 30:
                 max_years = max(max_years, years)
     return max_years
+
+def _check_lead_role(jd_text: str) -> str | None:
+    """Return a skip reason if the JD is for a lead-level position, else None."""
+    text_lower = jd_text.lower()
+    patterns = [
+        r'\blead\s+sre\b',
+        r'\blead\s+devops\b',
+        r'\blead\s+(?:site\s+reliability)\b',
+        r'\blead\s+(?:software|platform|cloud|infrastructure|systems?|backend|frontend|full[\s-]?stack)\s+engineer\b',
+        r'\blead\s+(?:developer|architect|admin|administrator)\b',
+        r'\b(?:sre|devops|software|platform|cloud|infrastructure|engineering)\s+lead\b',
+        r'\btechnical\s+lead\b',
+        r'\btech\s+lead\b',
+        r'\bteam\s+lead\b',
+    ]
+    for pattern in patterns:
+        if re.search(pattern, text_lower):
+            return "JD is for a lead-level position — skipping"
+    return None
+
+def _check_visa_eligibility(jd_text: str) -> str | None:
+    """Return a skip reason if the JD is not GC-friendly, else None."""
+    text_lower = jd_text.lower()
+
+    explicit_exclusions = [
+        r'\bno\s+green\s*card\b',
+        r'\bno\s+gc\b',
+        r'\bfake\s+gc\b',
+        r'\bfake\s+green\s*card\b',
+        r'\bgc\s+not\s+accepted\b',
+        r'\bgreen\s*card\s+not\s+accepted\b',
+    ]
+    for pattern in explicit_exclusions:
+        if re.search(pattern, text_lower):
+            return "JD explicitly excludes green card holders"
+
+    gc_patterns = [
+        r'\bgreen\s*card\b', r'\bgc\b', r'\bpermanent\s+resident\b',
+        r'\bpermanent\s+residency\b', r'\busc\b', r'\bus\s+citizen\b',
+        r'\bcitizen\b',
+    ]
+    other_visa_patterns = [
+        r'\bh[- ]?1b\b', r'\bh[- ]?1\b', r'\bopt\b', r'\bcpt\b',
+        r'\btn\s+visa\b', r'\btn\b', r'\bl[- ]?1\b', r'\bl[- ]?2\b',
+        r'\be[- ]?2\b', r'\be[- ]?3\b', r'\bo[- ]?1\b',
+        r'\bf[- ]?1\b', r'\bj[- ]?1\b', r'\bead\b', r'\bwork\s+permit\b',
+        r'\bsponsorship\b', r'\bvisa\s+sponsor\b', r'\bw2\s+only\b',
+        r'\bc2c\b', r'\bcorp[\s-]to[\s-]corp\b', r'\b1099\b',
+    ]
+
+    has_gc = any(re.search(p, text_lower) for p in gc_patterns)
+    has_other = any(re.search(p, text_lower) for p in other_visa_patterns)
+
+    if has_other and not has_gc:
+        return "JD mentions other visa types but not green card — skipping"
+
+    return None
 
 def _csv_header():
     return ["Timestamp", "Company Name", "Before Score", "After Score", "Status", "Skip Reason", "Original Resume", "Tailored Resume", "JD Info", "Cover Letter", "Mail Draft", "Job Description"]
@@ -373,11 +478,31 @@ async def delete_named_resume(request: Request, filename: str):
 
 @app.post("/api/scan")
 @limiter.limit("10/minute")
-async def scan_resume(request: Request, jd_text: str = Form(...), resume: Optional[UploadFile] = File(None), selected_resume: Optional[str] = Form(None)):
+async def scan_resume(request: Request, jd_text: str = Form(...), resume: Optional[UploadFile] = File(None), selected_resume: Optional[str] = Form(None), ai_notes: Optional[str] = Form(None)):
     try:
         # Validate JD text length
         if not jd_text or len(jd_text) > 50000:
             raise HTTPException(status_code=400, detail="Invalid job description")
+
+        if len(jd_text) < 50:
+            append_skipped_to_csv(jd_text, "JD too short (min 50 chars)")
+            raise HTTPException(status_code=400, detail="Job description too short (minimum 50 characters)")
+
+        years = _extract_experience_years(jd_text)
+        if years > 10:
+            reason = f"Requires {years}+ years experience (max allowed: 10)"
+            append_skipped_to_csv(jd_text, reason)
+            raise HTTPException(status_code=400, detail=reason)
+
+        gc_reason = _check_visa_eligibility(jd_text)
+        if gc_reason:
+            append_skipped_to_csv(jd_text, gc_reason)
+            raise HTTPException(status_code=400, detail=gc_reason)
+
+        lead_reason = _check_lead_role(jd_text)
+        if lead_reason:
+            append_skipped_to_csv(jd_text, lead_reason)
+            raise HTTPException(status_code=400, detail=lead_reason)
 
         if resume:
             file_bytes = await resume.read()
@@ -446,11 +571,7 @@ async def scan_resume(request: Request, jd_text: str = Form(...), resume: Option
         if best_match and best_cached_ratio >= 0.80 and best_match.get('score', 0) >= 85:
             # TRUE ZERO-COST CACHE: Skip analyze_resume API call entirely!
             company_name = _extract_company_name(jd_text)
-            safe_company_name = "".join([c for c in company_name if c.isalpha() or c.isdigit() or c==' ']).strip()
-            if not safe_company_name:
-                safe_company_name = "Company"
-            company_dir = f"trailerd/{safe_company_name.replace(' ', '_')}"
-            os.makedirs(company_dir, exist_ok=True)
+            company_dir = _make_company_dir(company_name)
 
             file_path = f"{company_dir}/resume.docx"
             jd_path = f"{company_dir}/jd_info.txt"
@@ -478,16 +599,14 @@ async def scan_resume(request: Request, jd_text: str = Form(...), resume: Option
             }
 
         try:
-            result = analyze_resume(resume_text, jd_text)
+            result = analyze_resume(resume_text, jd_text, ai_notes=ai_notes or "")
         except RuntimeError as e:
             logger.warning(f"AI provider unavailable: {e}")
             raise HTTPException(status_code=503, detail="The AI provider is currently unavailable. Please try again in a few moments.")
 
         score = result.get('score', 0)
         company_name = result.get('company_name', _extract_company_name(jd_text))
-        safe_company_name = "".join([c for c in company_name if c.isalpha() or c.isdigit() or c==' ']).strip()
-        company_dir = f"trailerd/{safe_company_name.replace(' ', '_')}"
-        os.makedirs(company_dir, exist_ok=True)
+        company_dir = _make_company_dir(company_name)
 
         file_path = f"{company_dir}/resume.docx"
         jd_path = f"{company_dir}/jd_info.txt"
@@ -503,11 +622,20 @@ async def scan_resume(request: Request, jd_text: str = Form(...), resume: Option
             logger.info(f"Applied {len(replacements)} replacements for {company_name}")
             
             # Write the difference file
+            missing_kw = result.get('missing_keywords', [])
             with open(diff_path, "w", encoding="utf-8") as f:
                 f.write(f"Resume Tailoring Differences for {company_name}\n")
                 f.write("=" * 60 + "\n\n")
+                f.write(f"Score: {score}% → {after_score}% (Δ +{after_score - score})\n")
+                f.write(f"Total Replacements: {len(replacements)}\n")
+                if missing_kw:
+                    f.write(f"Missing Keywords: {', '.join(missing_kw)}\n")
+                f.write("=" * 60 + "\n\n")
                 for i, rep in enumerate(replacements, 1):
+                    kw_added = rep.get('keywords_added', [])
                     f.write(f"--- REPLACEMENT #{i} ---\n")
+                    if kw_added:
+                        f.write(f"Keywords Added: {', '.join(kw_added)}\n\n")
                     f.write(f"REMOVED:\n{rep.get('original', 'N/A')}\n\n")
                     f.write(f"ADDED:\n{rep.get('new', 'N/A')}\n")
                     f.write("=" * 60 + "\n\n")
@@ -559,7 +687,7 @@ async def scan_resume(request: Request, jd_text: str = Form(...), resume: Option
         logger.error(f"Scan resume error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to process resume. Please try again later.")
 
-def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str) -> dict:
+def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, ai_notes: str = "") -> dict:
     resume_text = extract_text_from_docx(file_bytes)
 
     all_history = get_all_resumes(limit=1000)
@@ -575,11 +703,7 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str) 
 
     if best_match and best_cached_ratio >= 0.80 and best_match.get('score', 0) >= 85:
         company_name = _extract_company_name(jd_text)
-        safe_company_name = "".join([c for c in company_name if c.isalpha() or c.isdigit() or c == ' ']).strip()
-        if not safe_company_name:
-            safe_company_name = "Company"
-        company_dir = f"trailerd/{safe_company_name.replace(' ', '_')}"
-        os.makedirs(company_dir, exist_ok=True)
+        company_dir = _make_company_dir(company_name)
         file_path = f"{company_dir}/resume.docx"
         jd_path = f"{company_dir}/jd_info.txt"
         if os.path.abspath(best_match['file_path']).lower() != os.path.abspath(file_path).lower():
@@ -598,7 +722,7 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str) 
     result = None
     for attempt in range(3):
         try:
-            result = analyze_resume(resume_text, jd_text)
+            result = analyze_resume(resume_text, jd_text, ai_notes=ai_notes)
             break
         except RuntimeError as e:
             if attempt < 2 and ("503" in str(e) or "UNAVAILABLE" in str(e) or "429" in str(e) or "All models" in str(e)):
@@ -618,22 +742,41 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str) 
         company_name = local_company
     else:
         company_name = ai_company or local_company
-    safe_company_name = "".join([c for c in company_name if c.isalpha() or c.isdigit() or c == ' ']).strip()
-    company_dir = f"trailerd/{safe_company_name.replace(' ', '_')}"
-    os.makedirs(company_dir, exist_ok=True)
+    company_dir = _make_company_dir(company_name)
     file_path = f"{company_dir}/resume.docx"
     jd_path = f"{company_dir}/jd_info.txt"
 
     replacements = result.get('replacements', [])
+    diff_path = f"{company_dir}/difference.txt"
     if replacements:
         tailored_stream = create_tailored_docx(file_bytes, replacements)
         with open(file_path, "wb") as f:
             f.write(tailored_stream.read())
         after_score = result.get('after_score', score)
+
+        missing_kw = result.get('missing_keywords', [])
+        with open(diff_path, "w", encoding="utf-8") as f:
+            f.write(f"Resume Tailoring Differences for {company_name}\n")
+            f.write("=" * 60 + "\n\n")
+            f.write(f"Score: {score}% → {after_score}% (Δ +{after_score - score})\n")
+            f.write(f"Total Replacements: {len(replacements)}\n")
+            if missing_kw:
+                f.write(f"Missing Keywords: {', '.join(missing_kw)}\n")
+            f.write("=" * 60 + "\n\n")
+            for i, rep in enumerate(replacements, 1):
+                kw_added = rep.get('keywords_added', [])
+                f.write(f"--- REPLACEMENT #{i} ---\n")
+                if kw_added:
+                    f.write(f"Keywords Added: {', '.join(kw_added)}\n\n")
+                f.write(f"REMOVED:\n{rep.get('original', 'N/A')}\n\n")
+                f.write(f"ADDED:\n{rep.get('new', 'N/A')}\n")
+                f.write("=" * 60 + "\n\n")
     else:
         with open(file_path, "wb") as f:
             f.write(file_bytes)
         after_score = score
+        with open(diff_path, "w", encoding="utf-8") as f:
+            f.write("No changes were needed. The resume already matched the job description well.\n")
 
     contact_info = result.get('contact_info', {})
     with open(jd_path, "w", encoding="utf-8") as f:
@@ -703,8 +846,20 @@ async def batch_scan(request: Request, body: BatchScanRequest):
                 append_skipped_to_csv(jd_text, reason)
                 continue
 
+            gc_reason = _check_visa_eligibility(jd_text)
+            if gc_reason:
+                results.append({"index": idx, "skipped": True, "reason": gc_reason})
+                append_skipped_to_csv(jd_text, gc_reason)
+                continue
+
+            lead_reason = _check_lead_role(jd_text)
+            if lead_reason:
+                results.append({"index": idx, "skipped": True, "reason": lead_reason})
+                append_skipped_to_csv(jd_text, lead_reason)
+                continue
+
             try:
-                result = _process_single_jd(jd_text, file_bytes, resume_path)
+                result = _process_single_jd(jd_text, file_bytes, resume_path, ai_notes=body.ai_notes or "")
                 result["index"] = idx
                 result["skipped"] = False
                 results.append(result)
@@ -1169,6 +1324,102 @@ async def gmail_save_draft(request: Request, draft: GmailDraftRequest):
     except Exception as e:
         logger.error(f"Gmail save draft error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to save draft to Gmail")
+
+# ─── Gmail Inbox (for follow-up) ───
+
+@app.get("/api/gmail/inbox")
+@limiter.limit("10/minute")
+async def gmail_inbox(request: Request, q: str = ""):
+    """Search Gmail inbox for messages matching a query."""
+    try:
+        messages = gmail_service.search_inbox(q or "in:inbox", max_results=15)
+        return {"messages": messages}
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Gmail inbox error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to search inbox")
+
+@app.get("/api/gmail/message/{message_id}")
+@limiter.limit("20/minute")
+async def gmail_message(request: Request, message_id: str):
+    """Get full body of a Gmail message."""
+    try:
+        msg = gmail_service.get_message_body(message_id)
+        return msg
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Gmail message read error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to read message")
+
+# ─── Follow-Up Mail ───
+
+class FollowUpRequest(BaseModel):
+    received_email: str
+
+@app.post("/api/history/{record_id}/follow-up")
+@limiter.limit("5/minute")
+async def api_generate_follow_up(request: Request, record_id: int, body: FollowUpRequest):
+    """Generate a follow-up reply based on a received email."""
+    try:
+        if record_id <= 0:
+            raise HTTPException(status_code=400, detail="Invalid record ID")
+
+        record = get_resume_by_id(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+
+        file_path = record.get('file_path')
+        if not file_path or not os.path.exists(file_path):
+            raise HTTPException(status_code=400, detail="Resume file not found")
+
+        with open(file_path, "rb") as f:
+            resume_text = extract_text_from_docx(f.read())
+
+        jd_text = record.get('jd_text', '')
+        if not jd_text:
+            raise HTTPException(status_code=400, detail="No job description found for this record")
+
+        # Read existing mail draft if available
+        original_mail_body = ""
+        company_dir = os.path.dirname(file_path)
+        if os.path.isdir(company_dir):
+            draft_files = [f for f in os.listdir(company_dir) if f.startswith("mail_draft_") and f.endswith(".txt")]
+            if draft_files:
+                with open(os.path.join(company_dir, draft_files[0]), "r", encoding="utf-8") as f:
+                    original_mail_body = f.read()
+
+        profile_text = ""
+        profile_path = os.path.join(DATA_DIR, "profile.txt")
+        if os.path.exists(profile_path):
+            with open(profile_path, "r", encoding="utf-8") as f:
+                profile_text = f.read().strip()
+
+        to_emails = list(set(re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', body.received_email)))
+
+        result = generate_follow_up(
+            resume_text=resume_text,
+            jd_text=jd_text,
+            company_name=record['company_name'],
+            received_email=body.received_email,
+            original_mail_body=original_mail_body,
+            profile_text=profile_text,
+        )
+
+        return {
+            "to_emails": to_emails,
+            "subject": result.get('subject', ''),
+            "body": result.get('body', ''),
+        }
+    except RuntimeError as e:
+        logger.warning(f"AI provider error: {e}")
+        raise HTTPException(status_code=503, detail="The AI provider is unavailable. Please try again.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Follow-up generation error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to generate follow-up")
 
 if __name__ == "__main__":
     # Don't use reload in production

@@ -1902,6 +1902,7 @@ body {
   margin-bottom: 6px; line-height: 1.4;
 }
 .profile-textarea { min-height: 100px; font-size: 0.78rem; }
+.ai-notes-textarea { min-height: 48px; max-height: 120px; font-size: 0.8rem; resize: vertical; }
 .profile-upload-row {
   display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
 }
@@ -2202,3 +2203,46 @@ body {
 
   .brand h1 { font-size: 2.9rem; }
 }
+
+/* ── Follow-Up & Inbox Picker ── */
+.follow-up-section { display: flex; flex-direction: column; gap: 0; }
+.follow-up-input { display: flex; flex-direction: column; gap: 0.4rem; }
+.follow-up-textarea { min-height: 100px; font-size: 0.82rem; resize: vertical; }
+
+.inbox-picker { margin-bottom: 0.25rem; }
+.inbox-toggle-btn {
+  background: none; border: 1px solid var(--border); color: var(--gold);
+  padding: 0.3rem 0.7rem; border-radius: 4px; cursor: pointer; font-size: 0.78rem;
+  transition: border-color 0.2s;
+}
+.inbox-toggle-btn:hover { border-color: var(--gold); }
+
+.inbox-dropdown {
+  border: 1px solid var(--border); border-radius: 6px; margin-top: 0.4rem;
+  background: var(--surface); max-height: 320px; display: flex; flex-direction: column;
+}
+.inbox-search-row {
+  display: flex; gap: 0.3rem; padding: 0.5rem; border-bottom: 1px solid var(--border);
+}
+.inbox-search-input {
+  flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  padding: 0.3rem 0.5rem; border-radius: 4px; font-size: 0.78rem;
+}
+.inbox-search-input:focus { outline: none; border-color: var(--gold); }
+.inbox-search-btn {
+  background: var(--gold); color: var(--bg); border: none; padding: 0.3rem 0.6rem;
+  border-radius: 4px; cursor: pointer; font-size: 0.82rem;
+}
+.inbox-empty { color: var(--faint); font-size: 0.78rem; padding: 0.8rem; text-align: center; }
+.inbox-list { overflow-y: auto; max-height: 240px; }
+.inbox-msg {
+  display: flex; flex-direction: column; gap: 0.15rem; width: 100%; text-align: left;
+  padding: 0.5rem 0.6rem; border: none; border-bottom: 1px solid var(--border);
+  background: transparent; color: var(--text); cursor: pointer; transition: background 0.15s;
+}
+.inbox-msg:hover { background: rgba(200,155,60,0.08); }
+.inbox-msg.selected { background: rgba(200,155,60,0.15); border-left: 2px solid var(--gold); }
+.inbox-msg-from { font-size: 0.78rem; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.inbox-msg-subject { font-size: 0.76rem; color: var(--gold); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.inbox-msg-snippet { font-size: 0.72rem; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.inbox-msg-loading { font-size: 0.72rem; color: var(--gold); }

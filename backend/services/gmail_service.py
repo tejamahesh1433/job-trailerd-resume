@@ -12,7 +12,7 @@ from googleapiclient.discovery import build
 
 DATA_DIR = os.getenv("DATA_DIR", "data")
 TOKENS_FILE = os.path.join(DATA_DIR, "gmail_tokens.json")
-SCOPES = ["https://www.googleapis.com/auth/gmail.compose"]
+SCOPES = ["https://www.googleapis.com/auth/gmail.compose", "https://www.googleapis.com/auth/gmail.readonly"]
 
 REDIRECT_URI = os.getenv("GMAIL_REDIRECT_URI", "http://localhost:8000/api/gmail/callback")
 
@@ -200,3 +200,79 @@ def save_draft(to_emails: list, subject: str, body: str, attachment_path: str = 
         "message": "Draft saved to Gmail",
         "attachments": attached_files,
     }
+
+
+def search_inbox(query: str, max_results: int = 15) -> list:
+    """Search Gmail inbox and return a list of message summaries."""
+    creds = _load_credentials()
+    if not creds:
+        raise RuntimeError("Gmail not connected.")
+
+    if creds.expired and creds.refresh_token:
+        from google.auth.transport.requests import Request
+        creds.refresh(Request())
+        _save_credentials(creds)
+
+    service = build("gmail", "v1", credentials=creds)
+    resp = service.users().messages().list(
+        userId="me", q=query, maxResults=max_results
+    ).execute()
+
+    messages = []
+    for msg_stub in resp.get("messages", []):
+        msg = service.users().messages().get(
+            userId="me", id=msg_stub["id"], format="metadata",
+            metadataHeaders=["From", "Subject", "Date"]
+        ).execute()
+        headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+        messages.append({
+            "id": msg_stub["id"],
+            "from": headers.get("From", ""),
+            "subject": headers.get("Subject", ""),
+            "date": headers.get("Date", ""),
+            "snippet": msg.get("snippet", ""),
+        })
+
+    return messages
+
+
+def get_message_body(message_id: str) -> dict:
+    """Get the full plain-text body of a Gmail message."""
+    creds = _load_credentials()
+    if not creds:
+        raise RuntimeError("Gmail not connected.")
+
+    if creds.expired and creds.refresh_token:
+        from google.auth.transport.requests import Request
+        creds.refresh(Request())
+        _save_credentials(creds)
+
+    service = build("gmail", "v1", credentials=creds)
+    msg = service.users().messages().get(userId="me", id=message_id, format="full").execute()
+    headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+
+    body_text = _extract_body(msg.get("payload", {}))
+
+    return {
+        "id": message_id,
+        "from": headers.get("From", ""),
+        "subject": headers.get("Subject", ""),
+        "date": headers.get("Date", ""),
+        "body": body_text,
+    }
+
+
+def _extract_body(payload: dict) -> str:
+    """Recursively extract plain text from a Gmail message payload."""
+    if payload.get("mimeType") == "text/plain" and payload.get("body", {}).get("data"):
+        return base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8", errors="replace")
+
+    for part in payload.get("parts", []):
+        text = _extract_body(part)
+        if text:
+            return text
+
+    if payload.get("body", {}).get("data"):
+        return base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8", errors="replace")
+
+    return ""

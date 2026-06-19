@@ -4,16 +4,23 @@ from google.genai import types
 import json
 from services.usage_tracker import log_api_call
 
-def analyze_resume(resume_text: str, jd_text: str) -> dict:
+def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "") -> dict:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("GEMINI_API_KEY is not set")
         
     client = genai.Client(api_key=api_key)
     
+    notes_section = ""
+    if ai_notes and ai_notes.strip():
+        notes_section = f"""
+    USER INSTRUCTIONS (follow these as top priority):
+    {ai_notes.strip()}
+"""
+
     prompt = f"""
     You are an expert ATS (Applicant Tracking System) scanner and career coach specializing in DevOps engineering roles.
-
+{notes_section}
     Job Description:
     {jd_text}
 
@@ -34,17 +41,20 @@ def analyze_resume(resume_text: str, jd_text: str) -> dict:
     - "original" MUST be the EXACT, CHARACTER-FOR-CHARACTER literal text found in the resume — copy-paste it exactly, including all punctuation and spacing. Do NOT paraphrase or shorten the original.
     - "new" should weave in the JD's specific technologies and keywords naturally into the existing bullet point.
     - If the original score is already 80+, still provide 3-5 replacements to push it higher.
+    - For each replacement, include a "keywords_added" field listing the specific JD keywords that were incorporated in that rewrite.
     Task 4: Estimate the new ATS score (0-100) after ALL replacements are applied (after_score). The after_score MUST be at least 80. If your replacements don't achieve 80, add more replacements until they do.
     Task 5: Identify up to 10 keywords from the JD that are missing from the resume.
     Task 6: Break down the original score into 4 section scores (0-100): "Skills", "Experience", "Education", "Summary".
     Task 7: Extract the candidate's contact info from the resume: full name, email address, and phone number. Return null for any field not found.
 
     CRITICAL CONSTRAINT ON REPLACEMENTS:
-    - The candidate is a DevOps/Cloud/Infrastructure engineer. Reword existing bullet points to highlight overlap with the JD's specific technologies.
+    - The candidate is a DevOps/Cloud/Infrastructure engineer. ALL replacements MUST stay within DevOps, Cloud, Infrastructure, SRE, and Platform Engineering domains.
+    - DO NOT add non-DevOps skills like "Full Stack", "Java", "React", "Angular", "Frontend", "Backend development", "REST API development", or general software engineering terms unless the resume ALREADY has them.
+    - Only use DevOps-relevant keywords from the JD: CI/CD, Kubernetes, Docker, Terraform, Ansible, AWS, Azure, GCP, Jenkins, monitoring, observability, infrastructure automation, IaC, Linux, scripting, networking, security hardening, etc.
     - Map the candidate's existing experience to the JD's domain. For example: if the JD asks for VMware and the resume has cloud infrastructure experience, reword to emphasize virtualization, hypervisor management, infrastructure orchestration, etc.
     - NEVER invent experiences the candidate doesn't have. Only reword existing bullet points to highlight relevant transferable skills.
-    - ALWAYS rewrite the Skills line to include the top 5-8 JD keywords that the candidate could plausibly claim.
-    - DO NOT add skills like "Full Stack", "Java", "Frontend" unless the JD specifically requires them AND the resume has related experience.
+    - ALWAYS rewrite the Skills line to include the top 5-8 DevOps-relevant JD keywords that the candidate could plausibly claim.
+    - MANDATORY: Every keyword listed in missing_keywords MUST be incorporated into at least one replacement. If a missing keyword cannot fit naturally into an existing bullet point, add it to the Skills line rewrite. The tailored resume must contain ALL missing keywords.
 
     Return the result strictly in the following JSON format:
     {{
@@ -68,7 +78,8 @@ def analyze_resume(resume_text: str, jd_text: str) -> dict:
         "replacements": [
             {{
                 "original": "<exact string from resume to replace>",
-                "new": "<new tailored string>"
+                "new": "<new tailored string>",
+                "keywords_added": ["<keyword1>", "<keyword2>"]
             }}
         ]
     }}
