@@ -29,6 +29,15 @@ def init_db():
         'ALTER TABLE resumes ADD COLUMN status TEXT DEFAULT "Scanned"',
         'ALTER TABLE resumes ADD COLUMN status_updated_at TEXT',
         'ALTER TABLE resumes ADD COLUMN scan_result TEXT',
+        'ALTER TABLE resumes ADD COLUMN employment_type TEXT',
+        'ALTER TABLE resumes ADD COLUMN job_category TEXT',
+        'ALTER TABLE resumes ADD COLUMN extracted_keywords TEXT',
+        'ALTER TABLE resumes ADD COLUMN warning_flags TEXT',
+        'ALTER TABLE resumes ADD COLUMN match_percentage INTEGER',
+        'ALTER TABLE resumes ADD COLUMN source_url TEXT',
+        'ALTER TABLE resumes ADD COLUMN rejection_reason TEXT',
+        'ALTER TABLE resumes ADD COLUMN source TEXT DEFAULT "dashboard"',
+        'ALTER TABLE resumes ADD COLUMN user_address TEXT',
     ]
     for sql in migrations:
         try:
@@ -45,6 +54,23 @@ def save_resume_record(company_name: str, jd_text: str, score: int, file_path: s
         INSERT INTO resumes (company_name, jd_text, score, file_path, created_at, status, scan_result)
         VALUES (?, ?, ?, ?, ?, ?, ?)
     ''', (company_name, jd_text, score, file_path, datetime.now().isoformat(), "Scanned", scan_result))
+    record_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return record_id
+
+def save_job_matcher_record(company_name: str, jd_text: str, match_percentage: int,
+                            can_apply: bool, rejection_reason: str = None,
+                            source_url: str = None, scan_result: str = None):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    status = "Matched" if can_apply else "Rejected"
+    c.execute('''
+        INSERT INTO resumes (company_name, jd_text, score, file_path, created_at, status,
+                            scan_result, source_url, rejection_reason, source, match_percentage)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (company_name, jd_text, 0, None, datetime.now().isoformat(),
+          status, scan_result, source_url, rejection_reason, "job-finder", match_percentage))
     record_id = c.lastrowid
     conn.commit()
     conn.close()
@@ -95,6 +121,27 @@ def delete_resume_record(record_id: int):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('DELETE FROM resumes WHERE id = ?', (record_id,))
+    conn.commit()
+    conn.close()
+
+def search_records(query: str, limit: int = 50):
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    like = f"%{query}%"
+    c.execute('''
+        SELECT * FROM resumes
+        WHERE company_name LIKE ? OR jd_text LIKE ? OR scan_result LIKE ?
+        ORDER BY created_at DESC LIMIT ?
+    ''', (like, like, like, limit))
+    rows = c.fetchall()
+    conn.close()
+    return [_parse_record(row) for row in rows]
+
+def update_user_address(record_id: int, address: str):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('UPDATE resumes SET user_address = ? WHERE id = ?', (address, record_id))
     conn.commit()
     conn.close()
 

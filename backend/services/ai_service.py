@@ -129,6 +129,7 @@ def generate_cover_letter(resume_text: str, jd_text: str, company_name: str) -> 
     - Match the tone of a confident, results-oriented engineering professional.
     - Address the hiring manager if a name is found, otherwise use a professional greeting.
     - Include the company name '{company_name}' in the letter.
+    - ABSOLUTELY NO EMOJIS in the output.
     
     Resume:
     {resume_text}
@@ -157,3 +158,72 @@ def generate_cover_letter(resume_text: str, jd_text: str, company_name: str) -> 
     except Exception as e:
         print(f"Error generating cover letter: {e}")
         raise RuntimeError(f"API Error: {str(e)}")
+
+def analyze_job_metadata(jd_text: str, extracted_keywords: dict) -> dict:
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is not set")
+    client = genai.Client(api_key=api_key)
+
+    keyword_summary = ", ".join(
+        [kw for keywords in extracted_keywords.values() for kw in keywords]
+    )
+
+    prompt = f"""Analyze this job description and extract key metadata.
+
+Job Description (first 3000 chars):
+{jd_text[:3000]}
+
+Extracted Keywords: {keyword_summary}
+
+Respond ONLY with valid JSON (no markdown, no code blocks):
+{{
+    "primary_role": "DevOps Engineer",
+    "match_confidence": 0.95,
+    "sub_categories": [
+        {{"name": "Kubernetes", "confidence": 0.9}},
+        {{"name": "AWS", "confidence": 0.85}},
+        {{"name": "Terraform", "confidence": 0.7}}
+    ],
+    "location": "Austin, TX / Remote",
+    "salary_range": "$120k - $150k",
+    "visa_requirements": "US Citizen / Green Card",
+    "clearance_level": "Secret / None",
+    "employment_type": "c2c"
+}}
+If a field is not specified in the job description, set its value to 'Not specified'.
+"""
+    try:
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1
+            ),
+        )
+        usage = response.usage_metadata
+        if usage:
+            log_api_call("gemini-2.5-flash", "categorize_job",
+                         input_tokens=usage.prompt_token_count or 0,
+                         output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
+        else:
+            log_api_call("gemini-2.5-flash", "categorize_job", input_tokens=1000, output_tokens=200)
+        return json.loads(response.text)
+    except Exception as e:
+        print(f"Error generating job metadata: {e}")
+        # Fallback
+        primary = "DevOps Engineer"
+        if extracted_keywords.get('sre'): primary = "SRE / Site Reliability Engineer"
+        elif extracted_keywords.get('security'): primary = "Security Engineer / SecOps"
+        return {
+            "primary_role": primary,
+            "match_confidence": 0.8,
+            "sub_categories": [{"name": k, "confidence": 0.8} for k in extracted_keywords.keys()],
+            "location": "Unknown",
+            "salary_range": "Unknown",
+            "visa_requirements": "Unknown",
+            "clearance_level": "Unknown",
+            "employment_type": "Unknown"
+        }
+

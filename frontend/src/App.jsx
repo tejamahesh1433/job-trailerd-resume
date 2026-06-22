@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './index.css';
+import JobMatcher from './JobMatcher';
+import SearchPage from './SearchPage';
 
 function ScoreRing({ score, label, accent }) {
   const [display, setDisplay] = useState(0);
@@ -77,6 +79,16 @@ function EmptyResultsIcon() {
 const HISTORY_PAGE_SIZE = 20;
 
 export default function App() {
+  // Navigation — persist in URL hash so refresh stays on the same page
+  const [currentPage, setCurrentPageState] = useState(() => {
+    const hash = window.location.hash.replace('#', '');
+    return hash || 'dashboard';
+  });
+  const setCurrentPage = (page) => {
+    setCurrentPageState(page);
+    window.location.hash = page === 'dashboard' ? '' : page;
+  };
+
   const [jdText, setJdText] = useState('');
   const [aiNotes, setAiNotes] = useState('');
   const [loading, setLoading] = useState(false);
@@ -720,11 +732,75 @@ export default function App() {
 
   const deltaScore = result?.after_score != null ? result.after_score - result.score : 0;
 
-  return (
-    <div className="app">
-      <div className="grain" aria-hidden="true" />
+  const sidebarNav = (activePage) => (
+    <nav style={sidebarStyles.nav}>
+      <div style={sidebarStyles.navBrand}>Job Tailored Resume</div>
+      <ul style={sidebarStyles.navList}>
+        <li>
+          <button
+            style={activePage === 'dashboard' ? sidebarStyles.navItemActive : sidebarStyles.navItem}
+            onClick={() => setCurrentPage('dashboard')}
+          >
+            Resume Tailor
+          </button>
+        </li>
+        <li>
+          <button
+            style={activePage === 'job-matcher' ? sidebarStyles.navItemActive : sidebarStyles.navItem}
+            onClick={() => setCurrentPage('job-matcher')}
+          >
+            Job Finder
+          </button>
+        </li>
+        <li>
+          <button
+            style={activePage === 'search' ? sidebarStyles.navItemActive : sidebarStyles.navItem}
+            onClick={() => setCurrentPage('search')}
+          >
+            Search
+          </button>
+        </li>
+      </ul>
+    </nav>
+  );
 
-      <header className="site-header">
+  // Show SearchPage
+  if (currentPage === 'search') {
+    return (
+      <div style={{ display: 'flex', minHeight: '100vh' }}>
+        {sidebarNav('search')}
+        <div style={{ flex: 1, overflow: 'auto' }}>
+          <SearchPage onSelectRecord={(r) => {
+            const item = { id: r.id, company_name: r.company_name, score: r.score, status: r.status, scan_result: {} };
+            handleSelectRecord(item);
+            setCurrentPage('dashboard');
+          }} />
+        </div>
+      </div>
+    );
+  }
+
+  // Show JobMatcher if on job-matcher page
+  if (currentPage === 'job-matcher') {
+    return (
+      <div style={{ display: 'flex', minHeight: '100vh' }}>
+        {sidebarNav('job-matcher')}
+        <div style={{ flex: 1, overflow: 'auto' }}>
+          <JobMatcher onApply={(jd) => { setJdText(jd); setCurrentPage('dashboard'); }} />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex' }}>
+      {sidebarNav('dashboard')}
+      {/* Main App */}
+      <div style={{ flex: 1, overflow: 'auto' }}>
+        <div className="app">
+          <div className="grain" aria-hidden="true" />
+
+          <header className="site-header">
         <div className="header-inner">
           <div className="brand">
             <FilmIcon />
@@ -943,7 +1019,7 @@ export default function App() {
 
                 <div className="score-row">
                   <ScoreRing key={`before-${result.score}`} score={result.score} label="Original" accent={scoreAccent(result.score)} />
-                  {result.tailored && result.after_score != null && (
+                  {result.after_score != null && result.after_score !== result.score && (
                     <>
                       <div className="score-arrow">→</div>
                       <ScoreRing key={`after-${result.after_score}`} score={result.after_score} label="Tailored" accent={scoreAccent(result.after_score)} />
@@ -955,6 +1031,7 @@ export default function App() {
                   {result.tailored && deltaScore > 0
                     ? `↑ +${deltaScore} pts — resume automatically tailored`
                     : result.tailored ? 'Resume tailored for this role'
+                    : result.score >= 85 ? `Score ${result.score}% — no tailoring needed`
                     : 'Score strong — no tailoring needed'}
                 </div>
 
@@ -1422,12 +1499,18 @@ export default function App() {
                           >
                             {item.company_name}
                           </button>
+                          {item.source === 'job-finder' && <span className="source-tag">finder</span>}
+                          {item.rejection_reason && <span className="reject-reason" title={item.rejection_reason}>{item.rejection_reason}</span>}
                         </td>
                         <td className="date-col">
                           {item.created_at ? new Date(item.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}
                         </td>
                         <td className="score-col">
-                          <span className="score-badge" style={{ color: scoreAccent(item.score) }}>{item.score}%</span>
+                          {item.source === 'job-finder' ? (
+                            <span className="score-badge" style={{ color: scoreAccent(item.match_percentage || 0) }} title="Job Fit %">{item.match_percentage || 0}%</span>
+                          ) : (
+                            <span className="score-badge" style={{ color: scoreAccent(item.score) }}>{item.score}%</span>
+                          )}
                         </td>
                         <td>
                           <select
@@ -1436,6 +1519,7 @@ export default function App() {
                             className={`status-dropdown status-${(item.status || 'Scanned').toLowerCase().replace(' ', '-')}`}
                           >
                             <option value="Scanned">Scanned</option>
+                            {item.source === 'job-finder' && <option value="Matched">Matched</option>}
                             <option value="Applied">Applied</option>
                             <option value="Phone Screen">Phone Screen</option>
                             <option value="Interview">Interview</option>
@@ -1566,6 +1650,66 @@ export default function App() {
           </div>
         </div>
       )}
+        </div>
+      </div>
     </div>
   );
 }
+
+const sidebarStyles = {
+  nav: {
+    width: '220px',
+    backgroundColor: 'var(--surface)',
+    borderRight: '1px solid var(--border)',
+    padding: '20px 0',
+    height: '100vh',
+    position: 'sticky',
+    top: 0,
+    boxSizing: 'border-box',
+  },
+  navBrand: {
+    padding: '0 16px 20px',
+    fontWeight: 700,
+    fontSize: '0.72rem',
+    fontFamily: 'var(--font-mono)',
+    color: 'var(--gold)',
+    letterSpacing: '0.1em',
+    textTransform: 'uppercase',
+    borderBottom: '1px solid var(--border)',
+    marginBottom: '12px',
+  },
+  navList: {
+    listStyle: 'none',
+    margin: 0,
+    padding: 0,
+  },
+  navItem: {
+    display: 'block',
+    width: '100%',
+    padding: '10px 16px',
+    border: 'none',
+    background: 'transparent',
+    textAlign: 'left',
+    cursor: 'pointer',
+    fontSize: '0.78rem',
+    fontFamily: 'var(--font-body)',
+    color: 'var(--cream-dim)',
+    transition: 'background-color 0.2s, color 0.15s',
+    borderLeft: '2px solid transparent',
+  },
+  navItemActive: {
+    display: 'block',
+    width: '100%',
+    padding: '10px 16px',
+    border: 'none',
+    background: 'var(--gold-dim)',
+    textAlign: 'left',
+    cursor: 'pointer',
+    fontSize: '0.78rem',
+    fontFamily: 'var(--font-body)',
+    color: 'var(--gold)',
+    fontWeight: 600,
+    transition: 'background-color 0.2s, color 0.15s',
+    borderLeft: '2px solid var(--gold)',
+  },
+};

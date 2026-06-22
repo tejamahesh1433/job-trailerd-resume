@@ -132,7 +132,8 @@ def generate_mail_draft(resume_text: str, jd_text: str, cover_letter_text: str, 
         "- End with: 'I have attached my resume for your review. Please let me know if you need any additional information.'\n"
         "- Keep the body 80-120 words, simple and professional\n"
         "- NEVER use 'Dear' or 'Dear Hiring Manager'\n"
-        "- Do NOT use placeholder brackets like [Your Name] or [Company]\n\n"
+        "- Do NOT use placeholder brackets like [Your Name] or [Company]\n"
+        "- ABSOLUTELY NO EMOJIS in the output\n\n"
         "Reply with ONLY valid JSON:\n"
         '{"subject": "Application for ' + job_title + '", "body": "<email body without signature>"}'
     )
@@ -203,7 +204,8 @@ def generate_follow_up(resume_text: str, jd_text: str, company_name: str, receiv
         "- Reference specific details from the original application/resume that are relevant\n"
         "- Keep the body 60-100 words, professional and enthusiastic\n"
         "- NEVER use 'Dear' or 'Dear Hiring Manager'\n"
-        "- Do NOT use placeholder brackets like [Your Name] or [Company]\n\n"
+        "- Do NOT use placeholder brackets like [Your Name] or [Company]\n"
+        "- ABSOLUTELY NO EMOJIS in the output\n\n"
         "Reply with ONLY valid JSON:\n"
         '{"subject": "Re: <appropriate subject>", "body": "<email body without signature>"}'
     )
