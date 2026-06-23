@@ -2274,6 +2274,136 @@ body {
 .inbox-msg-snippet { font-size: 0.72rem; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .inbox-msg-loading { font-size: 0.72rem; color: var(--gold); }
 
+/* ── Info Page ──────────────────────────────────────── */
+.info-contact-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 1px;
+  overflow: hidden;
+  max-width: 480px;
+}
+
+.info-contact-row {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  padding: 0.85rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.info-contact-row:last-child { border-bottom: none; }
+
+.info-contact-key {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--gold);
+  text-transform: uppercase;
+  flex-shrink: 0;
+  width: 48px;
+}
+
+.info-contact-value {
+  font-size: 0.88rem;
+  color: var(--cream);
+}
+
+.info-address-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.info-address-card {
+  padding: 1.25rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  transition: background 0.15s;
+}
+
+.info-address-card:last-child { border-bottom: none; }
+.info-address-card:hover { background: rgba(200, 155, 60, 0.03); }
+
+.info-address-company {
+  font-family: var(--font-display);
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--gold);
+  letter-spacing: 0.03em;
+  margin-bottom: 0.4rem;
+}
+
+.info-address-text {
+  font-size: 0.84rem;
+  color: var(--cream-dim);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.info-address-contact {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 2rem;
+}
+
+.info-address-field {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+  color: var(--cream-dim);
+}
+
+.info-address-label {
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+/* ── Info Page — WhatsApp ───────────────────────────── */
+.info-whatsapp-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--cream-dim);
+  margin-bottom: 1.25rem;
+}
+
+.info-whatsapp-dot {
+  color: var(--success);
+  font-size: 0.6rem;
+}
+
+.info-whatsapp-instructions {
+  margin-top: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.info-whatsapp-step {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--cream-dim);
+  padding: 0.5rem 0.85rem;
+  background: var(--surface);
+  border-left: 2px solid var(--border-warm);
+  line-height: 1.5;
+}
+
+.info-whatsapp-setup .panel-placeholder {
+  margin-bottom: 0;
+}
+
 /* ── Search Page ────────────────────────────────────── */
 .search-bar-row {
   display: flex;

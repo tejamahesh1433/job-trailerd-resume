@@ -98,6 +98,23 @@ export default function App() {
   const [coverLetter, setCoverLetter] = useState(null);
   const [coverLetterPath, setCoverLetterPath] = useState(null);
   const [generatingCL, setGeneratingCL] = useState(false);
+  
+  const [infoAddresses, setInfoAddresses] = useState([]);
+  const [addressSearchQuery, setAddressSearchQuery] = useState('');
+  const [telegramStatus, setTelegramStatus] = useState(null);
+
+  useEffect(() => {
+    if (currentPage === 'info') {
+      fetch('http://localhost:8000/api/addresses')
+        .then(res => res.json())
+        .then(data => setInfoAddresses(data))
+        .catch(err => console.error("Error fetching addresses:", err));
+      fetch('http://localhost:8000/api/telegram/status')
+        .then(res => res.json())
+        .then(data => setTelegramStatus(data))
+        .catch(() => setTelegramStatus({ configured: false }));
+    }
+  }, [currentPage]);
   const [copied, setCopied] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [storedResumes, setStoredResumes] = useState([]);
@@ -760,6 +777,14 @@ export default function App() {
             Search
           </button>
         </li>
+        <li>
+          <button
+            style={activePage === 'info' ? sidebarStyles.navItemActive : sidebarStyles.navItem}
+            onClick={() => setCurrentPage('info')}
+          >
+            Info
+          </button>
+        </li>
       </ul>
     </nav>
   );
@@ -780,13 +805,130 @@ export default function App() {
     );
   }
 
-  // Show JobMatcher if on job-matcher page
+    // Show JobMatcher if on job-matcher page
   if (currentPage === 'job-matcher') {
     return (
       <div style={{ display: 'flex', minHeight: '100vh' }}>
         {sidebarNav('job-matcher')}
         <div style={{ flex: 1, overflow: 'auto' }}>
           <JobMatcher onApply={(jd) => { setJdText(jd); setCurrentPage('dashboard'); }} />
+        </div>
+      </div>
+    );
+  }
+
+  // Show Info page
+  if (currentPage === 'info') {
+    const filteredAddresses = infoAddresses.filter(item => {
+      const q = addressSearchQuery.toLowerCase();
+      return (item.company_name || '').toLowerCase().includes(q) ||
+             (item.user_address || '').toLowerCase().includes(q) ||
+             (item.name || '').toLowerCase().includes(q) ||
+             (item.email || '').toLowerCase().includes(q);
+    });
+
+    return (
+      <div style={{ display: 'flex', minHeight: '100vh' }}>
+        {sidebarNav('info')}
+        <div style={{ flex: 1, overflow: 'auto' }}>
+          <div className="app">
+            <div className="grain" aria-hidden="true" />
+            <main className="main-content">
+              {/* Employer Details */}
+              <div className="panel panel-enter">
+                <div className="panel-tag">
+                  <span className="panel-num">01</span>
+                  <span className="panel-title">Employer Details</span>
+                </div>
+                <div className="info-contact-card">
+                  <div className="info-contact-row">
+                    <span className="info-contact-key">Email</span>
+                    <span className="info-contact-value">suneendra@coreit-tech.com</span>
+                  </div>
+                  <div className="info-contact-row">
+                    <span className="info-contact-key">Tel</span>
+                    <span className="info-contact-value">14694441962 ext : 8406</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Telegram Integration */}
+              <div className="panel panel-enter" style={{ animationDelay: '60ms' }}>
+                <div className="panel-tag">
+                  <span className="panel-num">02</span>
+                  <span className="panel-title">Telegram Bot</span>
+                  {telegramStatus?.polling && <span className="panel-active-co">Live</span>}
+                </div>
+                {telegramStatus?.configured ? (
+                  <div className="info-whatsapp-connected">
+                    <div className="info-whatsapp-status">
+                      <span className="info-whatsapp-dot">{telegramStatus.polling ? '●' : '○'}</span>
+                      {telegramStatus.polling ? 'Bot is running and listening for messages' : 'Bot configured but not polling — restart backend'}
+                    </div>
+                    {telegramStatus.bot_username && (
+                      <div className="info-contact-card">
+                        <div className="info-contact-row">
+                          <span className="info-contact-key">Bot</span>
+                          <span className="info-contact-value">@{telegramStatus.bot_username}</span>
+                        </div>
+                      </div>
+                    )}
+                    <div className="info-whatsapp-instructions">
+                      <div className="info-whatsapp-step">1. Open Telegram and search for @{telegramStatus.bot_username || 'your_bot'}</div>
+                      <div className="info-whatsapp-step">2. Send /start to begin</div>
+                      <div className="info-whatsapp-step">3. Paste a Job Description and send it</div>
+                      <div className="info-whatsapp-step">4. The bot processes it and replies with the score and status</div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="info-whatsapp-setup">
+                    <p className="panel-placeholder">Telegram bot is not configured yet.</p>
+                    <div className="info-whatsapp-instructions">
+                      <div className="info-whatsapp-step">1. Open Telegram and message @BotFather</div>
+                      <div className="info-whatsapp-step">2. Send /newbot and follow the prompts</div>
+                      <div className="info-whatsapp-step">3. Copy the bot token</div>
+                      <div className="info-whatsapp-step">4. Add TELEGRAM_BOT_TOKEN to your .env file</div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Saved Addresses */}
+              <div className="panel panel-wide panel-enter" style={{ animationDelay: '120ms' }}>
+                <div className="panel-top-row">
+                  <div className="panel-tag inline">
+                    <span className="panel-num">03</span>
+                    <span className="panel-title">Saved Addresses</span>
+                  </div>
+                  <span className="history-count">{filteredAddresses.length} address{filteredAddresses.length !== 1 ? 'es' : ''}</span>
+                </div>
+                <input
+                  type="text"
+                  className="history-search"
+                  placeholder="Search addresses…"
+                  value={addressSearchQuery}
+                  onChange={(e) => setAddressSearchQuery(e.target.value)}
+                  style={{ marginBottom: '1.5rem', maxWidth: '100%' }}
+                />
+                <div className="info-address-list">
+                  {filteredAddresses.map((item, index) => (
+                    <div key={item.id || index} className="info-address-card">
+                      <div className="info-address-company">{item.company_name}</div>
+                      <div className="info-address-text">{item.user_address}</div>
+                      {(item.name || item.email) && (
+                        <div className="info-address-contact">
+                          {item.name && <div className="info-address-field"><span className="info-address-label">Contact</span>{item.name}</div>}
+                          {item.email && <div className="info-address-field"><span className="info-address-label">Email</span>{item.email}</div>}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  {infoAddresses.length === 0 && <p className="empty-log">No addresses saved yet.</p>}
+                  {infoAddresses.length > 0 && filteredAddresses.length === 0 && <p className="empty-log">No addresses match your search.</p>}
+                </div>
+              </div>
+            </main>
+          </div>
         </div>
       </div>
     );

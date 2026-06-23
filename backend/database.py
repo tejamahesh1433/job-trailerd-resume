@@ -152,3 +152,13 @@ def update_resume_status(record_id: int, status: str):
               (status, datetime.now().isoformat(), record_id))
     conn.commit()
     conn.close()
+
+
+def get_all_addresses():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute('SELECT id, company_name, user_address, created_at, scan_result, jd_text FROM resumes WHERE user_address IS NOT NULL AND user_address != \'\' ORDER BY created_at DESC')
+    rows = c.fetchall()
+    conn.close()
+    return [_parse_record(row) for row in rows]

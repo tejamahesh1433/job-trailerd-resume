@@ -1,8 +1,9 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
+import asyncio
 import uvicorn
 import os
 import re
@@ -77,6 +78,10 @@ _JOB_TITLE_WORDS = {
     "job description", "job title", "responsibilities", "requirements",
     "qualifications", "experience", "we are looking", "about the role",
 }
+
+_GENERIC_EMAIL = {"gmail", "yahoo", "hotmail", "outlook", "protonmail",
+                  "mail", "icloud", "aol", "live", "ymail", "zoho",
+                  "fastmail", "tutanota", "pm", "hey"}
 
 def _is_valid_company_name(name: str) -> bool:
     """Filter out names that are job titles, tech tools, or generic words."""
@@ -229,10 +234,6 @@ Scraped text (first 8000 chars):
 def _extract_company_name(jd_text: str) -> str:
     """Best-effort local extraction of company name — no API call.
     Searches the ENTIRE JD text including signatures at the bottom."""
-
-    _GENERIC_EMAIL = {"gmail", "yahoo", "hotmail", "outlook", "protonmail",
-                      "mail", "icloud", "aol", "live", "ymail", "zoho",
-                      "fastmail", "tutanota", "pm", "hey"}
 
     # Priority 1: Look for explicit company name lines (often near signatures)
     company_patterns = [
@@ -993,8 +994,9 @@ async def scan_resume(request: Request, jd_text: str = Form(...), resume: Option
         score = result.get('score', 0)
         company_name = result.get('company_name', _extract_company_name(jd_text))
         contact_info = result.get('contact_info', {})
-        email = contact_info.get('email', '') if isinstance(contact_info, dict) else ''
-        company_dir = _make_company_dir(company_name, email)
+        jd_emails = re.findall(r'[\w.+-]+@[\w-]+\.[\w.-]+', jd_text)
+        vendor_email = next((e for e in jd_emails if e.split('@')[1].split('.')[0].lower() not in _GENERIC_EMAIL), '')
+        company_dir = _make_company_dir(company_name, vendor_email)
 
         file_path = f"{company_dir}/resume.docx"
         jd_path = f"{company_dir}/jd_info.txt"
@@ -1125,8 +1127,9 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
         company_name = ai_company or local_company
     
     contact_info = result.get('contact_info', {})
-    email = contact_info.get('email', '') if isinstance(contact_info, dict) else ''
-    company_dir = _make_company_dir(company_name, email)
+    jd_emails = re.findall(r'[\w.+-]+@[\w-]+\.[\w.-]+', jd_text)
+    vendor_email = next((e for e in jd_emails if e.split('@')[1].split('.')[0].lower() not in _GENERIC_EMAIL), '')
+    company_dir = _make_company_dir(company_name, vendor_email)
     file_path = f"{company_dir}/resume.docx"
     jd_path = f"{company_dir}/jd_info.txt"
     diff_path = f"{company_dir}/difference.txt"
@@ -1290,6 +1293,38 @@ async def get_history(request: Request, limit: int = 50, offset: int = 0):
     except Exception as e:
         logger.error(f"Get history error: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve history")
+@app.get("/api/addresses")
+@limiter.limit("60/minute")
+async def get_addresses(request: Request):
+    from database import get_all_addresses
+    from services.ollama_service import _extract_recruiter_name
+    import re
+    try:
+        records = get_all_addresses()
+        results = []
+        for rec in records:
+            jd = rec.get("jd_text") or ""
+            
+            emails_found = set()
+            for m in re.finditer(r'[\w.+-]+@[\w-]+\.[\w.-]+', jd):
+                emails_found.add(m.group().lower())
+                
+            emails_list = list(emails_found)
+            email = emails_list[0] if emails_list else ""
+            name = _extract_recruiter_name(jd)
+            
+            results.append({
+                "id": rec["id"],
+                "company_name": rec["company_name"],
+                "user_address": rec["user_address"],
+                "name": name,
+                "email": email,
+                "all_emails": emails_list
+            })
+        return results
+    except Exception as e:
+        logger.error(f"Get addresses error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve addresses")
 
 @app.get("/api/search")
 @limiter.limit("30/minute")
@@ -1370,6 +1405,7 @@ async def search_history(request: Request, q: str = "", limit: int = 50):
     except Exception as e:
         logger.error(f"Search error: {e}")
         raise HTTPException(status_code=500, detail="Search failed")
+
 
 class AddressUpdate(BaseModel):
     address: str
@@ -2069,6 +2105,185 @@ async def apply_to_job(request: Request, jd_text: str = Form(...), resume: Optio
     except Exception as e:
         logger.error(f"Job matcher apply error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to apply to job")
+
+# ─── Telegram Integration ───
+
+def _telegram_process_jd(jd_text: str, chat_id: int):
+    """Background task: process a JD received via Telegram and reply with the result."""
+    from services.telegram_service import send_message_sync
+
+    try:
+        resumes = []
+        if os.path.exists("original"):
+            for f in os.listdir("original"):
+                if f.endswith(".docx"):
+                    path = os.path.join("original", f)
+                    resumes.append((path, os.path.getmtime(path)))
+        if not resumes:
+            send_message_sync(chat_id, "No resume found. Please upload a resume via the web dashboard first.")
+            return
+
+        resumes.sort(key=lambda x: x[1], reverse=True)
+        resume_path = resumes[0][0]
+        resume_filename = os.path.basename(resume_path)
+
+        with open(resume_path, "rb") as f:
+            file_bytes = f.read()
+
+        if len(jd_text) < 50:
+            send_message_sync(chat_id, "JD too short (minimum 50 characters). Please send the full job description.")
+            return
+
+        years = _extract_experience_years(jd_text)
+        if years > 10:
+            send_message_sync(chat_id, f"Skipped — requires {years}+ years experience (max: 10)")
+            return
+
+        gc_reason = _check_visa_eligibility(jd_text)
+        if gc_reason:
+            send_message_sync(chat_id, f"Skipped — {gc_reason}")
+            return
+
+        lang_reason = _check_foreign_language(jd_text)
+        if lang_reason:
+            send_message_sync(chat_id, f"Skipped — {lang_reason}")
+            return
+
+        lead_reason = _check_lead_role(jd_text)
+        if lead_reason:
+            send_message_sync(chat_id, f"Skipped — {lead_reason}")
+            return
+
+        result = _process_single_jd(jd_text, file_bytes, resume_path)
+
+        if result.get("skipped"):
+            send_message_sync(chat_id, f"Skipped — {result.get('reason', 'Unknown reason')}")
+            return
+
+        company = result.get("company_name", "Unknown")
+        score = result.get("score", 0)
+        after_score = result.get("after_score", score)
+        tailored = result.get("tailored", False)
+        missing = result.get("missing_keywords", [])
+
+        lines = [f"Processed JD for {company}!"]
+        if tailored and after_score != score:
+            lines.append(f"Score: {score}% -> {after_score}% (+{after_score - score})")
+        else:
+            lines.append(f"Match Score: {after_score}%")
+
+        if tailored:
+            lines.append("Resume has been tailored")
+        else:
+            lines.append("Resume already strong — no changes needed")
+
+        if missing:
+            lines.append(f"Missing keywords: {', '.join(missing[:8])}")
+
+        lines.append(f"\nUsing resume: {resume_filename}")
+        lines.append("Files saved — check your dashboard for downloads.")
+
+        send_message_sync(chat_id, "\n".join(lines))
+        logger.info(f"Telegram JD processed: {company} (score={after_score}%) chat={chat_id}")
+
+    except Exception as e:
+        logger.error(f"Telegram processing error: {e}", exc_info=True)
+        try:
+            send_message_sync(chat_id, f"Processing failed: {str(e)[:300]}")
+        except Exception:
+            logger.error("Failed to send Telegram error reply")
+
+
+_telegram_polling = False
+
+async def _telegram_poll_loop():
+    """Long-polling loop that listens for Telegram messages."""
+    global _telegram_polling
+    from services import telegram_service
+
+    if not telegram_service.is_configured():
+        logger.info("Telegram bot not configured — polling disabled")
+        return
+
+    await asyncio.sleep(2)
+
+    try:
+        bot_info = await telegram_service.get_me()
+        logger.info(f"Telegram bot connected: @{bot_info.get('username', '?')}")
+    except Exception as e:
+        logger.error(f"Telegram bot connection failed: {e}")
+        return
+
+    try:
+        import httpx as _hx
+        async with _hx.AsyncClient(timeout=10) as client:
+            await client.post(f"https://api.telegram.org/bot{os.getenv('TELEGRAM_BOT_TOKEN')}/deleteWebhook")
+    except Exception:
+        pass
+
+    _telegram_polling = True
+    offset = 0
+
+    while _telegram_polling:
+        try:
+            updates = await telegram_service.get_updates(offset=offset, timeout=30)
+            for update in updates:
+                offset = update["update_id"] + 1
+                msg = update.get("message", {})
+                text = msg.get("text", "").strip()
+                chat_id = msg.get("chat", {}).get("id")
+
+                if not text or not chat_id:
+                    continue
+
+                if text.startswith("/start"):
+                    await telegram_service.send_message(chat_id, "Welcome to Job Tailored Resume Bot!\n\nSend me a Job Description and I'll:\n- Analyze it against your resume\n- Tailor your resume automatically\n- Save everything to your dashboard\n\nJust paste a JD and hit send.")
+                    continue
+
+                if text.startswith("/status"):
+                    resumes = [f for f in os.listdir("original") if f.endswith(".docx")] if os.path.exists("original") else []
+                    await telegram_service.send_message(chat_id, f"Bot is running.\nResumes available: {len(resumes)}")
+                    continue
+
+                if text.startswith("/"):
+                    await telegram_service.send_message(chat_id, "Commands:\n/start - Welcome message\n/status - Check bot status\n\nOr just send a Job Description to process it.")
+                    continue
+
+                logger.info(f"Telegram message from chat {chat_id}: {len(text)} chars")
+                await telegram_service.send_message(chat_id, "Processing your JD... You'll get a reply shortly.")
+
+                loop = asyncio.get_event_loop()
+                loop.run_in_executor(None, _telegram_process_jd, text, chat_id)
+
+        except asyncio.CancelledError:
+            _telegram_polling = False
+            break
+        except Exception as e:
+            if str(e):
+                logger.error(f"Telegram polling error: {e}")
+            await asyncio.sleep(5)
+
+
+@app.on_event("startup")
+async def start_telegram_polling():
+    from services import telegram_service
+    if telegram_service.is_configured():
+        asyncio.create_task(_telegram_poll_loop())
+
+
+@app.get("/api/telegram/status")
+async def telegram_status():
+    """Check if Telegram bot is configured and running."""
+    from services import telegram_service
+    result = {"configured": telegram_service.is_configured(), "polling": _telegram_polling}
+    if telegram_service.is_configured():
+        try:
+            bot_info = await telegram_service.get_me()
+            result["bot_username"] = bot_info.get("username", "")
+        except Exception:
+            result["bot_username"] = ""
+    return result
+
 
 if __name__ == "__main__":
     # Don't use reload in production
