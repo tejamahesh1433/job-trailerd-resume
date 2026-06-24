@@ -45,7 +45,7 @@ def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "") -> dict:
     Task 4: Estimate the new ATS score (0-100) after ALL replacements are applied (after_score). The after_score MUST be at least 80. If your replacements don't achieve 80, add more replacements until they do.
     Task 5: Identify up to 10 keywords from the JD that are missing from the resume.
     Task 6: Break down the original score into 4 section scores (0-100): "Skills", "Experience", "Education", "Summary".
-    Task 7: Extract the candidate's contact info from the resume: full name, email address, and phone number. Return null for any field not found.
+    Task 7: Extract the RECRUITER/VENDOR contact info from the Job Description (NOT the candidate's info from the resume). Look for names, email addresses, and phone numbers in the JD's signature block, header, or body. Return null for any field not found.
 
     CRITICAL CONSTRAINT ON REPLACEMENTS:
     - The candidate is a DevOps/Cloud/Infrastructure engineer. ALL replacements MUST stay within DevOps, Cloud, Infrastructure, SRE, and Platform Engineering domains.

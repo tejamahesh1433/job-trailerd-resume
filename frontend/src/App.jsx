@@ -1244,7 +1244,7 @@ export default function App() {
 
                 {result.contact_info && Object.values(result.contact_info).some(v => v) && (
                   <div className="contact-info-strip">
-                    <div className="contact-info-label">Detected Contact Info</div>
+                    <div className="contact-info-label">Vendor / Recruiter Contact</div>
                     <div className="contact-info-fields">
                       {result.contact_info.name && <span className="contact-field"><span className="contact-key">Name</span>{result.contact_info.name}</span>}
                       {result.contact_info.email && <span className="contact-field"><span className="contact-key">Email</span>{result.contact_info.email}</span>}
