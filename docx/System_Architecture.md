@@ -57,7 +57,6 @@ graph TB
     GMS -->|OAuth2 + API| Gmail
     TGS -->|Long-Polling| TGBot
     PFS -->|Vision API| Gemini
-</mermaid>
 ```
 
 ## Component Responsibilities
