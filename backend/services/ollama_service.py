@@ -167,42 +167,88 @@ def generate_mail_draft(resume_text: str, jd_text: str, cover_letter_text: str, 
         raise RuntimeError(f"OpenAI error: {str(e)}")
 
 
-def generate_follow_up(resume_text: str, jd_text: str, company_name: str, received_email: str, original_mail_body: str = "", profile_text: str = "") -> dict:
+def detect_w2_fulltime(text: str) -> bool:
+    """Check if an email mentions W2 or full-time employment types."""
+    patterns = [
+        r'\bw[\-\s]?2\b',
+        r'\bfull[\-\s]?time\b',
+        r'\bFTE\b',
+        r'\bw2\s+only\b',
+        r'\bfull[\-\s]?time\s+only\b',
+        r'\bw2\s+employment\b',
+        r'\bfull[\-\s]?time\s+employment\b',
+        r'\bpermanent\s+position\b',
+        r'\bdirect\s+hire\b',
+    ]
+    for p in patterns:
+        if re.search(p, text, re.IGNORECASE):
+            return True
+    return False
+
+
+def generate_follow_up(received_email: str, resume_text: str = "", jd_text: str = "", company_name: str = "", original_mail_body: str = "", profile_text: str = "", conversation_history: str = "", is_w2_fulltime: bool = False) -> dict:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not set")
 
     client = OpenAI(api_key=api_key)
 
-    recruiter_name = _extract_recruiter_name(received_email) or _extract_recruiter_name(jd_text)
-    job_title = _extract_job_title(jd_text)
+    recruiter_name = _extract_recruiter_name(received_email) or (jd_text and _extract_recruiter_name(jd_text))
+    job_title = _extract_job_title(jd_text) if jd_text else ""
     greeting = f"Hi {recruiter_name}," if recruiter_name else "Hi there,"
 
     context_parts = [
-        f"RECEIVED EMAIL FROM COMPANY:\n{received_email.strip()}",
-        f"FULL JOB DESCRIPTION:\n{jd_text.strip()}",
-        f"FULL RESUME:\n{resume_text.strip()}",
+        f"RECEIVED EMAIL:\n{received_email.strip()}",
     ]
+    if jd_text:
+        context_parts.append(f"FULL JOB DESCRIPTION:\n{jd_text.strip()}")
+    if resume_text:
+        context_parts.append(f"FULL RESUME:\n{resume_text.strip()}")
     if original_mail_body:
         context_parts.append(f"MY ORIGINAL APPLICATION EMAIL:\n{original_mail_body.strip()}")
+    if conversation_history:
+        context_parts.append(f"FULL EMAIL CONVERSATION HISTORY WITH THIS SENDER (oldest first):\n{conversation_history.strip()}")
     if profile_text:
         context_parts.append(f"CANDIDATE PROFILE:\n{profile_text}")
 
     context = "\n\n---\n\n".join(context_parts)
 
+    w2_instruction = ""
+    if is_w2_fulltime:
+        w2_instruction = (
+            "- IMPORTANT: The received email mentions W2 or full-time employment. "
+            "The candidate is ONLY available on Corp-to-Corp (C2C) or Contract-to-Hire (C2H) basis. "
+            "Politely but clearly state this preference. Thank them for considering, express strong interest in the role, "
+            "and ask if the position can be offered on a C2C or C2H basis instead. "
+            "Be professional and keep the door open — do NOT sound demanding or rigid.\n"
+        )
+
+    if company_name and job_title:
+        intro = f"Read ALL the documents below, then write a follow-up reply to the email received from {company_name} regarding the '{job_title}' position."
+    elif company_name:
+        intro = f"Read ALL the documents below, then write a follow-up reply to the email received from {company_name}."
+    else:
+        intro = "Read ALL the documents below, then write a professional follow-up reply to the received email."
+
+    resume_instruction = ""
+    if resume_text:
+        resume_instruction = "- Reference specific details from the resume that are relevant\n"
+
     prompt = (
-        f"Read ALL the documents below, then write a follow-up reply to the email received from {company_name} regarding the '{job_title}' position.\n\n"
+        f"{intro}\n\n"
         f"{context}\n\n"
         "---\n\n"
         "Instructions:\n"
         f"- Start with EXACTLY: '{greeting}'\n"
         "- READ the received email carefully. Understand what they are asking or saying.\n"
+        "- If conversation history is provided, read it to understand the full context of our exchange.\n"
+        f"{w2_instruction}"
         "- If they are asking for availability — provide it enthusiastically\n"
-        "- If they are asking for more info — provide relevant details from the resume\n"
+        "- If they are asking for more info — provide relevant details from the profile or resume\n"
         "- If they are scheduling an interview — confirm eagerly with flexibility\n"
         "- If they are rejecting — thank them gracefully and express interest in future opportunities\n"
         "- If it's a general follow-up — express continued interest and ask about next steps\n"
-        "- Reference specific details from the original application/resume that are relevant\n"
+        f"{resume_instruction}"
         "- Keep the body 60-100 words, professional and enthusiastic\n"
         "- NEVER use 'Dear' or 'Dear Hiring Manager'\n"
         "- Do NOT use placeholder brackets like [Your Name] or [Company]\n"

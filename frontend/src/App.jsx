@@ -174,6 +174,37 @@ export default function App() {
   const [inboxSearch, setInboxSearch] = useState('');
   const [selectedMsgId, setSelectedMsgId] = useState(null);
   const [loadingMsgId, setLoadingMsgId] = useState(null);
+  // Follow-up attachments
+  const [fuAttach, setFuAttach] = useState({ resume: false, cover_letter: false, dl: false, gc: false });
+  const [personalDocs, setPersonalDocs] = useState({});
+  const [uploadingDoc, setUploadingDoc] = useState(null);
+
+  const fetchPersonalDocs = async () => {
+    try {
+      const res = await fetch('http://localhost:8000/api/documents');
+      const data = await res.json();
+      if (res.ok) setPersonalDocs(data.documents || {});
+    } catch { /* silent */ }
+  };
+
+  const handleUploadDoc = async (docType, file) => {
+    if (!file) return;
+    setUploadingDoc(docType);
+    try {
+      const fd = new FormData();
+      fd.append('doc_type', docType);
+      fd.append('file', file);
+      const res = await fetch('http://localhost:8000/api/documents/upload', { method: 'POST', body: fd });
+      if (res.ok) {
+        await fetchPersonalDocs();
+        setFuAttach(prev => ({ ...prev, [docType]: true }));
+      } else {
+        const data = await res.json();
+        setError(data.detail || 'Upload failed');
+      }
+    } catch { setError('Failed to upload document.'); }
+    finally { setUploadingDoc(null); }
+  };
 
   const fetchResumes = async () => {
     try {
@@ -237,6 +268,7 @@ export default function App() {
     checkGmailStatus();
     fetchProfile();
     fetchUsage();
+    fetchPersonalDocs();
 
     const params = new URLSearchParams(window.location.search);
     if (params.get('gmail') === 'connected') {
@@ -660,11 +692,13 @@ export default function App() {
     }
   };
 
+  const inboxDebounceRef = useRef(null);
+
   const handleFetchInbox = async (query) => {
     setInboxLoading(true);
     try {
-      const q = query || inboxSearch || (activeCompanyName ? activeCompanyName : '');
-      const res = await fetch(`http://localhost:8000/api/gmail/inbox?q=${encodeURIComponent(q)}`);
+      const q = query ?? inboxSearch ?? '';
+      const res = await fetch(`http://localhost:8000/api/gmail/inbox?q=${encodeURIComponent(q || 'in:inbox')}`);
       const data = await res.json();
       if (res.ok) setInboxMessages(data.messages || []);
       else setError(data.detail || 'Failed to fetch inbox');
@@ -673,6 +707,14 @@ export default function App() {
     } finally {
       setInboxLoading(false);
     }
+  };
+
+  const handleInboxSearchChange = (value) => {
+    setInboxSearch(value);
+    if (inboxDebounceRef.current) clearTimeout(inboxDebounceRef.current);
+    inboxDebounceRef.current = setTimeout(() => {
+      handleFetchInbox(value);
+    }, 350);
   };
 
   const handleSelectInboxMsg = async (msgId) => {
@@ -695,12 +737,14 @@ export default function App() {
   };
 
   const handleGenerateFollowUp = async () => {
-    if (!activeRecordId) { setError('Select a company first.'); return; }
     if (!followUpEmail.trim()) { setError('Paste or select the received email first.'); return; }
     setGeneratingFollowUp(true);
     setError(null);
     try {
-      const res = await fetch(`http://localhost:8000/api/history/${activeRecordId}/follow-up`, {
+      const url = activeRecordId
+        ? `http://localhost:8000/api/history/${activeRecordId}/follow-up`
+        : 'http://localhost:8000/api/follow-up/standalone';
+      const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ received_email: followUpEmail }),
@@ -708,6 +752,10 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) { setError(data.detail || `Error ${res.status}`); return; }
       setFollowUpDraft(data);
+      if (data.w2_detected && data.auto_draft_saved) {
+        setFollowUpGmailSaved(true);
+        setTimeout(() => setFollowUpGmailSaved(false), 8000);
+      }
     } catch {
       setError('Failed to generate follow-up.');
     } finally {
@@ -728,6 +776,10 @@ export default function App() {
           subject: followUpDraft.subject,
           body: followUpDraft.body,
           record_id: activeRecordId,
+          attach_resume: fuAttach.resume,
+          attach_cover_letter: fuAttach.cover_letter,
+          attach_dl: fuAttach.dl,
+          attach_gc: fuAttach.gc,
         }),
       });
       const data = await res.json();
@@ -1372,15 +1424,12 @@ export default function App() {
             <span className="mail-ollama-badge" style={{ marginLeft: '0.5rem' }}>via OpenAI</span>
             {activeCompanyName && <span className="panel-active-co">{activeCompanyName}</span>}
           </div>
-          {!activeRecordId ? (
-            <p className="panel-placeholder">Run a scan or click a company name in the Production Log.</p>
-          ) : (
             <div className="follow-up-section">
               <div className="follow-up-input">
                 <label className="field-label">Received Email</label>
                 {gmailConnected && (
                   <div className="inbox-picker">
-                    <button className="inbox-toggle-btn" onClick={() => { if (!inboxOpen) { handleFetchInbox(activeCompanyName || ''); } setInboxOpen(o => !o); }}>
+                    <button className="inbox-toggle-btn" onClick={() => { if (!inboxOpen) { handleFetchInbox(''); } setInboxOpen(o => !o); }}>
                       {inboxOpen ? '▾ Hide Inbox' : '▸ Select from Gmail'}
                     </button>
                     {inboxOpen && (
@@ -1389,14 +1438,12 @@ export default function App() {
                           <input
                             type="text"
                             className="inbox-search-input"
-                            placeholder="Search inbox…"
+                            placeholder="Search by name, email, company…"
                             value={inboxSearch}
-                            onChange={e => setInboxSearch(e.target.value)}
-                            onKeyDown={e => { if (e.key === 'Enter') handleFetchInbox(inboxSearch); }}
+                            onChange={e => handleInboxSearchChange(e.target.value)}
+                            autoFocus
                           />
-                          <button className="inbox-search-btn" onClick={() => handleFetchInbox(inboxSearch)} disabled={inboxLoading}>
-                            {inboxLoading ? '…' : '⌕'}
-                          </button>
+                          {inboxLoading && <span className="inbox-search-btn" style={{ pointerEvents: 'none' }}>…</span>}
                         </div>
                         {inboxMessages.length === 0 && !inboxLoading && <p className="inbox-empty">No messages found</p>}
                         <div className="inbox-list">
@@ -1420,7 +1467,7 @@ export default function App() {
                 )}
                 <textarea
                   className="field-textarea follow-up-textarea"
-                  placeholder="Paste the email you received from the company here, or select one from Gmail above…"
+                  placeholder="Paste the email you received here, or select one from Gmail above…"
                   value={followUpEmail}
                   onChange={e => setFollowUpEmail(e.target.value)}
                   rows={5}
@@ -1431,6 +1478,15 @@ export default function App() {
               </button>
               {followUpDraft && (
                 <div className="mail-draft-section" style={{ marginTop: '1rem' }}>
+                  {followUpDraft.w2_detected && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem', padding: '0.5rem 0.75rem', background: 'rgba(200, 155, 60, 0.15)', border: '1px solid rgba(200, 155, 60, 0.4)', borderRadius: '6px', fontSize: '0.82rem' }}>
+                      <span style={{ color: '#c89b3c', fontWeight: 600 }}>W2/Full-Time Detected</span>
+                      <span style={{ color: 'rgba(255,255,255,0.6)' }}> — C2C/C2H preference reply generated</span>
+                      {followUpDraft.auto_draft_saved && (
+                        <span style={{ marginLeft: 'auto', color: '#2ebd73', fontWeight: 600 }}>Draft auto-saved to Gmail</span>
+                      )}
+                    </div>
+                  )}
                   <div className="mail-draft-body">
                     {followUpDraft.to_emails?.length > 0 && (
                       <div className="mail-field">
@@ -1448,6 +1504,51 @@ export default function App() {
                       <span className="mail-field-label">Body</span>
                       <div className="mail-body-text">{followUpDraft.body}</div>
                     </div>
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', margin: '0.75rem 0', alignItems: 'center' }}>
+                    <span style={{ fontSize: '0.78rem', color: 'rgba(255,255,255,0.5)', marginRight: '0.25rem' }}>Attachments:</span>
+                    <button
+                      className={`mail-act-btn${fuAttach.resume ? ' mail-gmail-btn' : ''}`}
+                      style={{ fontSize: '0.75rem', padding: '0.25rem 0.6rem' }}
+                      onClick={() => setFuAttach(p => ({ ...p, resume: !p.resume }))}
+                    >
+                      {fuAttach.resume ? '✓' : '+'} Resume
+                    </button>
+                    <button
+                      className={`mail-act-btn${fuAttach.cover_letter ? ' mail-gmail-btn' : ''}`}
+                      style={{ fontSize: '0.75rem', padding: '0.25rem 0.6rem' }}
+                      onClick={() => setFuAttach(p => ({ ...p, cover_letter: !p.cover_letter }))}
+                    >
+                      {fuAttach.cover_letter ? '✓' : '+'} Cover Letter
+                    </button>
+                    {personalDocs.dl ? (
+                      <button
+                        className={`mail-act-btn${fuAttach.dl ? ' mail-gmail-btn' : ''}`}
+                        style={{ fontSize: '0.75rem', padding: '0.25rem 0.6rem' }}
+                        onClick={() => setFuAttach(p => ({ ...p, dl: !p.dl }))}
+                      >
+                        {fuAttach.dl ? '✓' : '+'} DL
+                      </button>
+                    ) : (
+                      <label className="mail-act-btn" style={{ fontSize: '0.75rem', padding: '0.25rem 0.6rem', cursor: 'pointer' }}>
+                        {uploadingDoc === 'dl' ? '…' : '↑ Upload DL'}
+                        <input type="file" accept=".pdf,.docx,.doc,.png,.jpg,.jpeg" hidden onChange={e => handleUploadDoc('dl', e.target.files[0])} />
+                      </label>
+                    )}
+                    {personalDocs.gc ? (
+                      <button
+                        className={`mail-act-btn${fuAttach.gc ? ' mail-gmail-btn' : ''}`}
+                        style={{ fontSize: '0.75rem', padding: '0.25rem 0.6rem' }}
+                        onClick={() => setFuAttach(p => ({ ...p, gc: !p.gc }))}
+                      >
+                        {fuAttach.gc ? '✓' : '+'} GC
+                      </button>
+                    ) : (
+                      <label className="mail-act-btn" style={{ fontSize: '0.75rem', padding: '0.25rem 0.6rem', cursor: 'pointer' }}>
+                        {uploadingDoc === 'gc' ? '…' : '↑ Upload GC'}
+                        <input type="file" accept=".pdf,.docx,.doc,.png,.jpg,.jpeg" hidden onChange={e => handleUploadDoc('gc', e.target.files[0])} />
+                      </label>
+                    )}
                   </div>
                   <div className="mail-draft-actions">
                     <button className="mail-act-btn" onClick={() => {
@@ -1473,7 +1574,6 @@ export default function App() {
                 </div>
               )}
             </div>
-          )}
         </div>
 
         {/* ── Batch Mode ── */}

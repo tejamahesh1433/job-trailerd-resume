@@ -25,7 +25,7 @@ from slowapi.errors import RateLimitExceeded
 
 from fastapi.responses import RedirectResponse
 from services.ai_service import analyze_resume, generate_cover_letter, analyze_job_metadata
-from services.ollama_service import generate_mail_draft, generate_follow_up
+from services.ollama_service import generate_mail_draft, generate_follow_up, detect_w2_fulltime
 from services.docx_service import extract_text_from_docx, create_tailored_docx
 from services import gmail_service
 from services.profile_service import process_uploaded_doc
@@ -1119,16 +1119,19 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
     score = result.get('score', 0)
     ai_company = result.get('company_name', '')
     local_company = _extract_company_name(jd_text)
+
+    contact_info = result.get('contact_info', {})
+    jd_emails = re.findall(r'[\w.+-]+@[\w-]+\.[\w.-]+', jd_text)
+    vendor_email = next((e for e in jd_emails if e.split('@')[1].split('.')[0].lower() not in _GENERIC_EMAIL), '')
+
     if ai_company and ai_company not in ('Unknown_Company', 'Unknown', ''):
         company_name = ai_company
     elif local_company != 'Unknown_Company':
         company_name = local_company
+    elif vendor_email:
+        company_name = vendor_email
     else:
         company_name = ai_company or local_company
-    
-    contact_info = result.get('contact_info', {})
-    jd_emails = re.findall(r'[\w.+-]+@[\w-]+\.[\w.-]+', jd_text)
-    vendor_email = next((e for e in jd_emails if e.split('@')[1].split('.')[0].lower() not in _GENERIC_EMAIL), '')
     company_dir = _make_company_dir(company_name, vendor_email)
     file_path = f"{company_dir}/resume.docx"
     jd_path = f"{company_dir}/jd_info.txt"
@@ -1831,25 +1834,72 @@ class GmailDraftRequest(BaseModel):
     subject: str
     body: str
     record_id: Optional[int] = None
+    attach_resume: bool = False
+    attach_cover_letter: bool = False
+    attach_dl: bool = False
+    attach_gc: bool = False
 
 @app.post("/api/gmail/save-draft")
 @limiter.limit("10/minute")
 async def gmail_save_draft(request: Request, draft: GmailDraftRequest):
-    """Save email as a draft in Gmail with resume attached."""
+    """Save email as a draft in Gmail with selected attachments."""
     try:
-        # Attach the tailored resume if record_id is provided
-        attachment_path = None
-        if draft.record_id:
-            record = get_resume_by_id(draft.record_id)
-            if record and record.get('file_path') and os.path.exists(record['file_path']):
-                attachment_path = record['file_path']
+        has_selections = draft.attach_resume or draft.attach_cover_letter or draft.attach_dl or draft.attach_gc
+        attachment_list = []
 
-        result = gmail_service.save_draft(
-            to_emails=draft.to_emails,
-            subject=draft.subject,
-            body=draft.body,
-            attachment_path=attachment_path,
-        )
+        if has_selections:
+            if draft.record_id and (draft.attach_resume or draft.attach_cover_letter):
+                record = get_resume_by_id(draft.record_id)
+                if record and record.get('file_path') and os.path.exists(record['file_path']):
+                    company_dir = os.path.dirname(record['file_path'])
+                    if draft.attach_resume:
+                        attachment_list.append({
+                            "path": record['file_path'],
+                            "display_name": "Teja_Mahesh_Neerukonda_Resume.docx"
+                        })
+                    if draft.attach_cover_letter:
+                        cl_files = [f for f in os.listdir(company_dir)
+                                     if f.endswith(".docx") and ("cover" in f.lower() or f.startswith("cover_letter_"))
+                                     and f != os.path.basename(record['file_path'])]
+                        if cl_files:
+                            attachment_list.append({
+                                "path": os.path.join(company_dir, cl_files[0]),
+                                "display_name": "Teja_Mahesh_Neerukonda_Cover_Letter.docx"
+                            })
+
+            doc_map = {"dl": draft.attach_dl, "gc": draft.attach_gc}
+            display_names = {"dl": "Drivers_License", "gc": "Green_Card"}
+            for doc_type, should_attach in doc_map.items():
+                if should_attach:
+                    for f in os.listdir(DOCUMENTS_DIR):
+                        if f.startswith(f"{doc_type}."):
+                            ext = os.path.splitext(f)[1]
+                            attachment_list.append({
+                                "path": os.path.join(DOCUMENTS_DIR, f),
+                                "display_name": f"{display_names[doc_type]}{ext}"
+                            })
+                            break
+
+        if has_selections:
+            result = gmail_service.save_draft(
+                to_emails=draft.to_emails,
+                subject=draft.subject,
+                body=draft.body,
+                attachments=attachment_list,
+            )
+        else:
+            attachment_path = None
+            if draft.record_id:
+                record = get_resume_by_id(draft.record_id)
+                if record and record.get('file_path') and os.path.exists(record['file_path']):
+                    attachment_path = record['file_path']
+            result = gmail_service.save_draft(
+                to_emails=draft.to_emails,
+                subject=draft.subject,
+                body=draft.body,
+                attachment_path=attachment_path,
+            )
+
         logger.info(f"Gmail draft saved: {result.get('draft_id', 'unknown')}")
         return result
     except RuntimeError as e:
@@ -1885,6 +1935,59 @@ async def gmail_message(request: Request, message_id: str):
     except Exception as e:
         logger.error(f"Gmail message read error: {e}")
         raise HTTPException(status_code=500, detail="Failed to read message")
+
+# ─── Personal Documents (DL, GC, etc.) ───
+
+DOCUMENTS_DIR = os.path.join(DATA_DIR, "documents")
+os.makedirs(DOCUMENTS_DIR, exist_ok=True)
+
+ALLOWED_DOC_TYPES = {"dl", "gc"}
+
+@app.post("/api/documents/upload")
+@limiter.limit("10/minute")
+async def upload_document(request: Request, doc_type: str = Form(...), file: UploadFile = File(...)):
+    """Upload a personal document (DL or GC)."""
+    doc_type = doc_type.lower()
+    if doc_type not in ALLOWED_DOC_TYPES:
+        raise HTTPException(status_code=400, detail=f"Invalid document type. Allowed: {', '.join(ALLOWED_DOC_TYPES)}")
+
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in {".pdf", ".docx", ".doc", ".png", ".jpg", ".jpeg"}:
+        raise HTTPException(status_code=400, detail="Unsupported file type. Use PDF, DOCX, DOC, PNG, or JPG.")
+
+    save_name = f"{doc_type}{ext}"
+    for existing in os.listdir(DOCUMENTS_DIR):
+        if existing.startswith(f"{doc_type}."):
+            os.remove(os.path.join(DOCUMENTS_DIR, existing))
+
+    save_path = os.path.join(DOCUMENTS_DIR, save_name)
+    content = await file.read()
+    with open(save_path, "wb") as f:
+        f.write(content)
+
+    return {"status": "uploaded", "doc_type": doc_type, "filename": save_name}
+
+
+@app.get("/api/documents")
+async def list_documents(request: Request):
+    """List uploaded personal documents."""
+    docs = {}
+    for f in os.listdir(DOCUMENTS_DIR):
+        name = os.path.splitext(f)[0].lower()
+        if name in ALLOWED_DOC_TYPES:
+            docs[name] = {"filename": f, "path": os.path.join(DOCUMENTS_DIR, f)}
+    return {"documents": docs}
+
+
+@app.delete("/api/documents/{doc_type}")
+async def delete_document(request: Request, doc_type: str):
+    """Delete a personal document."""
+    doc_type = doc_type.lower()
+    for f in os.listdir(DOCUMENTS_DIR):
+        if f.startswith(f"{doc_type}."):
+            os.remove(os.path.join(DOCUMENTS_DIR, f))
+            return {"status": "deleted", "doc_type": doc_type}
+    raise HTTPException(status_code=404, detail="Document not found")
 
 # ─── Follow-Up Mail ───
 
@@ -1931,6 +2034,27 @@ async def api_generate_follow_up(request: Request, record_id: int, body: FollowU
 
         to_emails = list(set(re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', body.received_email)))
 
+        is_w2 = detect_w2_fulltime(body.received_email)
+
+        conversation_history = ""
+        if is_w2 and to_emails:
+            try:
+                sender_email = to_emails[0]
+                convos = gmail_service.get_conversation_with_sender(sender_email, max_results=20)
+                if convos:
+                    parts = []
+                    for msg in convos:
+                        parts.append(
+                            f"--- Email ({msg['date']}) ---\n"
+                            f"From: {msg['from']}\n"
+                            f"To: {msg['to']}\n"
+                            f"Subject: {msg['subject']}\n\n"
+                            f"{msg['body']}"
+                        )
+                    conversation_history = "\n\n".join(parts)
+            except Exception as e:
+                logger.warning(f"Could not fetch conversation history: {e}")
+
         result = generate_follow_up(
             resume_text=resume_text,
             jd_text=jd_text,
@@ -1938,13 +2062,31 @@ async def api_generate_follow_up(request: Request, record_id: int, body: FollowU
             received_email=body.received_email,
             original_mail_body=original_mail_body,
             profile_text=profile_text,
+            conversation_history=conversation_history,
+            is_w2_fulltime=is_w2,
         )
 
-        return {
+        response_data = {
             "to_emails": to_emails,
             "subject": result.get('subject', ''),
             "body": result.get('body', ''),
+            "w2_detected": is_w2,
         }
+
+        if is_w2:
+            try:
+                draft_result = gmail_service.save_draft(
+                    to_emails=to_emails,
+                    subject=result.get('subject', ''),
+                    body=result.get('body', ''),
+                )
+                response_data["auto_draft_saved"] = True
+                response_data["draft_id"] = draft_result.get("draft_id", "")
+            except Exception as e:
+                logger.warning(f"Auto-save draft failed for W2 reply: {e}")
+                response_data["auto_draft_saved"] = False
+
+        return response_data
     except RuntimeError as e:
         logger.warning(f"AI provider error: {e}")
         raise HTTPException(status_code=503, detail="The AI provider is unavailable. Please try again.")
@@ -1952,6 +2094,76 @@ async def api_generate_follow_up(request: Request, record_id: int, body: FollowU
         raise
     except Exception as e:
         logger.error(f"Follow-up generation error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to generate follow-up")
+
+
+@app.post("/api/follow-up/standalone")
+@limiter.limit("5/minute")
+async def api_standalone_follow_up(request: Request, body: FollowUpRequest):
+    """Generate a follow-up reply without a company record — for direct/personal emails."""
+    try:
+        profile_text = ""
+        profile_path = os.path.join(DATA_DIR, "profile.txt")
+        if os.path.exists(profile_path):
+            with open(profile_path, "r", encoding="utf-8") as f:
+                profile_text = f.read().strip()
+
+        to_emails = list(set(re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', body.received_email)))
+
+        is_w2 = detect_w2_fulltime(body.received_email)
+
+        conversation_history = ""
+        if to_emails:
+            try:
+                sender_email = to_emails[0]
+                convos = gmail_service.get_conversation_with_sender(sender_email, max_results=20)
+                if convos:
+                    parts = []
+                    for msg in convos:
+                        parts.append(
+                            f"--- Email ({msg['date']}) ---\n"
+                            f"From: {msg['from']}\n"
+                            f"To: {msg['to']}\n"
+                            f"Subject: {msg['subject']}\n\n"
+                            f"{msg['body']}"
+                        )
+                    conversation_history = "\n\n".join(parts)
+            except Exception as e:
+                logger.warning(f"Could not fetch conversation history: {e}")
+
+        result = generate_follow_up(
+            received_email=body.received_email,
+            profile_text=profile_text,
+            conversation_history=conversation_history,
+            is_w2_fulltime=is_w2,
+        )
+
+        response_data = {
+            "to_emails": to_emails,
+            "subject": result.get('subject', ''),
+            "body": result.get('body', ''),
+            "w2_detected": is_w2,
+        }
+
+        if is_w2:
+            try:
+                draft_result = gmail_service.save_draft(
+                    to_emails=to_emails,
+                    subject=result.get('subject', ''),
+                    body=result.get('body', ''),
+                )
+                response_data["auto_draft_saved"] = True
+                response_data["draft_id"] = draft_result.get("draft_id", "")
+            except Exception as e:
+                logger.warning(f"Auto-save draft failed for standalone W2 reply: {e}")
+                response_data["auto_draft_saved"] = False
+
+        return response_data
+    except RuntimeError as e:
+        logger.warning(f"AI provider error: {e}")
+        raise HTTPException(status_code=503, detail="The AI provider is unavailable. Please try again.")
+    except Exception as e:
+        logger.error(f"Standalone follow-up error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to generate follow-up")
 
 # ─── Job Matcher ───

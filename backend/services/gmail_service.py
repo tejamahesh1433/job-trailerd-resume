@@ -144,18 +144,35 @@ def disconnect():
     return {"status": "disconnected"}
 
 
-def _attach_docx(msg, file_path: str, display_name: str):
-    """Attach a .docx file to the email message."""
+MIME_TYPES = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pdf": "application/pdf",
+    ".doc": "application/msword",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+}
+
+
+def _attach_file(msg, file_path: str, display_name: str):
+    """Attach any file to the email message."""
+    ext = os.path.splitext(file_path)[1].lower()
+    mime = MIME_TYPES.get(ext, "application/octet-stream")
+    maintype, subtype = mime.split("/", 1)
     with open(file_path, "rb") as f:
-        part = MIMEBase("application", "vnd.openxmlformats-officedocument.wordprocessingml.document")
+        part = MIMEBase(maintype, subtype)
         part.set_payload(f.read())
         encoders.encode_base64(part)
         part.add_header("Content-Disposition", f'attachment; filename="{display_name}"')
         msg.attach(part)
 
 
-def save_draft(to_emails: list, subject: str, body: str, attachment_path: str = None) -> dict:
-    """Save an email as a draft in Gmail with resume + cover letter from the company folder."""
+def save_draft(to_emails: list, subject: str, body: str, attachment_path: str = None, attachments: list = None) -> dict:
+    """Save an email as a draft in Gmail.
+
+    attachments: list of dicts with 'path' and 'display_name' keys for explicit attachment control.
+    attachment_path: legacy param — attaches resume + auto-discovers cover letter from company folder.
+    """
     creds = _load_credentials()
     if not creds:
         raise RuntimeError("Gmail not connected. Please connect your Gmail account first.")
@@ -174,19 +191,24 @@ def save_draft(to_emails: list, subject: str, body: str, attachment_path: str = 
 
     attached_files = []
 
-    # Attach the tailored resume from the company folder
-    if attachment_path and os.path.exists(attachment_path):
-        _attach_docx(msg, attachment_path, "Teja_Mahesh_Neerukonda_Resume.docx")
+    if attachments:
+        for att in attachments:
+            path = att.get("path", "")
+            name = att.get("display_name", os.path.basename(path))
+            if path and os.path.exists(path):
+                _attach_file(msg, path, name)
+                attached_files.append(name)
+    elif attachment_path and os.path.exists(attachment_path):
+        _attach_file(msg, attachment_path, "Teja_Mahesh_Neerukonda_Resume.docx")
         attached_files.append(os.path.basename(attachment_path))
 
-        # Also attach cover letter if it exists in the same company folder
         company_dir = os.path.dirname(attachment_path)
         cl_files = [f for f in os.listdir(company_dir)
                      if f.endswith(".docx") and ("cover" in f.lower() or f.startswith("cover_letter_"))
                      and f != os.path.basename(attachment_path)]
         if cl_files:
             cl_path = os.path.join(company_dir, cl_files[0])
-            _attach_docx(msg, cl_path, "Teja_Mahesh_Neerukonda_Cover_Letter.docx")
+            _attach_file(msg, cl_path, "Teja_Mahesh_Neerukonda_Cover_Letter.docx")
             attached_files.append(cl_files[0])
 
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
@@ -200,6 +222,53 @@ def save_draft(to_emails: list, subject: str, body: str, attachment_path: str = 
         "message": "Draft saved to Gmail",
         "attachments": attached_files,
     }
+
+
+def get_conversation_with_sender(sender_email: str, max_results: int = 20) -> list:
+    """Fetch all emails exchanged with a specific sender, ordered chronologically."""
+    creds = _load_credentials()
+    if not creds:
+        raise RuntimeError("Gmail not connected.")
+
+    if creds.expired and creds.refresh_token:
+        from google.auth.transport.requests import Request
+        creds.refresh(Request())
+        _save_credentials(creds)
+
+    service = build("gmail", "v1", credentials=creds)
+
+    queries = [
+        f"from:{sender_email}",
+        f"to:{sender_email}",
+    ]
+
+    all_msg_ids = set()
+    for q in queries:
+        resp = service.users().messages().list(
+            userId="me", q=q, maxResults=max_results
+        ).execute()
+        for msg_stub in resp.get("messages", []):
+            all_msg_ids.add(msg_stub["id"])
+
+    conversations = []
+    for msg_id in all_msg_ids:
+        msg = service.users().messages().get(
+            userId="me", id=msg_id, format="full"
+        ).execute()
+        headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+        body_text = _extract_body(msg.get("payload", {}))
+        conversations.append({
+            "id": msg_id,
+            "from": headers.get("From", ""),
+            "to": headers.get("To", ""),
+            "subject": headers.get("Subject", ""),
+            "date": headers.get("Date", ""),
+            "body": body_text,
+            "timestamp": int(msg.get("internalDate", 0)),
+        })
+
+    conversations.sort(key=lambda m: m["timestamp"])
+    return conversations
 
 
 def search_inbox(query: str, max_results: int = 15) -> list:
