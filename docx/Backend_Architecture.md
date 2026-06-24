@@ -260,7 +260,7 @@ The system applies rule-based filters before any AI processing:
 flowchart TD
     JD["Job Description Input"] --> LEN{"Length >= 50 chars?"}
     LEN -->|No| SKIP1["Reject: Too short"]
-    LEN -->|Yes| DUP{"Duplicate check<br/>SequenceMatcher >= 0.95?"}
+    LEN -->|Yes| DUP{"Duplicate check - ratio >= 0.95?"}
     DUP -->|Yes| SKIP2["Reject: Already scanned"]
     DUP -->|No| EXP{"Experience <= 10 years?"}
     EXP -->|No| SKIP3["Reject: Over experience cap"]

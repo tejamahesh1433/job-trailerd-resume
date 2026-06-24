@@ -256,17 +256,17 @@ sequenceDiagram
 ```mermaid
 flowchart TD
     JD["JD Text Input"] --> P1
-    P1{"Explicit company patterns<br/>Company:, Organization:, About [X]"} -->|Found| R1["Return match"]
+    P1{"Explicit company patterns?"} -->|Found| R1["Return match"]
     P1 -->|Not found| P2
-    P2{"Corporate suffix patterns<br/>[Name] Inc./LLC/Corp/Ltd"} -->|Found| R2["Return match"]
+    P2{"Corporate suffix patterns?"} -->|Found| R2["Return match"]
     P2 -->|Not found| P3
-    P3{"Email domain extraction<br/>user@company.com"} -->|Non-generic domain| R3["Return domain.title()"]
+    P3{"Email domain extraction?"} -->|Non-generic domain| R3["Return domain.title()"]
     P3 -->|Generic domain| P4
-    P4{"Website URL patterns<br/>Web: www.company.com"} -->|Found| R4["Return domain"]
+    P4{"Website URL patterns?"} -->|Found| R4["Return domain"]
     P4 -->|Not found| P5
-    P5{"Any URL in text<br/>https://company.com/..."} -->|Non-blacklisted| R5["Return domain"]
+    P5{"Any URL in text?"} -->|Non-blacklisted| R5["Return domain"]
     P5 -->|Blacklisted| P6
-    P6{"Phone number context<br/>Line before phone = company?"} -->|Found| R6["Return prev line"]
+    P6{"Phone number context?"} -->|Found| R6["Return prev line"]
     P6 -->|Not found| R7["Return 'Unknown_Company'"]
 ```
 

@@ -6,33 +6,33 @@
 graph TB
     User((User))
 
-    subgraph Frontend ["Frontend (React 19 + Vite 8)"]
-        App["App.jsx<br/>Main State Container"]
-        JM["JobMatcher.jsx<br/>Job Pre-Screening"]
-        SP["SearchPage.jsx<br/>Full-Text Search"]
+    subgraph Frontend ["Frontend - React 19 + Vite 8"]
+        App["App.jsx - Main State Container"]
+        JM["JobMatcher.jsx - Job Pre-Screening"]
+        SP["SearchPage.jsx - Full-Text Search"]
     end
 
-    subgraph Backend ["Backend (FastAPI + Uvicorn)"]
-        Router["main.py<br/>API Router + Business Logic"]
+    subgraph Backend ["Backend - FastAPI + Uvicorn"]
+        Router["main.py - API Router + Business Logic"]
 
         subgraph Services ["services/"]
-            AIS["ai_service.py<br/>Gemini Resume Analysis"]
-            OLS["ollama_service.py<br/>OpenAI Email Drafts"]
-            DXS["docx_service.py<br/>DOCX Read/Write"]
-            GMS["gmail_service.py<br/>Gmail OAuth2 + API"]
-            TGS["telegram_service.py<br/>Telegram Bot"]
-            PFS["profile_service.py<br/>Document OCR"]
-            UTS["usage_tracker.py<br/>Cost Tracking"]
+            AIS["ai_service.py - Gemini Resume Analysis"]
+            OLS["ollama_service.py - OpenAI Email Drafts"]
+            DXS["docx_service.py - DOCX Read/Write"]
+            GMS["gmail_service.py - Gmail OAuth2 + API"]
+            TGS["telegram_service.py - Telegram Bot"]
+            PFS["profile_service.py - Document OCR"]
+            UTS["usage_tracker.py - Cost Tracking"]
         end
 
-        DB[("SQLite<br/>resumes.db")]
-        FS[("File System<br/>trailerd/ + original/")]
+        DB[("SQLite - resumes.db")]
+        FS[("File System - trailerd/ + original/")]
     end
 
     subgraph External ["External Services"]
-        Gemini["Google Gemini API<br/>2.5-pro / 2.5-flash"]
-        OpenAI["OpenAI API<br/>GPT-4o-mini"]
-        Gmail["Gmail API<br/>OAuth2"]
+        Gemini["Google Gemini API"]
+        OpenAI["OpenAI API - GPT-4o-mini"]
+        Gmail["Gmail API - OAuth2"]
         TGBot["Telegram Bot API"]
     end
 
@@ -99,24 +99,24 @@ graph TB
 ```mermaid
 graph LR
     subgraph Middleware
-        TH["TrustedHostMiddleware<br/>Restrict allowed hosts"]
-        CORS["CORSMiddleware<br/>Restrict origins"]
-        SH["Security Headers<br/>X-Frame-Options, HSTS,<br/>X-Content-Type-Options"]
-        RL["SlowAPI Rate Limiter<br/>Per-endpoint limits"]
+        TH["TrustedHostMiddleware - Restrict allowed hosts"]
+        CORS["CORSMiddleware - Restrict origins"]
+        SH["Security Headers - X-Frame-Options, HSTS, X-Content-Type-Options"]
+        RL["SlowAPI Rate Limiter - Per-endpoint limits"]
     end
 
     subgraph Validation
-        PT["Path Traversal Prevention<br/>os.path.abspath checks"]
-        FV["File Validation<br/>Size limits, type checks"]
-        IV["Input Validation<br/>Pydantic models"]
-        CSV["CSV Injection Prevention<br/>sanitize_csv_field()"]
+        PT["Path Traversal Prevention - os.path.abspath checks"]
+        FV["File Validation - Size limits, type checks"]
+        IV["Input Validation - Pydantic models"]
+        CSVP["CSV Injection Prevention - sanitize_csv_field"]
     end
 
     Request -->|HTTP| TH --> CORS --> SH --> RL --> Handler
     Handler --> PT
     Handler --> FV
     Handler --> IV
-    Handler --> CSV
+    Handler --> CSVP
 ```
 
 ### Rate Limits

@@ -6,21 +6,21 @@ The frontend is a React 19 Single Page Application built with Vite 8. It uses va
 
 ```mermaid
 graph TD
-    main["main.jsx<br/>React StrictMode + DOM mount"]
+    main["main.jsx - StrictMode + DOM mount"]
     main --> App
 
     subgraph App_Component ["App.jsx — Central State Container"]
-        App["App<br/>60+ state variables<br/>Hash-based routing"]
-        SR["ScoreRing<br/>Animated SVG progress ring"]
-        FI["FilmIcon<br/>SVG brand icon"]
-        EI["EmptyResultsIcon<br/>SVG placeholder"]
+        App["App - 60+ state variables, hash routing"]
+        SR["ScoreRing - Animated SVG progress ring"]
+        FI["FilmIcon - SVG brand icon"]
+        EI["EmptyResultsIcon - SVG placeholder"]
     end
 
     subgraph Pages ["Page Components"]
-        JM["JobMatcher.jsx<br/>Job pre-screening"]
-        SP["SearchPage.jsx<br/>Full-text JD search"]
-        Dashboard["Dashboard View<br/>(inline in App.jsx)"]
-        Info["Info View<br/>(inline in App.jsx)"]
+        JM["JobMatcher.jsx - Job pre-screening"]
+        SP["SearchPage.jsx - Full-text JD search"]
+        Dashboard["Dashboard View - inline in App.jsx"]
+        Info["Info View - inline in App.jsx"]
     end
 
     App -->|currentPage = dashboard| Dashboard
@@ -67,14 +67,14 @@ graph TB
         subgraph Left ["Panel 01: Pre-Production"]
             AN["AI Notes textarea"]
             JD["Job Description textarea"]
-            RM["Resume Manager<br/>Drag-drop, select, delete"]
-            PP["Personal Profile<br/>Collapsible editor + doc upload"]
+            RM["Resume Manager - Drag-drop, select, delete"]
+            PP["Personal Profile - Collapsible editor + doc upload"]
             ACT["ACTION button"]
         end
 
         subgraph Right ["Panel 02: Post-Production"]
             CB["Company Badge"]
-            SC["Score Rings<br/>(Original -> Tailored)"]
+            SC["Score Rings - Original to Tailored"]
             SB["Status Banner"]
             DL["Download Links"]
             CI["Contact Info Strip"]
@@ -85,12 +85,12 @@ graph TB
     end
 
     subgraph CLMail ["Two-Column Below"]
-        P03["Panel 03: Cover Letter<br/>Generate, copy, download"]
-        P04["Panel 04: Email Draft<br/>Generate, copy, mailto, Gmail"]
+        P03["Panel 03: Cover Letter - Generate, copy, download"]
+        P04["Panel 04: Email Draft - Generate, copy, mailto, Gmail"]
     end
 
-    P05["Panel 05: Follow-Up<br/>Gmail inbox picker, reply generation"]
-    P06["Panel 06: Production Log<br/>History table with sort/filter/search"]
+    P05["Panel 05: Follow-Up - Gmail inbox picker, reply generation"]
+    P06["Panel 06: Production Log - History table with sort/filter/search"]
 ```
 
 ## State Management
