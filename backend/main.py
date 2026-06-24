@@ -759,9 +759,14 @@ os.makedirs("trailerd", exist_ok=True)
 os.makedirs("original", exist_ok=True)
 init_db()
 
+from prometheus_fastapi_instrumentator import Instrumentator
+
 app = FastAPI(title="Job Tailored Resume API")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Setup Prometheus metrics
+Instrumentator().instrument(app).expose(app)
 
 # Security: Trusted host middleware
 allowed_hosts = os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
@@ -1314,12 +1319,20 @@ async def get_addresses(request: Request):
                 
             emails_list = list(emails_found)
             email = emails_list[0] if emails_list else ""
+            
+            # Extract phone number with extension if available
+            phones = re.findall(r'(?:\+?\d{1,2}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?:\s*(?:ext\.?|x|ext\s*:)\s*:?\s*\d+)?', jd, re.IGNORECASE)
+            phone = phones[0].strip() if phones else ""
+            
+            # Fallback to extracting name
+            from services.ollama_service import _extract_recruiter_name
             name = _extract_recruiter_name(jd)
             
             results.append({
                 "id": rec["id"],
                 "company_name": rec["company_name"],
                 "user_address": rec["user_address"],
+                "phone": phone,
                 "name": name,
                 "email": email,
                 "all_emails": emails_list
@@ -1911,7 +1924,7 @@ async def gmail_save_draft(request: Request, draft: GmailDraftRequest):
 # ─── Gmail Inbox (for follow-up) ───
 
 @app.get("/api/gmail/inbox")
-@limiter.limit("10/minute")
+@limiter.limit("60/minute")
 async def gmail_inbox(request: Request, q: str = ""):
     """Search Gmail inbox for messages matching a query."""
     try:
@@ -2007,11 +2020,10 @@ async def api_generate_follow_up(request: Request, record_id: int, body: FollowU
             raise HTTPException(status_code=404, detail="Record not found")
 
         file_path = record.get('file_path')
-        if not file_path or not os.path.exists(file_path):
-            raise HTTPException(status_code=400, detail="Resume file not found")
-
-        with open(file_path, "rb") as f:
-            resume_text = extract_text_from_docx(f.read())
+        resume_text = ""
+        if file_path and os.path.exists(file_path):
+            with open(file_path, "rb") as f:
+                resume_text = extract_text_from_docx(f.read())
 
         jd_text = record.get('jd_text', '')
         if not jd_text:
@@ -2019,8 +2031,8 @@ async def api_generate_follow_up(request: Request, record_id: int, body: FollowU
 
         # Read existing mail draft if available
         original_mail_body = ""
-        company_dir = os.path.dirname(file_path)
-        if os.path.isdir(company_dir):
+        company_dir = os.path.dirname(file_path) if file_path else ""
+        if company_dir and os.path.isdir(company_dir):
             draft_files = [f for f in os.listdir(company_dir) if f.startswith("mail_draft_") and f.endswith(".txt")]
             if draft_files:
                 with open(os.path.join(company_dir, draft_files[0]), "r", encoding="utf-8") as f:

@@ -714,7 +714,7 @@ export default function App() {
     if (inboxDebounceRef.current) clearTimeout(inboxDebounceRef.current);
     inboxDebounceRef.current = setTimeout(() => {
       handleFetchInbox(value);
-    }, 350);
+    }, 800);
   };
 
   const handleSelectInboxMsg = async (msgId) => {
@@ -875,6 +875,7 @@ export default function App() {
       const q = addressSearchQuery.toLowerCase();
       return (item.company_name || '').toLowerCase().includes(q) ||
              (item.user_address || '').toLowerCase().includes(q) ||
+             (item.phone || '').toLowerCase().includes(q) ||
              (item.name || '').toLowerCase().includes(q) ||
              (item.email || '').toLowerCase().includes(q);
     });
@@ -963,18 +964,20 @@ export default function App() {
                   style={{ marginBottom: '1.5rem', maxWidth: '100%' }}
                 />
                 <div className="info-address-list">
-                  {filteredAddresses.map((item, index) => (
+                  {filteredAddresses.map((item, index) => {
+                    const contactDisplay = item.phone || item.name;
+                    return (
                     <div key={item.id || index} className="info-address-card">
                       <div className="info-address-company">{item.company_name}</div>
                       <div className="info-address-text">{item.user_address}</div>
-                      {(item.name || item.email) && (
+                      {(contactDisplay || item.email) && (
                         <div className="info-address-contact">
-                          {item.name && <div className="info-address-field"><span className="info-address-label">Contact</span>{item.name}</div>}
+                          {contactDisplay && <div className="info-address-field"><span className="info-address-label">Contact</span>{contactDisplay}</div>}
                           {item.email && <div className="info-address-field"><span className="info-address-label">Email</span>{item.email}</div>}
                         </div>
                       )}
                     </div>
-                  ))}
+                  )})}
                   {infoAddresses.length === 0 && <p className="empty-log">No addresses saved yet.</p>}
                   {infoAddresses.length > 0 && filteredAddresses.length === 0 && <p className="empty-log">No addresses match your search.</p>}
                 </div>
