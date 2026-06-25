@@ -28,3 +28,6 @@ backend/app.log
 # OS Files
 .DS_Store
 Thumbs.db
+
+# Downloads
+dl/

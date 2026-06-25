@@ -2390,6 +2390,8 @@ def _telegram_process_jd(jd_text: str, chat_id: int):
         tailored = result.get("tailored", False)
         missing = result.get("missing_keywords", [])
 
+        record_id = result.get("id", 0)
+
         lines = [f"Processed JD for {company}!"]
         if tailored and after_score != score:
             lines.append(f"Score: {score}% -> {after_score}% (+{after_score - score})")
@@ -2407,7 +2409,19 @@ def _telegram_process_jd(jd_text: str, chat_id: int):
         lines.append(f"\nUsing resume: {resume_filename}")
         lines.append("Files saved — check your dashboard for downloads.")
 
-        send_message_sync(chat_id, "\n".join(lines))
+        buttons = {
+            "inline_keyboard": [
+                [
+                    {"text": "Generate Cover Letter", "callback_data": f"cover_letter:{record_id}"},
+                    {"text": "Generate Mail Draft", "callback_data": f"mail_draft:{record_id}"},
+                ],
+                [
+                    {"text": "Save Draft to Gmail", "callback_data": f"gmail_draft:{record_id}"},
+                ],
+            ]
+        }
+
+        send_message_sync(chat_id, "\n".join(lines), reply_markup=buttons)
         logger.info(f"Telegram JD processed: {company} (score={after_score}%) chat={chat_id}")
 
     except Exception as e:
@@ -2418,7 +2432,257 @@ def _telegram_process_jd(jd_text: str, chat_id: int):
             logger.error("Failed to send Telegram error reply")
 
 
+def _telegram_generate_cover_letter(record_id: int, chat_id: int):
+    """Background task: generate cover letter and send result via Telegram."""
+    from services.telegram_service import send_message_sync
+    try:
+        record = get_resume_by_id(record_id)
+        if not record:
+            send_message_sync(chat_id, "Record not found.")
+            return
+
+        file_path = record.get('file_path')
+        if not file_path or not os.path.exists(file_path):
+            send_message_sync(chat_id, "Resume file not found for this record.")
+            return
+
+        with open(file_path, "rb") as f:
+            resume_text = extract_text_from_docx(f.read())
+
+        cover_letter = generate_cover_letter(resume_text, record['jd_text'], record['company_name'])
+
+        company_dir = os.path.dirname(os.path.abspath(file_path))
+        cl_filename = get_output_filename("cover_letter", record_id)
+        cl_path = os.path.join(company_dir, cl_filename).replace("\\", "/")
+
+        cl_doc = docx.Document()
+        cl_doc.add_paragraph(cover_letter)
+        cl_doc.save(cl_path)
+
+        company = record.get('company_name', 'Unknown')
+        msg = f"Cover letter generated for {company}!\n\n{cover_letter[:3500]}"
+        buttons = {
+            "inline_keyboard": [
+                [
+                    {"text": "Generate Mail Draft", "callback_data": f"mail_draft:{record_id}"},
+                    {"text": "Save Draft to Gmail", "callback_data": f"gmail_draft:{record_id}"},
+                ],
+            ]
+        }
+        send_message_sync(chat_id, msg, reply_markup=buttons)
+        logger.info(f"Telegram cover letter generated for record {record_id}")
+
+    except Exception as e:
+        logger.error(f"Telegram cover letter error: {e}", exc_info=True)
+        try:
+            send_message_sync(chat_id, f"Cover letter generation failed: {str(e)[:300]}")
+        except Exception:
+            pass
+
+
+def _telegram_generate_mail_draft(record_id: int, chat_id: int):
+    """Background task: generate mail draft and send result via Telegram."""
+    from services.telegram_service import send_message_sync
+    try:
+        record = get_resume_by_id(record_id)
+        if not record:
+            send_message_sync(chat_id, "Record not found.")
+            return
+
+        file_path = record.get('file_path')
+        if not file_path:
+            send_message_sync(chat_id, "No file path for this record.")
+            return
+
+        company_dir = os.path.dirname(file_path)
+        resume_text = ""
+        cover_letter_text = ""
+
+        if os.path.exists(file_path):
+            with open(file_path, "rb") as f:
+                resume_text = extract_text_from_docx(f.read())
+
+        if os.path.isdir(company_dir):
+            for filename in os.listdir(company_dir):
+                if ("cover" in filename.lower() or filename.startswith("cover_letter_")) and filename.endswith(".docx"):
+                    filepath = os.path.join(company_dir, filename)
+                    if filepath != file_path:
+                        with open(filepath, "rb") as f:
+                            cover_letter_text = extract_text_from_docx(f.read())
+                        break
+
+        if not resume_text:
+            send_message_sync(chat_id, "Could not read resume text.")
+            return
+
+        jd_text = record.get('jd_text', '')
+        if not jd_text:
+            send_message_sync(chat_id, "No job description found for this record.")
+            return
+
+        profile_text = ""
+        profile_path = os.path.join(DATA_DIR, "profile.txt")
+        if os.path.exists(profile_path):
+            with open(profile_path, "r", encoding="utf-8") as f:
+                profile_text = f.read().strip()
+
+        mail = generate_mail_draft(resume_text, jd_text, cover_letter_text, record['company_name'], profile_text)
+        subject = mail.get('subject', '')
+        body = mail.get('body', '')
+
+        draft_filename = get_output_filename("mail_draft", record_id)
+        draft_path = os.path.join(company_dir, draft_filename).replace("\\", "/")
+        with open(draft_path, "w", encoding="utf-8") as f:
+            f.write(f"Subject: {subject}\n\n{body}")
+
+        company = record.get('company_name', 'Unknown')
+        to_emails = list(set(re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', jd_text)))
+        to_line = f"To: {', '.join(to_emails)}" if to_emails else "To: (no email found in JD)"
+
+        msg = f"Mail draft for {company}:\n\n{to_line}\nSubject: {subject}\n\n{body[:3000]}"
+        buttons = {
+            "inline_keyboard": [
+                [{"text": "Save Draft to Gmail", "callback_data": f"gmail_draft:{record_id}"}],
+            ]
+        }
+        send_message_sync(chat_id, msg, reply_markup=buttons)
+        logger.info(f"Telegram mail draft generated for record {record_id}")
+
+    except Exception as e:
+        logger.error(f"Telegram mail draft error: {e}", exc_info=True)
+        try:
+            send_message_sync(chat_id, f"Mail draft generation failed: {str(e)[:300]}")
+        except Exception:
+            pass
+
+
+def _telegram_save_gmail_draft(record_id: int, chat_id: int):
+    """Background task: generate mail + save as Gmail draft via Telegram."""
+    from services.telegram_service import send_message_sync
+    try:
+        record = get_resume_by_id(record_id)
+        if not record:
+            send_message_sync(chat_id, "Record not found.")
+            return
+
+        file_path = record.get('file_path')
+        if not file_path:
+            send_message_sync(chat_id, "No file path for this record.")
+            return
+
+        company_dir = os.path.dirname(file_path)
+        jd_text = record.get('jd_text', '')
+        company = record.get('company_name', 'Unknown')
+
+        subject = ""
+        body = ""
+        draft_files = [f for f in os.listdir(company_dir) if f.startswith("mail_draft_") and f.endswith(".txt")] if os.path.isdir(company_dir) else []
+        if draft_files:
+            with open(os.path.join(company_dir, draft_files[0]), "r", encoding="utf-8") as f:
+                content = f.read()
+            if content.startswith("Subject:"):
+                sep = content.find('\n\n')
+                subject = content[len("Subject:"):sep].strip() if sep != -1 else content[len("Subject:"):].strip()
+                body = content[sep + 2:] if sep != -1 else ""
+            else:
+                body = content
+
+        if not body:
+            resume_text = ""
+            cover_letter_text = ""
+            if os.path.exists(file_path):
+                with open(file_path, "rb") as f:
+                    resume_text = extract_text_from_docx(f.read())
+
+            if os.path.isdir(company_dir):
+                for filename in os.listdir(company_dir):
+                    if ("cover" in filename.lower() or filename.startswith("cover_letter_")) and filename.endswith(".docx"):
+                        filepath = os.path.join(company_dir, filename)
+                        if filepath != file_path:
+                            with open(filepath, "rb") as f:
+                                cover_letter_text = extract_text_from_docx(f.read())
+                            break
+
+            profile_text = ""
+            profile_path = os.path.join(DATA_DIR, "profile.txt")
+            if os.path.exists(profile_path):
+                with open(profile_path, "r", encoding="utf-8") as f:
+                    profile_text = f.read().strip()
+
+            mail = generate_mail_draft(resume_text, jd_text, cover_letter_text, company, profile_text)
+            subject = mail.get('subject', '')
+            body = mail.get('body', '')
+
+            draft_filename = get_output_filename("mail_draft", record_id)
+            draft_path = os.path.join(company_dir, draft_filename).replace("\\", "/")
+            with open(draft_path, "w", encoding="utf-8") as f:
+                f.write(f"Subject: {subject}\n\n{body}")
+
+        to_emails = list(set(re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', jd_text)))
+
+        result = gmail_service.save_draft(
+            to_emails=to_emails,
+            subject=subject,
+            body=body,
+            attachment_path=file_path if os.path.exists(file_path) else None,
+        )
+
+        attached = result.get('attachments', [])
+        to_line = ', '.join(to_emails) if to_emails else '(no email found)'
+        msg = f"Gmail draft saved for {company}!\n\nTo: {to_line}\nSubject: {subject}\nAttachments: {', '.join(attached) if attached else 'none'}\n\nCheck your Gmail Drafts folder."
+        send_message_sync(chat_id, msg)
+        logger.info(f"Telegram Gmail draft saved for record {record_id}")
+
+    except RuntimeError as e:
+        error_msg = str(e)
+        if "Gmail not connected" in error_msg:
+            send_message_sync(chat_id, "Gmail not connected. Please connect your Gmail account via the web dashboard first.")
+        else:
+            send_message_sync(chat_id, f"Gmail draft failed: {error_msg[:300]}")
+    except Exception as e:
+        logger.error(f"Telegram Gmail draft error: {e}", exc_info=True)
+        try:
+            send_message_sync(chat_id, f"Gmail draft failed: {str(e)[:300]}")
+        except Exception:
+            pass
+
+
 _telegram_polling = False
+_telegram_msg_buffers: dict[int, list[str]] = {}
+_telegram_flush_tasks: dict[int, asyncio.Task] = {}
+_TELEGRAM_BUFFER_DELAY = 3.0
+
+async def _telegram_flush_buffer(chat_id: int):
+    """Wait for the buffer delay, then combine and process all buffered messages for a chat.
+    Splits on '---' separator to handle multiple JDs in one stream."""
+    await asyncio.sleep(_TELEGRAM_BUFFER_DELAY)
+
+    from services import telegram_service
+
+    parts = _telegram_msg_buffers.pop(chat_id, [])
+    _telegram_flush_tasks.pop(chat_id, None)
+
+    if not parts:
+        return
+
+    combined_text = "\n".join(parts)
+
+    jds = re.split(r'\n\s*---\s*\n', combined_text)
+    jds = [jd.strip() for jd in jds if jd.strip()]
+
+    if not jds:
+        return
+
+    logger.info(f"Telegram buffer flushed for chat {chat_id}: {len(parts)} part(s), {len(jds)} JD(s), {len(combined_text)} chars total")
+
+    loop = asyncio.get_event_loop()
+    if len(jds) == 1:
+        await telegram_service.send_message(chat_id, "Processing your JD... You'll get a reply shortly.")
+        loop.run_in_executor(None, _telegram_process_jd, jds[0], chat_id)
+    else:
+        await telegram_service.send_message(chat_id, f"Found {len(jds)} JDs (separated by ---). Processing each one...")
+        for i, jd in enumerate(jds):
+            loop.run_in_executor(None, _telegram_process_jd, jd, chat_id)
 
 async def _telegram_poll_loop():
     """Long-polling loop that listens for Telegram messages."""
@@ -2453,6 +2717,39 @@ async def _telegram_poll_loop():
             updates = await telegram_service.get_updates(offset=offset, timeout=30)
             for update in updates:
                 offset = update["update_id"] + 1
+
+                callback = update.get("callback_query")
+                if callback:
+                    cb_id = callback.get("id")
+                    cb_data = callback.get("data", "")
+                    cb_chat_id = callback.get("message", {}).get("chat", {}).get("id")
+                    if cb_chat_id and ":" in cb_data:
+                        action, rec_id_str = cb_data.split(":", 1)
+                        try:
+                            rec_id = int(rec_id_str)
+                        except ValueError:
+                            await telegram_service.answer_callback_query(cb_id, "Invalid record.")
+                            continue
+
+                        loop = asyncio.get_event_loop()
+                        if action == "cover_letter":
+                            await telegram_service.answer_callback_query(cb_id, "Generating cover letter...")
+                            await telegram_service.send_message(cb_chat_id, "Generating cover letter... please wait.")
+                            loop.run_in_executor(None, _telegram_generate_cover_letter, rec_id, cb_chat_id)
+                        elif action == "mail_draft":
+                            await telegram_service.answer_callback_query(cb_id, "Generating mail draft...")
+                            await telegram_service.send_message(cb_chat_id, "Generating mail draft... please wait.")
+                            loop.run_in_executor(None, _telegram_generate_mail_draft, rec_id, cb_chat_id)
+                        elif action == "gmail_draft":
+                            await telegram_service.answer_callback_query(cb_id, "Saving draft to Gmail...")
+                            await telegram_service.send_message(cb_chat_id, "Generating mail and saving to Gmail drafts... please wait.")
+                            loop.run_in_executor(None, _telegram_save_gmail_draft, rec_id, cb_chat_id)
+                        else:
+                            await telegram_service.answer_callback_query(cb_id, "Unknown action.")
+                    else:
+                        await telegram_service.answer_callback_query(cb_id)
+                    continue
+
                 msg = update.get("message", {})
                 text = msg.get("text", "").strip()
                 chat_id = msg.get("chat", {}).get("id")
@@ -2461,7 +2758,7 @@ async def _telegram_poll_loop():
                     continue
 
                 if text.startswith("/start"):
-                    await telegram_service.send_message(chat_id, "Welcome to Job Tailored Resume Bot!\n\nSend me a Job Description and I'll:\n- Analyze it against your resume\n- Tailor your resume automatically\n- Save everything to your dashboard\n\nJust paste a JD and hit send.")
+                    await telegram_service.send_message(chat_id, "Welcome to Job Tailored Resume Bot!\n\nSend me a Job Description and I'll:\n- Analyze it against your resume\n- Tailor your resume automatically\n- Save everything to your dashboard\n\nJust paste a JD and hit send.\n\nTips:\n- Long JDs split across messages are auto-combined\n- Use --- between JDs to send multiple at once\n- Use /scan to start a new JD (flushes any pending text)")
                     continue
 
                 if text.startswith("/status"):
@@ -2469,15 +2766,40 @@ async def _telegram_poll_loop():
                     await telegram_service.send_message(chat_id, f"Bot is running.\nResumes available: {len(resumes)}")
                     continue
 
+                if text.startswith("/scan"):
+                    existing_task = _telegram_flush_tasks.get(chat_id)
+                    if existing_task and not existing_task.done():
+                        existing_task.cancel()
+                    buffered = _telegram_msg_buffers.pop(chat_id, [])
+                    if buffered:
+                        combined = "\n".join(buffered)
+                        logger.info(f"Telegram /scan flushed previous buffer for chat {chat_id}: {len(combined)} chars")
+                        await telegram_service.send_message(chat_id, "Processing previous JD before starting new one...")
+                        loop = asyncio.get_event_loop()
+                        loop.run_in_executor(None, _telegram_process_jd, combined, chat_id)
+                    jd_after_command = text[len("/scan"):].strip()
+                    if jd_after_command:
+                        _telegram_msg_buffers[chat_id] = [jd_after_command]
+                        _telegram_flush_tasks[chat_id] = asyncio.create_task(_telegram_flush_buffer(chat_id))
+                    else:
+                        await telegram_service.send_message(chat_id, "Ready for new JD. Paste it now.")
+                    continue
+
                 if text.startswith("/"):
-                    await telegram_service.send_message(chat_id, "Commands:\n/start - Welcome message\n/status - Check bot status\n\nOr just send a Job Description to process it.")
+                    await telegram_service.send_message(chat_id, "Commands:\n/start - Welcome message\n/status - Check bot status\n/scan - Start a new JD (flushes pending text)\n\nOr just send a Job Description to process it.\nUse --- between JDs to send multiple at once.")
                     continue
 
                 logger.info(f"Telegram message from chat {chat_id}: {len(text)} chars")
-                await telegram_service.send_message(chat_id, "Processing your JD... You'll get a reply shortly.")
 
-                loop = asyncio.get_event_loop()
-                loop.run_in_executor(None, _telegram_process_jd, text, chat_id)
+                if chat_id not in _telegram_msg_buffers:
+                    _telegram_msg_buffers[chat_id] = []
+                _telegram_msg_buffers[chat_id].append(text)
+
+                existing_task = _telegram_flush_tasks.get(chat_id)
+                if existing_task and not existing_task.done():
+                    existing_task.cancel()
+
+                _telegram_flush_tasks[chat_id] = asyncio.create_task(_telegram_flush_buffer(chat_id))
 
         except asyncio.CancelledError:
             _telegram_polling = False

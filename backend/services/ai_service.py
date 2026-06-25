@@ -85,7 +85,7 @@ def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "") -> dict:
     }}
     """
     
-    models_to_try = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash']
+    models_to_try = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite']
     last_error = None
     for model_name in models_to_try:
         try:
