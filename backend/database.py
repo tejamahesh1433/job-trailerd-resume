@@ -38,6 +38,7 @@ def init_db():
         'ALTER TABLE resumes ADD COLUMN rejection_reason TEXT',
         'ALTER TABLE resumes ADD COLUMN source TEXT DEFAULT "dashboard"',
         'ALTER TABLE resumes ADD COLUMN user_address TEXT',
+        'ALTER TABLE resumes ADD COLUMN follow_up_draft TEXT',
     ]
     for sql in migrations:
         try:
@@ -144,6 +145,30 @@ def update_user_address(record_id: int, address: str):
     c.execute('UPDATE resumes SET user_address = ? WHERE id = ?', (address, record_id))
     conn.commit()
     conn.close()
+
+def save_follow_up_draft(record_id: int, subject: str, body: str):
+    import json
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    payload = json.dumps({"subject": subject, "body": body, "saved_at": datetime.now().isoformat()})
+    c.execute('UPDATE resumes SET follow_up_draft = ? WHERE id = ?', (payload, record_id))
+    conn.commit()
+    conn.close()
+
+def get_follow_up_draft(record_id: int):
+    import json
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute('SELECT follow_up_draft FROM resumes WHERE id = ?', (record_id,))
+    row = c.fetchone()
+    conn.close()
+    if row and row['follow_up_draft']:
+        try:
+            return json.loads(row['follow_up_draft'])
+        except Exception:
+            return None
+    return None
 
 def update_resume_status(record_id: int, status: str):
     conn = sqlite3.connect(DB_FILE)

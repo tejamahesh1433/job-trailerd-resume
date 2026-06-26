@@ -186,7 +186,7 @@ def detect_w2_fulltime(text: str) -> bool:
     return False
 
 
-def generate_follow_up(received_email: str, resume_text: str = "", jd_text: str = "", company_name: str = "", original_mail_body: str = "", profile_text: str = "", conversation_history: str = "", is_w2_fulltime: bool = False) -> dict:
+def generate_follow_up(received_email: str, resume_text: str = "", jd_text: str = "", company_name: str = "", original_mail_body: str = "", profile_text: str = "", conversation_history: str = "", is_w2_fulltime: bool = False, instructions: str = "") -> dict:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not set")
@@ -253,8 +253,9 @@ def generate_follow_up(received_email: str, resume_text: str = "", jd_text: str 
         "- NEVER use 'Dear' or 'Dear Hiring Manager'\n"
         "- Do NOT use placeholder brackets like [Your Name] or [Company]\n"
         "- Do NOT mention the company name anywhere in the email body\n"
-        "- ABSOLUTELY NO EMOJIS in the output\n\n"
-        "Reply with ONLY valid JSON:\n"
+        "- ABSOLUTELY NO EMOJIS in the output\n"
+        + (f"- ADDITIONAL USER INSTRUCTIONS (follow these precisely): {instructions}\n" if instructions else "")
+        + "\nReply with ONLY valid JSON:\n"
         '{"subject": "Re: <appropriate subject>", "body": "<email body without signature>"}'
     )
 

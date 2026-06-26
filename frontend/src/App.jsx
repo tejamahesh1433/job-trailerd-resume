@@ -164,6 +164,7 @@ export default function App() {
   const [gmailSaved, setGmailSaved] = useState(false);
   // Follow-up mail
   const [followUpEmail, setFollowUpEmail] = useState('');
+  const [followUpInstructions, setFollowUpInstructions] = useState('');
   const [followUpDraft, setFollowUpDraft] = useState(null);
   const [generatingFollowUp, setGeneratingFollowUp] = useState(false);
   const [savingFollowUp, setSavingFollowUp] = useState(false);
@@ -172,6 +173,7 @@ export default function App() {
   const [inboxLoading, setInboxLoading] = useState(false);
   const [inboxOpen, setInboxOpen] = useState(false);
   const [inboxSearch, setInboxSearch] = useState('');
+  const [inboxError, setInboxError] = useState(null);
   const [selectedMsgId, setSelectedMsgId] = useState(null);
   const [loadingMsgId, setLoadingMsgId] = useState(null);
   // Follow-up attachments
@@ -649,6 +651,7 @@ export default function App() {
         const data = await res.json();
         if (data.cover_letter) { setCoverLetter(data.cover_letter); setCoverLetterPath(data.cl_path); }
         if (data.mail_draft) { setMailDraft(data.mail_draft); setDraftPath(data.draft_path); }
+        if (data.follow_up_draft) { setFollowUpDraft(data.follow_up_draft); }
       }
     } catch { /* ignore */ }
 
@@ -696,14 +699,15 @@ export default function App() {
 
   const handleFetchInbox = async (query) => {
     setInboxLoading(true);
+    setInboxError(null);
     try {
       const q = query ?? inboxSearch ?? '';
       const res = await fetch(`http://localhost:8000/api/gmail/inbox?q=${encodeURIComponent(q || 'in:inbox')}`);
       const data = await res.json();
       if (res.ok) setInboxMessages(data.messages || []);
-      else setError(data.detail || 'Failed to fetch inbox');
+      else setInboxError(data.detail || 'Failed to fetch inbox');
     } catch {
-      setError('Failed to fetch inbox.');
+      setInboxError('Failed to reach server.');
     } finally {
       setInboxLoading(false);
     }
@@ -747,7 +751,7 @@ export default function App() {
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ received_email: followUpEmail }),
+        body: JSON.stringify({ received_email: followUpEmail, instructions: followUpInstructions.trim() || undefined }),
       });
       const data = await res.json();
       if (!res.ok) { setError(data.detail || `Error ${res.status}`); return; }
@@ -764,7 +768,7 @@ export default function App() {
   };
 
   const handleSaveFollowUpToGmail = async () => {
-    if (!followUpDraft || !activeRecordId) return;
+    if (!followUpDraft) return;
     setSavingFollowUp(true);
     setFollowUpGmailSaved(false);
     try {
@@ -1448,7 +1452,8 @@ export default function App() {
                           />
                           {inboxLoading && <span className="inbox-search-btn" style={{ pointerEvents: 'none' }}>…</span>}
                         </div>
-                        {inboxMessages.length === 0 && !inboxLoading && <p className="inbox-empty">No messages found</p>}
+                        {inboxError && <p className="inbox-empty inbox-error">{inboxError}</p>}
+                        {!inboxError && inboxMessages.length === 0 && !inboxLoading && <p className="inbox-empty">No messages found</p>}
                         <div className="inbox-list">
                           {inboxMessages.map(msg => (
                             <button
@@ -1474,6 +1479,18 @@ export default function App() {
                   value={followUpEmail}
                   onChange={e => setFollowUpEmail(e.target.value)}
                   rows={5}
+                />
+              </div>
+              <div className="follow-up-instructions">
+                <label className="field-label" style={{ marginTop: '0.6rem' }}>
+                  Custom Instructions <span className="field-label-optional">(optional)</span>
+                </label>
+                <textarea
+                  className="field-textarea follow-up-instructions-textarea"
+                  placeholder="e.g. Ask about the interview timeline, mention I'm available immediately, keep it under 3 sentences…"
+                  value={followUpInstructions}
+                  onChange={e => setFollowUpInstructions(e.target.value)}
+                  rows={2}
                 />
               </div>
               <button className="action-btn" onClick={handleGenerateFollowUp} disabled={generatingFollowUp || !followUpEmail.trim()} style={{ marginTop: '0.5rem' }}>

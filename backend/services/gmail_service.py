@@ -282,10 +282,24 @@ def search_inbox(query: str, max_results: int = 15) -> list:
         creds.refresh(Request())
         _save_credentials(creds)
 
+    stored_scopes = list(creds.scopes or [])
+    if not any("gmail.readonly" in s or "mail.google.com" in s for s in stored_scopes):
+        raise RuntimeError(
+            "Inbox read permission missing. Please disconnect Gmail and reconnect to grant inbox access."
+        )
+
     service = build("gmail", "v1", credentials=creds)
-    resp = service.users().messages().list(
-        userId="me", q=query, maxResults=max_results
-    ).execute()
+    try:
+        resp = service.users().messages().list(
+            userId="me", q=query, maxResults=max_results
+        ).execute()
+    except Exception as e:
+        err_str = str(e)
+        if "insufficientPermissions" in err_str or "forbidden" in err_str.lower() or "403" in err_str:
+            raise RuntimeError(
+                "Inbox read permission denied by Google. Please disconnect Gmail and reconnect to grant inbox access."
+            )
+        raise
 
     messages = []
     for msg_stub in resp.get("messages", []):

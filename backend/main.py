@@ -30,7 +30,7 @@ from services.docx_service import extract_text_from_docx, create_tailored_docx
 from services import gmail_service
 from services.profile_service import process_uploaded_doc
 from services.usage_tracker import get_usage_stats
-from database import init_db, save_resume_record, save_job_matcher_record, get_all_resumes, delete_resume_record, update_resume_status, get_resume_by_id, find_existing_company, sanitize_csv_field, search_records, update_user_address
+from database import init_db, save_resume_record, save_job_matcher_record, get_all_resumes, delete_resume_record, update_resume_status, get_resume_by_id, find_existing_company, sanitize_csv_field, search_records, update_user_address, save_follow_up_draft, get_follow_up_draft
 
 DATA_DIR = os.getenv("DATA_DIR", "data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -1645,7 +1645,7 @@ async def get_record_content(request: Request, record_id: int):
             raise HTTPException(status_code=400, detail="No file path for this record")
 
         company_dir = os.path.dirname(file_path)
-        payload = {"company_name": record['company_name'], "cover_letter": None, "cl_path": None, "mail_draft": None, "draft_path": None}
+        payload = {"company_name": record['company_name'], "cover_letter": None, "cl_path": None, "mail_draft": None, "draft_path": None, "follow_up_draft": None}
 
         # Find cover letter files
         cl_files = [f for f in os.listdir(company_dir) if f.startswith("cover_letter_") and f.endswith(".docx")] if os.path.isdir(company_dir) else []
@@ -1676,6 +1676,23 @@ async def get_record_content(request: Request, record_id: int):
                 payload["draft_path"] = draft_full_path.replace("\\", "/")
             except Exception:
                 pass
+
+        # Load saved follow-up draft from DB
+        try:
+            saved_fu = get_follow_up_draft(record_id)
+            if saved_fu:
+                payload["follow_up_draft"] = saved_fu
+            elif os.path.isdir(company_dir):
+                fu_file = os.path.join(company_dir, "follow_up_draft.txt")
+                if os.path.exists(fu_file):
+                    with open(fu_file, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    sep = content.find('\n\n')
+                    fu_subject = content[len("Subject:"):sep].strip() if content.startswith("Subject:") and sep != -1 else ""
+                    fu_body = content[sep + 2:] if sep != -1 else content
+                    payload["follow_up_draft"] = {"subject": fu_subject, "body": fu_body}
+        except Exception:
+            pass
 
         return payload
     except HTTPException:
@@ -1933,8 +1950,8 @@ async def gmail_inbox(request: Request, q: str = ""):
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Gmail inbox error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to search inbox")
+        logger.error(f"Gmail inbox error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to search inbox: {e}")
 
 @app.get("/api/gmail/message/{message_id}")
 @limiter.limit("20/minute")
@@ -2006,6 +2023,7 @@ async def delete_document(request: Request, doc_type: str):
 
 class FollowUpRequest(BaseModel):
     received_email: str
+    instructions: Optional[str] = None
 
 @app.post("/api/history/{record_id}/follow-up")
 @limiter.limit("5/minute")
@@ -2076,12 +2094,31 @@ async def api_generate_follow_up(request: Request, record_id: int, body: FollowU
             profile_text=profile_text,
             conversation_history=conversation_history,
             is_w2_fulltime=is_w2,
+            instructions=body.instructions or "",
         )
+
+        subject = result.get('subject', '')
+        body_text = result.get('body', '')
+
+        # Save to file in company folder
+        try:
+            if company_dir and os.path.isdir(company_dir):
+                fu_path = os.path.join(company_dir, "follow_up_draft.txt")
+                with open(fu_path, "w", encoding="utf-8") as f:
+                    f.write(f"Subject: {subject}\n\n{body_text}")
+        except Exception as e:
+            logger.warning(f"Could not save follow-up file: {e}")
+
+        # Save to DB
+        try:
+            save_follow_up_draft(record_id, subject, body_text)
+        except Exception as e:
+            logger.warning(f"Could not save follow-up to DB: {e}")
 
         response_data = {
             "to_emails": to_emails,
-            "subject": result.get('subject', ''),
-            "body": result.get('body', ''),
+            "subject": subject,
+            "body": body_text,
             "w2_detected": is_w2,
         }
 
@@ -2148,12 +2185,28 @@ async def api_standalone_follow_up(request: Request, body: FollowUpRequest):
             profile_text=profile_text,
             conversation_history=conversation_history,
             is_w2_fulltime=is_w2,
+            instructions=body.instructions or "",
         )
+
+        subject = result.get('subject', '')
+        body_text = result.get('body', '')
+
+        # Save to standalone follow-ups folder
+        try:
+            fu_dir = os.path.join(DATA_DIR, "follow_ups")
+            os.makedirs(fu_dir, exist_ok=True)
+            from datetime import datetime as _dt
+            ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+            fu_path = os.path.join(fu_dir, f"follow_up_{ts}.txt")
+            with open(fu_path, "w", encoding="utf-8") as f:
+                f.write(f"Subject: {subject}\n\n{body_text}")
+        except Exception as e:
+            logger.warning(f"Could not save standalone follow-up file: {e}")
 
         response_data = {
             "to_emails": to_emails,
-            "subject": result.get('subject', ''),
-            "body": result.get('body', ''),
+            "subject": subject,
+            "body": body_text,
             "w2_detected": is_w2,
         }
 
@@ -2161,8 +2214,8 @@ async def api_standalone_follow_up(request: Request, body: FollowUpRequest):
             try:
                 draft_result = gmail_service.save_draft(
                     to_emails=to_emails,
-                    subject=result.get('subject', ''),
-                    body=result.get('body', ''),
+                    subject=subject,
+                    body=body_text,
                 )
                 response_data["auto_draft_saved"] = True
                 response_data["draft_id"] = draft_result.get("draft_id", "")
