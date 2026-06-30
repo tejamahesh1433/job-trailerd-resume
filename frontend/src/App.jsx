@@ -1239,7 +1239,7 @@ export default function App() {
                 {result.file_path && (
                   <div className="result-downloads">
                     <a href={`http://localhost:8000/api/download/${result.file_path.replace(/^trailerd\//, '')}`} className="download-btn" download>
-                      ↓ Download Tailored Resume
+                      ↓ {result.tailored ? 'Download Tailored Resume' : 'Download Resume'}
                     </a>
                     <div className="file-dl-row">
                       <a href={`http://localhost:8000/api/download/${result.file_path.replace(/[^/]+\.docx$/, 'jd_info.txt').replace(/^trailerd\//, '')}`} className="file-dl-link" download>

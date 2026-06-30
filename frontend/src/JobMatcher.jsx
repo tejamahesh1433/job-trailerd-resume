@@ -25,7 +25,11 @@ export default function JobMatcher({ onApply }) {
       }
       setJdText(data.jd_text);
     } catch (err) {
-      setError(err.message || 'Failed to fetch URL');
+      if (err instanceof TypeError && err.message === 'Failed to fetch') {
+        setError('Cannot reach the backend server. Make sure the backend is running (docker compose up or uvicorn).');
+      } else {
+        setError(err.message || 'Failed to fetch URL');
+      }
     } finally {
       setFetchingUrl(false);
     }

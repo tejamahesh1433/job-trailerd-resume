@@ -144,11 +144,23 @@ def _scrape_jd_from_url(url: str) -> str:
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
     }
-    resp = requests.get(url, headers=headers, timeout=15)
+    MAX_CONTENT_BYTES = 3 * 1024 * 1024  # 3 MB cap to prevent memory spike
+    resp = requests.get(url, headers=headers, timeout=15, stream=True)
     resp.raise_for_status()
+    content_chunks = []
+    total = 0
+    for chunk in resp.iter_content(chunk_size=65536, decode_unicode=False):
+        total += len(chunk)
+        content_chunks.append(chunk)
+        if total >= MAX_CONTENT_BYTES:
+            break
+    resp.close()
+    raw_bytes = b''.join(content_chunks)
+    encoding = resp.encoding or 'utf-8'
+    html_text = raw_bytes.decode(encoding, errors='replace')
 
     parser = _TextExtractor()
-    parser.feed(resp.text)
+    parser.feed(html_text)
 
     # Try JSON-LD structured data first (LinkedIn, Indeed, etc. embed this)
     jd_from_structured = ""
@@ -1012,10 +1024,10 @@ async def scan_resume(request: Request, jd_text: str = Form(...), resume: Option
 
         # ── Decide: skip tailoring, reuse existing, or create new ──
         if score >= 85:
-            # Base resume already strong — copy original, keep AI's after_score
+            # Base resume already strong — use original as-is, no tailoring
             with open(file_path, "wb") as f:
                 f.write(file_bytes)
-            # after_score stays as AI calculated (may equal score)
+            after_score = score  # No tailoring done; keep actual score
             replacements = []
             logger.info(f"Score {score}% >= 85% for {company_name} — no tailoring needed")
             with open(diff_path, "w", encoding="utf-8") as f:
@@ -1148,6 +1160,7 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
     if score >= 85:
         with open(file_path, "wb") as f:
             f.write(file_bytes)
+        after_score = score  # No tailoring done; keep actual score
         replacements = []
         with open(diff_path, "w", encoding="utf-8") as f:
             f.write(f"Score: {score}% — already above 85%, no tailoring needed.\n")
@@ -1719,21 +1732,22 @@ async def download_history_csv(request: Request):
 @app.get("/api/download/{file_path:path}")
 def download_resume(file_path: str):
     try:
-        # Security: Prevent path traversal
-        safe_path = os.path.basename(file_path)
-        full_path = os.path.abspath(os.path.join("trailerd", safe_path))
+        # Security: allow subdirectories (e.g. CompanyName/resume.docx) but
+        # prevent path traversal by resolving and checking against base_path.
+        rel = file_path.lstrip('/').replace('\\', '/')
+        full_path = os.path.abspath(os.path.join("trailerd", rel))
         base_path = os.path.abspath("trailerd")
 
-        # Verify path is within trailerd directory
-        if not full_path.startswith(base_path) or not os.path.exists(full_path):
+        # Verify path stays inside trailerd/
+        if not full_path.startswith(base_path + os.sep):
             raise HTTPException(status_code=404, detail="File not found")
 
-        # Prevent directory listing
-        if os.path.isdir(full_path):
-            raise HTTPException(status_code=403, detail="Access denied")
+        if not os.path.exists(full_path) or os.path.isdir(full_path):
+            raise HTTPException(status_code=404, detail="File not found")
 
-        logger.info(f"Resume downloaded: {safe_path}")
-        return FileResponse(full_path, filename=safe_path)
+        filename = os.path.basename(full_path)
+        logger.info(f"File downloaded: {rel}")
+        return FileResponse(full_path, filename=filename)
     except HTTPException:
         raise
     except Exception as e:
@@ -2239,14 +2253,29 @@ async def fetch_jd_from_url(request: Request, url: str = Form(...)):
     """Fetch job description text from a URL."""
     try:
         if not url or not url.startswith(('http://', 'https://')):
-            raise HTTPException(status_code=400, detail="Invalid URL")
-        text = _scrape_jd_from_url(url)
+            raise HTTPException(status_code=400, detail="Invalid URL — must start with http:// or https://")
+        # Run the blocking HTTP + AI call in a thread pool so it doesn't stall the event loop
+        text = await asyncio.get_event_loop().run_in_executor(None, _scrape_jd_from_url, url)
         return {"jd_text": text, "url": url}
     except HTTPException:
         raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"URL fetch error: {e}", exc_info=True)
-        raise HTTPException(status_code=400, detail=f"Failed to fetch URL: {str(e)}")
+        # Surface a readable message for common failures
+        msg = str(e)
+        if "403" in msg or "999" in msg or "Forbidden" in msg:
+            detail = "This site blocked the request (403/bot protection). Paste the JD text directly instead."
+        elif "404" in msg:
+            detail = "Job posting not found (404). The listing may have expired."
+        elif "timeout" in msg.lower() or "timed out" in msg.lower():
+            detail = "The request timed out. The site may be slow — try pasting the JD text directly."
+        elif "SSL" in msg or "certificate" in msg.lower():
+            detail = "SSL error connecting to this site. Try pasting the JD text directly."
+        else:
+            detail = f"Could not fetch URL: {msg}"
+        raise HTTPException(status_code=400, detail=detail)
 
 @app.post("/api/job-matcher/analyze")
 @limiter.limit("30/minute")
