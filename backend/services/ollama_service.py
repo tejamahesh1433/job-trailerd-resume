@@ -112,8 +112,9 @@ def generate_mail_draft(resume_text: str, jd_text: str, cover_letter_text: str, 
     if profile_text:
         profile_instruction = (
             "- The CANDIDATE PROFILE contains personal facts (work authorization, location, availability, etc.). "
-            "If the JD mentions location, visa sponsorship, or relocation — naturally mention the relevant fact from the profile. "
-            "Do NOT list all profile facts — only include what is relevant to this specific JD.\n"
+            "If the JD mentions visa sponsorship or work authorization — mention it VERY briefly, e.g. 'I am a GC holder' or 'I hold a Green Card'. "
+            "Do NOT write full sentences like 'As a US Permanent Resident, I am located in ...' — keep it to a short phrase only. "
+            "Do NOT list all profile facts — only include what is directly relevant to this specific JD.\n"
         )
 
     prompt = (
