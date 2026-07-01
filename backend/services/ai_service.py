@@ -113,6 +113,85 @@ def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "") -> dict:
             raise RuntimeError(f"API Error: {str(e)}")
     raise RuntimeError(f"All models unavailable: {str(last_error)}")
 
+def generate_additional_points(resume_text: str, jd_text: str, points_text: str, target_hint: str = "") -> dict:
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is not set")
+
+    client = genai.Client(api_key=api_key)
+
+    hint_section = ""
+    if target_hint and target_hint.strip():
+        hint_section = f"""
+    PLACEMENT INSTRUCTION (top priority): Add the point(s) under: {target_hint.strip()}
+    Find the company/project section in the resume matching this name and insert the new bullet(s) there. If no exact match exists, choose the closest matching section.
+"""
+
+    prompt = f"""
+    You are an expert resume editor for a DevOps/Cloud/Infrastructure engineer's resume.
+
+    An already-tailored resume (below) needs ADDITIONAL bullet points inserted, based on new points supplied by the candidate.
+{hint_section}
+    Job Description:
+    {jd_text}
+
+    Current Resume:
+    {resume_text}
+
+    New points the candidate wants added:
+    {points_text}
+
+    Task: For EACH new point, decide the single best existing company/project section in the resume to place it under (respect the placement instruction above if one was given), then:
+    - Write a polished, ATS-friendly bullet point in the same voice/tense/format as the surrounding resume bullets.
+    - Naturally incorporate relevant JD keywords where truthful and applicable — do NOT invent technologies or experience the point doesn't already imply.
+    - Identify an "anchor": the EXACT, CHARACTER-FOR-CHARACTER text of an existing bullet point already in the resume, within the chosen section, immediately after which the new bullet should be inserted (typically the last bullet in that section). Copy it exactly — do not paraphrase or shorten it.
+
+    CRITICAL CONSTRAINT: The candidate is a DevOps/Cloud/Infrastructure engineer. Stay within DevOps, Cloud, Infrastructure, SRE, and Platform Engineering domains — do not add unrelated skills.
+
+    Also estimate the resume's new overall ATS match score (0-100) after these bullets are added (after_score).
+
+    Return the result strictly in the following JSON format:
+    {{
+        "insertions": [
+            {{
+                "section": "<company or project name this was added under>",
+                "anchor": "<exact existing bullet text in the resume to insert the new bullet after>",
+                "new_bullet": "<the new bullet point text>",
+                "keywords_added": ["<keyword1>", "<keyword2>"]
+            }}
+        ],
+        "after_score": <integer>
+    }}
+    """
+
+    models_to_try = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite']
+    last_error = None
+    for model_name in models_to_try:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.2
+                ),
+            )
+            usage = response.usage_metadata
+            if usage:
+                log_api_call(model_name, "add_points",
+                             input_tokens=usage.prompt_token_count or 0,
+                             output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
+            else:
+                log_api_call(model_name, "add_points", input_tokens=6000, output_tokens=400)
+            return json.loads(response.text)
+        except Exception as e:
+            last_error = e
+            if "503" in str(e) or "UNAVAILABLE" in str(e) or "429" in str(e):
+                print(f"{model_name} unavailable, trying next model...")
+                continue
+            raise RuntimeError(f"API Error: {str(e)}")
+    raise RuntimeError(f"All models unavailable: {str(last_error)}")
+
 def generate_cover_letter(resume_text: str, jd_text: str, company_name: str) -> str:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:

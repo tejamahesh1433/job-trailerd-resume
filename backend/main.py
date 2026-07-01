@@ -24,13 +24,13 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from fastapi.responses import RedirectResponse
-from services.ai_service import analyze_resume, generate_cover_letter, analyze_job_metadata
+from services.ai_service import analyze_resume, generate_cover_letter, analyze_job_metadata, generate_additional_points
 from services.ollama_service import generate_mail_draft, generate_follow_up, detect_w2_fulltime
-from services.docx_service import extract_text_from_docx, create_tailored_docx
+from services.docx_service import extract_text_from_docx, create_tailored_docx, insert_bullets_after
 from services import gmail_service
 from services.profile_service import process_uploaded_doc
 from services.usage_tracker import get_usage_stats
-from database import init_db, save_resume_record, save_job_matcher_record, get_all_resumes, delete_resume_record, update_resume_status, get_resume_by_id, find_existing_company, sanitize_csv_field, search_records, update_user_address, save_follow_up_draft, get_follow_up_draft
+from database import init_db, save_resume_record, save_job_matcher_record, get_all_resumes, delete_resume_record, update_resume_status, get_resume_by_id, find_existing_company, sanitize_csv_field, search_records, update_user_address, save_follow_up_draft, get_follow_up_draft, update_resume_after_edit, update_user_notes
 
 DATA_DIR = os.getenv("DATA_DIR", "data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -1421,6 +1421,7 @@ async def search_history(request: Request, q: str = "", limit: int = 50):
                 "location": location,
                 "local_required": local_required,
                 "user_address": rec.get("user_address") or "",
+                "user_notes": rec.get("user_notes") or "",
                 "status": rec.get("status", "Scanned"),
                 "score": rec.get("score", 0),
                 "match_percentage": rec.get("match_percentage"),
@@ -1454,6 +1455,25 @@ async def patch_user_address(request: Request, record_id: int, body: AddressUpda
     except Exception as e:
         logger.error(f"Update address error: {e}")
         raise HTTPException(status_code=500, detail="Failed to update address")
+
+class NotesUpdate(BaseModel):
+    notes: str
+
+@app.patch("/api/history/{record_id}/notes")
+@limiter.limit("30/minute")
+async def patch_user_notes(request: Request, record_id: int, body: NotesUpdate):
+    try:
+        if record_id <= 0:
+            raise HTTPException(status_code=400, detail="Invalid record ID")
+        if len(body.notes) > 2000:
+            raise HTTPException(status_code=400, detail="Notes too long")
+        update_user_notes(record_id, body.notes.strip())
+        return {"status": "ok"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Update notes error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update notes")
 
 @app.delete("/api/history/{record_id}")
 @limiter.limit("20/minute")
@@ -1532,6 +1552,101 @@ async def api_generate_cover_letter(request: Request, record_id: int):
     except Exception as e:
         logger.error(f"Cover letter generation error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to generate cover letter")
+
+class AddPointsRequest(BaseModel):
+    points: str
+    target_hint: Optional[str] = None
+
+@app.post("/api/history/{record_id}/add-points")
+@limiter.limit("10/minute")
+async def api_add_points(request: Request, record_id: int, payload: AddPointsRequest):
+    try:
+        if record_id <= 0:
+            raise HTTPException(status_code=400, detail="Invalid record ID")
+
+        points_text = (payload.points or "").strip()
+        if not points_text:
+            raise HTTPException(status_code=400, detail="Please enter at least one point to add")
+        if len(points_text) > 5000:
+            raise HTTPException(status_code=400, detail="Points text too long (maximum 5000 characters)")
+
+        target_hint = (payload.target_hint or "").strip()
+        if len(target_hint) > 200:
+            raise HTTPException(status_code=400, detail="Target project/company name too long")
+
+        record = get_resume_by_id(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+
+        file_path = record.get('file_path')
+        if not file_path or not os.path.exists(file_path):
+            raise HTTPException(status_code=400, detail="Tailored resume file not found for this record")
+
+        with open(file_path, "rb") as f:
+            current_bytes = f.read()
+        resume_text = extract_text_from_docx(current_bytes)
+
+        try:
+            ai_result = generate_additional_points(resume_text, record.get('jd_text', ''), points_text, target_hint)
+        except RuntimeError as e:
+            logger.warning(f"AI provider unavailable: {e}")
+            raise HTTPException(status_code=503, detail="The AI provider is currently unavailable. Please try again in a few moments.")
+
+        insertions = ai_result.get('insertions', [])
+        if not insertions:
+            raise HTTPException(status_code=422, detail="Could not determine where to add these points. Try rephrasing or specifying a project/company name.")
+
+        updated_stream = insert_bullets_after(current_bytes, insertions)
+        # Update the SAME tailored resume file in place — never create a new file or record
+        with open(file_path, "wb") as f:
+            f.write(updated_stream.read())
+
+        existing_scan = record.get('scan_result') or {}
+        if not isinstance(existing_scan, dict):
+            existing_scan = {}
+        existing_replacements = existing_scan.get('replacements', [])
+
+        added_entries = [
+            {
+                "original": f"[Added under {ins.get('section', 'resume')}]",
+                "new": ins.get('new_bullet', ''),
+                "keywords_added": ins.get('keywords_added', []),
+            }
+            for ins in insertions if ins.get('new_bullet')
+        ]
+
+        new_after_score = ai_result.get('after_score', existing_scan.get('after_score', record.get('score')))
+
+        merged_scan = {
+            **existing_scan,
+            "after_score": new_after_score,
+            "replacements": existing_replacements + added_entries,
+        }
+
+        update_resume_after_edit(record_id, new_after_score, json.dumps(merged_scan))
+
+        diff_path = os.path.join(os.path.dirname(file_path), "difference.txt").replace("\\", "/")
+        try:
+            with open(diff_path, "a", encoding="utf-8") as f:
+                f.write(f"\n--- ADDITIONAL POINTS ({datetime.now().isoformat()}) ---\n")
+                for ins in insertions:
+                    f.write(f"Section: {ins.get('section', 'N/A')}\n")
+                    f.write(f"ADDED:\n{ins.get('new_bullet', 'N/A')}\n\n")
+        except OSError:
+            pass
+
+        logger.info(f"Added {len(insertions)} point(s) to record {record_id}")
+        return {
+            "id": record_id,
+            "inserted": len(insertions),
+            "insertions": insertions,
+            "scan_result": merged_scan,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Add points error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to add points to the tailored resume")
 
 class MailDraftSave(BaseModel):
     subject: str

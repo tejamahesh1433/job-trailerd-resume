@@ -10,6 +10,9 @@ export default function SearchPage({ onSelectRecord }) {
   const [editingAddressId, setEditingAddressId] = useState(null);
   const [addressDraft, setAddressDraft] = useState('');
   const [savingAddressId, setSavingAddressId] = useState(null);
+  const [editingNotesId, setEditingNotesId] = useState(null);
+  const [notesDraft, setNotesDraft] = useState('');
+  const [savingNotesId, setSavingNotesId] = useState(null);
 
   const handleSearch = async () => {
     if (query.trim().length < 2) return;
@@ -54,6 +57,33 @@ export default function SearchPage({ onSelectRecord }) {
   const startEditAddress = (record) => {
     setEditingAddressId(record.id);
     setAddressDraft(record.user_address || '');
+  };
+
+  const handleSaveNotes = async (recordId) => {
+    setSavingNotesId(recordId);
+    try {
+      const res = await fetch(`http://localhost:8000/api/history/${recordId}/notes`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notes: notesDraft }),
+      });
+      if (res.ok) {
+        setResults(prev => prev.map(r => r.id === recordId ? { ...r, user_notes: notesDraft } : r));
+        setEditingNotesId(null);
+      } else {
+        const data = await res.json();
+        setError(data.detail || 'Failed to save notes');
+      }
+    } catch {
+      setError('Failed to save notes.');
+    } finally {
+      setSavingNotesId(null);
+    }
+  };
+
+  const startEditNotes = (record) => {
+    setEditingNotesId(record.id);
+    setNotesDraft(record.user_notes || '');
   };
 
   const scoreColor = (score) => {
@@ -205,6 +235,46 @@ export default function SearchPage({ onSelectRecord }) {
                         <span className="search-address-placeholder">+ Add address</span>
                       )}
                       <span className="search-address-edit-icon" title="Edit address">&#9998;</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Notes — editable per JD */}
+                <div className="search-notes">
+                  <span className="search-info-label">Notes</span>
+                  {editingNotesId === r.id ? (
+                    <div className="search-notes-edit">
+                      <textarea
+                        className="search-notes-input"
+                        placeholder="Add notes for this application..."
+                        value={notesDraft}
+                        onChange={e => setNotesDraft(e.target.value)}
+                        rows={2}
+                      />
+                      <div className="search-notes-btns">
+                        <button
+                          className="search-notes-save"
+                          onClick={() => handleSaveNotes(r.id)}
+                          disabled={savingNotesId === r.id}
+                        >
+                          {savingNotesId === r.id ? '...' : 'Save'}
+                        </button>
+                        <button
+                          className="search-notes-cancel"
+                          onClick={() => setEditingNotesId(null)}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="search-notes-display" onClick={() => startEditNotes(r)}>
+                      {r.user_notes ? (
+                        <span className="search-notes-text">{r.user_notes}</span>
+                      ) : (
+                        <span className="search-notes-placeholder">+ Add notes</span>
+                      )}
+                      <span className="search-notes-edit-icon" title="Edit notes">&#9998;</span>
                     </div>
                   )}
                 </div>

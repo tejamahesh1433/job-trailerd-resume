@@ -1106,6 +1106,26 @@ body {
   font-family: var(--font-body);
 }
 
+.add-points-body { padding: 0.9rem 1rem 1.1rem; }
+.add-points-textarea { min-height: 90px; padding: 0.7rem 0.9rem; }
+.add-points-target-input {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 1px;
+  padding: 0.55rem 0.9rem;
+  color: var(--cream);
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.add-points-target-input:focus {
+  outline: none;
+  border-color: var(--gold);
+  box-shadow: 0 0 0 3px var(--gold-dim);
+}
+.add-points-target-input::placeholder { color: var(--faint); }
+
 /* ── Scanning / loading state ───────────────────────── */
 .scanning {
   display: flex;
@@ -2651,15 +2671,17 @@ body {
 .search-jd-preview::-webkit-scrollbar-track { background: var(--surface); }
 .search-jd-preview::-webkit-scrollbar-thumb { background: var(--faint); border-radius: 2px; }
 
-/* ── Search Address ─────────────────────────────────── */
-.search-address {
+/* ── Search Address / Notes ─────────────────────────── */
+.search-address,
+.search-notes {
   display: flex;
   flex-direction: column;
   gap: 0.3rem;
   margin-bottom: 0.85rem;
 }
 
-.search-address-display {
+.search-address-display,
+.search-notes-display {
   display: flex;
   align-items: center;
   gap: 0.5rem;
@@ -2671,12 +2693,14 @@ body {
   min-height: 36px;
 }
 
-.search-address-display:hover {
+.search-address-display:hover,
+.search-notes-display:hover {
   border-color: var(--gold);
   background: var(--gold-dim);
 }
 
-.search-address-text {
+.search-address-text,
+.search-notes-text {
   flex: 1;
   font-size: 0.84rem;
   color: var(--cream);
@@ -2684,7 +2708,8 @@ body {
   white-space: pre-wrap;
 }
 
-.search-address-placeholder {
+.search-address-placeholder,
+.search-notes-placeholder {
   flex: 1;
   font-family: var(--font-mono);
   font-size: 0.68rem;
@@ -2692,24 +2717,28 @@ body {
   letter-spacing: 0.06em;
 }
 
-.search-address-edit-icon {
+.search-address-edit-icon,
+.search-notes-edit-icon {
   flex-shrink: 0;
   font-size: 0.85rem;
   color: var(--muted);
   transition: color 0.15s;
 }
 
-.search-address-display:hover .search-address-edit-icon {
+.search-address-display:hover .search-address-edit-icon,
+.search-notes-display:hover .search-notes-edit-icon {
   color: var(--gold);
 }
 
-.search-address-edit {
+.search-address-edit,
+.search-notes-edit {
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
 }
 
-.search-address-input {
+.search-address-input,
+.search-notes-input {
   width: 100%;
   background: var(--surface);
   border: 1px solid var(--gold);
@@ -2724,15 +2753,19 @@ body {
   min-height: 48px;
 }
 
-.search-address-input::placeholder { color: var(--faint); }
+.search-address-input::placeholder,
+.search-notes-input::placeholder { color: var(--faint); }
 
-.search-address-btns {
+.search-address-btns,
+.search-notes-btns {
   display: flex;
   gap: 0.4rem;
 }
 
 .search-address-save,
-.search-address-cancel {
+.search-address-cancel,
+.search-notes-save,
+.search-notes-cancel {
   font-family: var(--font-mono);
   font-size: 0.62rem;
   font-weight: 700;
@@ -2744,27 +2777,32 @@ body {
   transition: color 0.15s, border-color 0.15s, background 0.15s;
 }
 
-.search-address-save {
+.search-address-save,
+.search-notes-save {
   background: var(--gold);
   color: var(--ink);
   border-color: var(--gold);
 }
 
-.search-address-save:hover:not(:disabled) {
+.search-address-save:hover:not(:disabled),
+.search-notes-save:hover:not(:disabled) {
   background: var(--gold-bright);
 }
 
-.search-address-save:disabled {
+.search-address-save:disabled,
+.search-notes-save:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-.search-address-cancel {
+.search-address-cancel,
+.search-notes-cancel {
   background: transparent;
   color: var(--muted);
 }
 
-.search-address-cancel:hover {
+.search-address-cancel:hover,
+.search-notes-cancel:hover {
   color: var(--cream-dim);
   border-color: var(--muted);
 }

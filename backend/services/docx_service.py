@@ -1,6 +1,8 @@
 import docx
 from io import BytesIO
 import difflib
+import copy
+from docx.text.paragraph import Paragraph
 
 def extract_text_from_docx(file_bytes: bytes) -> str:
     doc = docx.Document(BytesIO(file_bytes))
@@ -147,16 +149,20 @@ def _replace_across_runs(paragraph, original_text, new_text):
 
     return True
 
+def _all_paragraphs(doc):
+    """Collect all paragraphs from the document body and any tables."""
+    paragraphs = list(doc.paragraphs)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                paragraphs.extend(cell.paragraphs)
+    return paragraphs
+
 def create_tailored_docx(original_bytes: bytes, replacements: list) -> BytesIO:
     doc = docx.Document(BytesIO(original_bytes))
     applied_count = 0
 
-    # Collect all paragraphs from body and tables
-    all_paragraphs = list(doc.paragraphs)
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                all_paragraphs.extend(cell.paragraphs)
+    all_paragraphs = _all_paragraphs(doc)
 
     for rep in replacements:
         orig = rep.get('original', '')
@@ -179,6 +185,40 @@ def create_tailored_docx(original_bytes: bytes, replacements: list) -> BytesIO:
             if best_para:
                 _replace_entire_paragraph(best_para, new_txt)
                 applied_count += 1
+
+    out_stream = BytesIO()
+    doc.save(out_stream)
+    out_stream.seek(0)
+    return out_stream
+
+def insert_bullets_after(original_bytes: bytes, insertions: list) -> BytesIO:
+    """Insert new bullet paragraphs into the document, each cloned right after
+    its matched anchor paragraph so it inherits the same list/formatting style."""
+    doc = docx.Document(BytesIO(original_bytes))
+    applied_count = 0
+
+    for ins in insertions:
+        anchor_text = ins.get('anchor', '')
+        new_bullet = ins.get('new_bullet', '')
+        if not anchor_text or not new_bullet:
+            continue
+
+        anchor_para, _ = _find_best_paragraph_match(_all_paragraphs(doc), anchor_text)
+        if anchor_para is None:
+            continue
+
+        new_p_elem = copy.deepcopy(anchor_para._p)
+        anchor_para._p.addnext(new_p_elem)
+        new_para = Paragraph(new_p_elem, anchor_para._parent)
+
+        if new_para.runs:
+            new_para.runs[0].text = new_bullet
+            for run in new_para.runs[1:]:
+                run.text = ""
+        else:
+            new_para.text = new_bullet
+
+        applied_count += 1
 
     out_stream = BytesIO()
     doc.save(out_stream)

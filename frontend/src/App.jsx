@@ -147,6 +147,11 @@ export default function App() {
   // Active record for panels 03 + 04
   const [activeRecordId, setActiveRecordId] = useState(null);
   const [activeCompanyName, setActiveCompanyName] = useState(null);
+  // Additional Points — add extra bullets to the current tailored resume
+  const [addPointsText, setAddPointsText] = useState('');
+  const [addPointsTarget, setAddPointsTarget] = useState('');
+  const [addPointsLoading, setAddPointsLoading] = useState(false);
+  const [addPointsSuccess, setAddPointsSuccess] = useState(null);
   // Personal profile
   const [profileText, setProfileText] = useState('');
   const [profileOpen, setProfileOpen] = useState(false);
@@ -457,6 +462,9 @@ export default function App() {
     setDraftPath(null);
     setActiveRecordId(null);
     setActiveCompanyName(null);
+    setAddPointsText('');
+    setAddPointsTarget('');
+    setAddPointsSuccess(null);
     setFollowUpEmail('');
     setFollowUpDraft(null);
     setInboxMessages([]);
@@ -488,6 +496,37 @@ export default function App() {
       setError('Failed to generate cover letter. The AI provider might be overloaded.');
     } finally {
       setGeneratingCL(false); fetchUsage();
+    }
+  };
+
+  const handleAddPoints = async () => {
+    if (!activeRecordId) { setError('Run a scan first, or select a company from the Production Log.'); return; }
+    if (!addPointsText.trim()) { setError('Enter at least one point to add.'); return; }
+    setAddPointsLoading(true);
+    setAddPointsSuccess(null);
+    setError(null);
+    try {
+      const res = await fetch(`http://localhost:8000/api/history/${activeRecordId}/add-points`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ points: addPointsText.trim(), target_hint: addPointsTarget.trim() || undefined }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data.detail || `Error ${res.status}`); return; }
+      setResult(prev => prev ? {
+        ...prev,
+        after_score: data.scan_result.after_score,
+        replacements: data.scan_result.replacements,
+        tailored: true,
+      } : prev);
+      setAddPointsSuccess(`Added ${data.inserted} point${data.inserted !== 1 ? 's' : ''} to the tailored resume.`);
+      setAddPointsText('');
+      setAddPointsTarget('');
+      fetchHistory();
+    } catch {
+      setError('Failed to add points. Check your connection or try again.');
+    } finally {
+      setAddPointsLoading(false); fetchUsage();
     }
   };
 
@@ -617,6 +656,9 @@ export default function App() {
   const handleSelectRecord = async (item) => {
     setActiveRecordId(item.id);
     setActiveCompanyName(item.company_name);
+    setAddPointsText('');
+    setAddPointsTarget('');
+    setAddPointsSuccess(null);
     setCoverLetter(null);
     setCoverLetterPath(null);
     setMailDraft(null);
@@ -1299,6 +1341,39 @@ export default function App() {
                     </div>
                   </div>
                 )}
+
+                <div className="diff-section add-points-section">
+                  <div className="diff-header">Add More Points <span className="field-label-optional">(optional)</span></div>
+                  <div className="add-points-body">
+                    <label className="field-label">Point(s) to add</label>
+                    <textarea
+                      className="field-textarea add-points-textarea"
+                      placeholder="e.g. Led migration of legacy VMs to EKS, cutting infra costs by 30%"
+                      value={addPointsText}
+                      onChange={e => setAddPointsText(e.target.value)}
+                      rows={3}
+                    />
+                    <label className="field-label" style={{ marginTop: '0.7rem' }}>
+                      Add under this project/company <span className="field-label-optional">(optional)</span>
+                    </label>
+                    <input
+                      type="text"
+                      className="add-points-target-input"
+                      placeholder="e.g. Acme Corp, or leave blank to let AI decide"
+                      value={addPointsTarget}
+                      onChange={e => setAddPointsTarget(e.target.value)}
+                    />
+                    <button
+                      className="action-btn"
+                      onClick={handleAddPoints}
+                      disabled={addPointsLoading || !addPointsText.trim() || !activeRecordId}
+                      style={{ marginTop: '0.7rem' }}
+                    >
+                      {addPointsLoading ? <span className="btn-loading"><span className="spin-icon">▶</span> Adding…</span> : '+ Add to Tailored Resume'}
+                    </button>
+                    {addPointsSuccess && <div className="status-banner status-tailored" style={{ marginTop: '0.6rem' }}>{addPointsSuccess}</div>}
+                  </div>
+                </div>
               </div>
             ) : (
               <div className="results-empty">

@@ -39,6 +39,7 @@ def init_db():
         'ALTER TABLE resumes ADD COLUMN source TEXT DEFAULT "dashboard"',
         'ALTER TABLE resumes ADD COLUMN user_address TEXT',
         'ALTER TABLE resumes ADD COLUMN follow_up_draft TEXT',
+        'ALTER TABLE resumes ADD COLUMN user_notes TEXT',
     ]
     for sql in migrations:
         try:
@@ -146,6 +147,13 @@ def update_user_address(record_id: int, address: str):
     conn.commit()
     conn.close()
 
+def update_user_notes(record_id: int, notes: str):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('UPDATE resumes SET user_notes = ? WHERE id = ?', (notes, record_id))
+    conn.commit()
+    conn.close()
+
 def save_follow_up_draft(record_id: int, subject: str, body: str):
     import json
     conn = sqlite3.connect(DB_FILE)
@@ -175,6 +183,15 @@ def update_resume_status(record_id: int, status: str):
     c = conn.cursor()
     c.execute('UPDATE resumes SET status = ?, status_updated_at = ? WHERE id = ?',
               (status, datetime.now().isoformat(), record_id))
+    conn.commit()
+    conn.close()
+
+def update_resume_after_edit(record_id: int, score: int, scan_result: str):
+    """Update an existing record's tailored score/scan_result in place (no new row)."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('UPDATE resumes SET score = ?, scan_result = ? WHERE id = ?',
+              (score, scan_result, record_id))
     conn.commit()
     conn.close()
 
