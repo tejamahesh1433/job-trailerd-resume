@@ -521,6 +521,59 @@ body {
   font-weight: 500;
 }
 
+.duplicate-conflict-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.dup-rerun-btn,
+.dup-dismiss-btn {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 0.4rem 0.8rem;
+  border-radius: 1px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.dup-rerun-btn {
+  background: var(--gold);
+  color: var(--ink);
+  border: 1px solid var(--gold);
+}
+
+.dup-rerun-btn:hover { background: var(--gold-bright); }
+
+.dup-dismiss-btn {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+
+.dup-dismiss-btn:hover { color: var(--cream-dim); border-color: var(--muted); }
+
+.rerun-cancel-btn {
+  margin-left: 0.75rem;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 0.25rem 0.6rem;
+  background: transparent;
+  color: var(--gold);
+  border: 1px solid var(--border-warm);
+  border-radius: 1px;
+  cursor: pointer;
+}
+
+.rerun-cancel-btn:hover { background: var(--gold-dim); }
+
 /* ── Action button ──────────────────────────────────── */
 .action-btn {
   width: 100%;
@@ -2011,6 +2064,25 @@ body {
 }
 
 .mail-hist-btn:disabled { color: var(--muted); cursor: not-allowed; }
+
+.rerun-hist-btn {
+  background: transparent;
+  border: 1px solid var(--border-warm);
+  border-radius: 1px;
+  color: var(--gold);
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  line-height: 1;
+  padding: 0.25rem 0.45rem;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.15s;
+}
+
+.rerun-hist-btn:hover {
+  background: var(--gold-dim);
+  border-color: var(--gold);
+  transform: rotate(90deg);
+}
 
 /* ── Mail Draft Modal ───────────────────────────────── */
 .mail-modal { max-width: 680px; }

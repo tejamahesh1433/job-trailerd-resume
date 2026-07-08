@@ -147,6 +147,10 @@ export default function App() {
   // Active record for panels 03 + 04
   const [activeRecordId, setActiveRecordId] = useState(null);
   const [activeCompanyName, setActiveCompanyName] = useState(null);
+  // Re-run an already-scanned JD — updates that record's tailored resume in place
+  const [rerunRecordId, setRerunRecordId] = useState(null);
+  const [rerunCompanyName, setRerunCompanyName] = useState(null);
+  const [duplicateConflict, setDuplicateConflict] = useState(null);
   // Additional Points — add extra bullets to the current tailored resume
   const [addPointsText, setAddPointsText] = useState('');
   const [addPointsTarget, setAddPointsTarget] = useState('');
@@ -418,6 +422,7 @@ export default function App() {
 
   const handleScan = async () => {
     setError(null);
+    setDuplicateConflict(null);
     if (!jdText.trim()) { setError('Job Description is required.'); return; }
     if (!selectedResumeName && storedResumes.length === 0) { setError('Please add a base resume first.'); return; }
     setLoading(true);
@@ -430,25 +435,56 @@ export default function App() {
     formData.append('jd_text', jdText);
     if (aiNotes.trim()) formData.append('ai_notes', aiNotes.trim());
     if (selectedResumeName) formData.append('selected_resume', selectedResumeName);
+    if (rerunRecordId) formData.append('rerun_id', rerunRecordId);
     try {
       const res = await fetch('http://localhost:8000/api/scan', { method: 'POST', body: formData });
       const data = await res.json();
       if (!res.ok) {
-        setError(res.status === 429 ? 'Rate limit hit — wait a moment and try again.' : (data.detail || `Server error (${res.status}). Please try again.`));
+        if (res.status === 409 && data.detail?.duplicate_id) {
+          setDuplicateConflict(data.detail);
+          setError(data.detail.message);
+        } else {
+          setError(res.status === 429 ? 'Rate limit hit — wait a moment and try again.' : (data.detail || `Server error (${res.status}). Please try again.`));
+        }
         return;
       }
       setResult(data);
       setActiveRecordId(data.id);
       setActiveCompanyName(data.company_name);
-      if (data.duplicate) {
+      if (data.rerun) {
+        setError(null);
+      } else if (data.duplicate) {
         setError(`Note: ${data.company_name} was scanned before (previous score: ${data.previous_score}%). A new entry has been added.`);
       }
+      setRerunRecordId(null);
+      setRerunCompanyName(null);
       fetchHistory();
     } catch {
       setError('An error occurred. Check your connection or API limits.');
     } finally {
       setLoading(false); fetchUsage();
     }
+  };
+
+  const handleRerunFromLog = (item) => {
+    setDuplicateConflict(null);
+    setError(null);
+    setJdText(item.jd_text || '');
+    setRerunRecordId(item.id);
+    setRerunCompanyName(item.company_name);
+    handleSelectRecord(item);
+    if (batchMode) setBatchMode(false);
+    setTimeout(() => {
+      document.getElementById('panel-pre-production')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 60);
+  };
+
+  const handleAcceptDuplicateRerun = () => {
+    if (!duplicateConflict?.duplicate_id) return;
+    setRerunRecordId(duplicateConflict.duplicate_id);
+    setRerunCompanyName(duplicateConflict.company_name);
+    setDuplicateConflict(null);
+    setError(null);
   };
 
   const handleReset = () => {
@@ -462,6 +498,9 @@ export default function App() {
     setDraftPath(null);
     setActiveRecordId(null);
     setActiveCompanyName(null);
+    setRerunRecordId(null);
+    setRerunCompanyName(null);
+    setDuplicateConflict(null);
     setAddPointsText('');
     setAddPointsTarget('');
     setAddPointsSuccess(null);
@@ -1137,13 +1176,27 @@ export default function App() {
         <div className="workspace" style={{ display: batchMode ? 'none' : 'grid' }}>
 
           {/* ── Left: Input Panel ── */}
-          <div className="panel panel-enter" style={{ animationDelay: '0ms' }}>
+          <div id="panel-pre-production" className="panel panel-enter" style={{ animationDelay: '0ms' }}>
             <div className="panel-tag">
               <span className="panel-num">01</span>
               <span className="panel-title">Pre-Production</span>
             </div>
 
+            {rerunRecordId && (
+              <div className="status-banner status-original" style={{ marginBottom: '0.75rem' }}>
+                ⟳ Re-running scan for <strong>{rerunCompanyName}</strong> — this will update the existing tailored resume, not create a new entry.
+                <button className="rerun-cancel-btn" onClick={() => { setRerunRecordId(null); setRerunCompanyName(null); }}>Cancel</button>
+              </div>
+            )}
+
             {error && <div className="error-banner">⚠ {error}</div>}
+
+            {duplicateConflict && (
+              <div className="error-banner duplicate-conflict-banner">
+                <button className="dup-rerun-btn" onClick={handleAcceptDuplicateRerun}>⟳ Re-run &amp; Update This Entry</button>
+                <button className="dup-dismiss-btn" onClick={() => { setDuplicateConflict(null); setError(null); }}>Dismiss</button>
+              </div>
+            )}
 
             <div className="field">
               <label className="field-label">AI Notes <span style={{ fontWeight: 400, opacity: 0.5 }}>(optional)</span></label>
@@ -1232,7 +1285,9 @@ export default function App() {
 
             <div className="btn-row">
               <button className={`action-btn${loading ? ' loading' : ''}`} onClick={handleScan} disabled={loading} style={{ flex: 2 }}>
-                {loading ? <span className="btn-loading"><span className="spin-icon">▶</span> Processing…</span> : '▶ ACTION'}
+                {loading
+                  ? <span className="btn-loading"><span className="spin-icon">▶</span> {rerunRecordId ? 'Re-running…' : 'Processing…'}</span>
+                  : rerunRecordId ? '⟳ RE-RUN' : '▶ ACTION'}
               </button>
               {(result || jdText) && (
                 <button className="action-btn reset-btn" onClick={handleReset} disabled={loading} style={{ flex: 1 }}>Reset</button>
@@ -1880,6 +1935,7 @@ export default function App() {
                           <button className="mail-hist-btn" onClick={() => handleHistoryMail(item.id, item.company_name)} disabled={loadingMailId === item.id} title="Generate email draft">
                             {loadingMailId === item.id ? '…' : '✉'}
                           </button>
+                          <button className="rerun-hist-btn" onClick={() => handleRerunFromLog(item)} title="Re-run this JD — updates this company's tailored resume in place">⟳</button>
                           <button className="del-btn" onClick={() => handleDeleteHistory(item.id)} title="Delete record">×</button>
                         </td>
                       </tr>

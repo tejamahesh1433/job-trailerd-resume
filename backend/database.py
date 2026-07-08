@@ -186,6 +186,15 @@ def update_resume_status(record_id: int, status: str):
     conn.commit()
     conn.close()
 
+def update_resume_rerun(record_id: int, company_name: str, jd_text: str, score: int, scan_result: str):
+    """Overwrite an existing record's JD/score/scan_result in place for a re-run (no new row)."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('UPDATE resumes SET company_name = ?, jd_text = ?, score = ?, scan_result = ? WHERE id = ?',
+              (company_name, jd_text, score, scan_result, record_id))
+    conn.commit()
+    conn.close()
+
 def update_resume_after_edit(record_id: int, score: int, scan_result: str):
     """Update an existing record's tailored score/scan_result in place (no new row)."""
     conn = sqlite3.connect(DB_FILE)

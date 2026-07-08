@@ -30,7 +30,7 @@ from services.docx_service import extract_text_from_docx, create_tailored_docx, 
 from services import gmail_service
 from services.profile_service import process_uploaded_doc
 from services.usage_tracker import get_usage_stats
-from database import init_db, save_resume_record, save_job_matcher_record, get_all_resumes, delete_resume_record, update_resume_status, get_resume_by_id, find_existing_company, sanitize_csv_field, search_records, update_user_address, save_follow_up_draft, get_follow_up_draft, update_resume_after_edit, update_user_notes
+from database import init_db, save_resume_record, save_job_matcher_record, get_all_resumes, delete_resume_record, update_resume_status, get_resume_by_id, find_existing_company, sanitize_csv_field, search_records, update_user_address, save_follow_up_draft, get_follow_up_draft, update_resume_after_edit, update_user_notes, update_resume_rerun
 
 DATA_DIR = os.getenv("DATA_DIR", "data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -903,8 +903,14 @@ async def delete_named_resume(request: Request, filename: str):
 
 @app.post("/api/scan")
 @limiter.limit("10/minute")
-async def scan_resume(request: Request, jd_text: str = Form(...), resume: Optional[UploadFile] = File(None), selected_resume: Optional[str] = Form(None), ai_notes: Optional[str] = Form(None)):
+async def scan_resume(request: Request, jd_text: str = Form(...), resume: Optional[UploadFile] = File(None), selected_resume: Optional[str] = Form(None), ai_notes: Optional[str] = Form(None), rerun_id: Optional[int] = Form(None)):
     try:
+        rerun_record = None
+        if rerun_id and rerun_id > 0:
+            rerun_record = get_resume_by_id(rerun_id)
+            if not rerun_record:
+                raise HTTPException(status_code=404, detail="Record to re-run was not found")
+
         # Validate JD text length
         if not jd_text or len(jd_text) > 50000:
             raise HTTPException(status_code=400, detail="Invalid job description")
@@ -986,20 +992,26 @@ async def scan_resume(request: Request, jd_text: str = Form(...), resume: Option
 
         resume_text = extract_text_from_docx(file_bytes)
 
-        # ── Duplicate JD check ──
-        all_history = get_all_resumes(limit=1000)
-        for item in all_history:
-            if not item.get('jd_text'):
-                continue
-            ratio = difflib.SequenceMatcher(None, jd_text, item['jd_text']).ratio()
-            if ratio >= 0.95:
-                company = item.get('company_name', 'Unknown')
-                score = item.get('score', 0)
-                logger.info(f"Duplicate JD rejected — {ratio:.0%} match with {company} (score={score})")
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Duplicate JD — already scanned for {company} (score: {score}%). Check your Production Log."
-                )
+        # ── Duplicate JD check — skipped when explicitly re-running an existing record ──
+        if not rerun_record:
+            all_history = get_all_resumes(limit=1000)
+            for item in all_history:
+                if not item.get('jd_text'):
+                    continue
+                ratio = difflib.SequenceMatcher(None, jd_text, item['jd_text']).ratio()
+                if ratio >= 0.95:
+                    company = item.get('company_name', 'Unknown')
+                    dup_score = item.get('score', 0)
+                    logger.info(f"Duplicate JD detected — {ratio:.0%} match with {company} (score={dup_score})")
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "message": f"This JD matches an existing entry for {company} (score: {dup_score}%).",
+                            "duplicate_id": item.get('id'),
+                            "company_name": company,
+                            "score": dup_score,
+                        },
+                    )
 
         # ── AI analysis ──
         try:
@@ -1013,7 +1025,13 @@ async def scan_resume(request: Request, jd_text: str = Form(...), resume: Option
         contact_info = result.get('contact_info', {})
         jd_emails = re.findall(r'[\w.+-]+@[\w-]+\.[\w.-]+', jd_text)
         vendor_email = next((e for e in jd_emails if e.split('@')[1].split('.')[0].lower() not in _GENERIC_EMAIL), '')
-        company_dir = _make_company_dir(company_name, vendor_email)
+
+        if rerun_record and rerun_record.get('file_path'):
+            # Re-run: reuse the SAME company directory/file — never create a new entry
+            company_dir = os.path.dirname(rerun_record['file_path'])
+            os.makedirs(company_dir, exist_ok=True)
+        else:
+            company_dir = _make_company_dir(company_name, vendor_email)
 
         file_path = f"{company_dir}/resume.docx"
         jd_path = f"{company_dir}/jd_info.txt"
@@ -1072,8 +1090,6 @@ async def scan_resume(request: Request, jd_text: str = Form(...), resume: Option
             f.write("Job Description:\n")
             f.write(jd_text)
 
-        existing = find_existing_company(company_name)
-
         scan_data = {
             "score": score,
             "after_score": after_score,
@@ -1083,7 +1099,14 @@ async def scan_resume(request: Request, jd_text: str = Form(...), resume: Option
             "replacements": replacements,
         }
 
-        record_id = save_resume_record(company_name, jd_text, after_score, file_path, json.dumps(scan_data))
+        if rerun_record:
+            update_resume_rerun(rerun_record['id'], company_name, jd_text, after_score, json.dumps(scan_data))
+            record_id = rerun_record['id']
+            existing = None
+            logger.info(f"Re-ran scan for record {record_id} ({company_name}) — updated in place")
+        else:
+            existing = find_existing_company(company_name)
+            record_id = save_resume_record(company_name, jd_text, after_score, file_path, json.dumps(scan_data))
         append_to_csv(company_name, jd_text, score, after_score, original_filename, file_path)
 
         return {
@@ -1093,6 +1116,7 @@ async def scan_resume(request: Request, jd_text: str = Form(...), resume: Option
             "tailored": len(replacements) > 0,
             "duplicate": existing is not None,
             "previous_score": existing['score'] if existing else None,
+            "rerun": rerun_record is not None,
             **scan_data,
         }
 
