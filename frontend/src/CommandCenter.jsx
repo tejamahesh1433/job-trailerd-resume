@@ -114,7 +114,8 @@ export default function CommandCenter({ onSendToTailor, onSaveToApplications, on
 
       const jobs = json.jobs || [];
       if (jobs.length === 0) {
-        setSearchStatus({ type: 'empty', message: json.message || `No jobs found for "${searchQuery.trim()}".` });
+        const cacheNote = json.cached ? ' No API/search credits spent on this repeat.' : '';
+        setSearchStatus({ type: 'empty', message: `${json.message || `No jobs found for "${searchQuery.trim()}".`}${cacheNote}` });
         return;
       }
 

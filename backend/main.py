@@ -534,22 +534,29 @@ def _check_visa_eligibility(jd_text: str) -> str | None:
         r'\bfake\s+green\s*card\b',
         r'\bgc\s+not\s+accepted\b',
         r'\bgreen\s*card\s+not\s+accepted\b',
+        # "US Citizens Only" unambiguously excludes Green Card holders — this belongs
+        # here as an always-reject signal, not in the soft found_visas/has_gc check
+        # below, since it's never legitimately "GC-friendly-if-we-just-find-the-word-
+        # green-card-elsewhere."
+        r'\bus\s+citizens?\s+only\b',
     ]
     for pattern in explicit_exclusions:
         if re.search(pattern, text_lower):
             return "Rejected: JD explicitly excludes Green Card holders"
 
-    # NOTE: "citizen"/"US citizen"/"USC" were previously (wrongly) treated as
-    # GC-friendly signals — but a posting can say "US Citizens Only" (which EXCLUDES
-    # Green Card holders, the opposite of GC-friendly). That made has_gc=True for such
-    # postings, which then defeated the found_visas rejection below and let a
-    # citizens-only posting silently pass. Genuine GC-friendly signals only ever
-    # mention Green Card / permanent residency directly.
     gc_patterns = [
         r'\bgreen\s*card\b', r'\bgc\b', r'\bpermanent\s+resident\b',
         r'\bpermanent\s+residency\b',
     ]
 
+    # Only SPECIFIC named visa types are a genuine "this posting is scoped to a
+    # particular visa category" signal. Bare "sponsorship"/"visa sponsor" mentions were
+    # removed — that's near-universal boilerplate ("no sponsorship available/required")
+    # that says nothing about GC eligibility (a GC holder never needs sponsorship
+    # either way), and combined with dropping "citizen" as a GC-friendly signal (see
+    # git history), it was rejecting nearly every real posting overnight. "W2 Only" was
+    # also removed — that's an employment-type signal already enforced by
+    # _check_c2c_c2h_only, not a visa-eligibility one, and doesn't belong here.
     visa_labels = {
         r'\bh[- ]?1b\b': 'H-1B',
         r'\bh[- ]?1\b': 'H-1',
@@ -565,10 +572,6 @@ def _check_visa_eligibility(jd_text: str) -> str | None:
         r'\bj[- ]?1\b': 'J-1',
         r'\bead\b': 'EAD',
         r'\bwork\s+permit\b': 'Work Permit',
-        r'\bsponsorship\b': 'Visa Sponsorship',
-        r'\bvisa\s+sponsor\b': 'Visa Sponsor',
-        r'\bw2\s+only\b': 'W2 Only',
-        r'\bus\s+citizens?\s+only\b': 'US Citizens Only',
     }
 
     has_gc = any(re.search(p, text_lower) for p in gc_patterns)
@@ -4512,12 +4515,7 @@ present — never invent or guess a contact.'''
 async def _run_command_center_search(query: str, platforms: list, work_types: list, contract_types: list) -> dict:
     """Core Command Center auto-search pipeline: scrape (JSearch or DDG fallback) ->
     hard-reject rules -> Claude scoring -> persist. Shared by the HTTP endpoint and the
-    daily scheduled search so neither duplicates this logic. Raises RuntimeError if
-    ANTHROPIC_API_KEY is not set (callers decide how to surface that)."""
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY is not set")
-
+    daily scheduled search so neither duplicates this logic."""
     query = query if query else "DevOps Engineer"
     search_terms = _broaden_devops_query(query)
     job_texts = []
@@ -4530,107 +4528,154 @@ async def _run_command_center_search(query: str, platforms: list, work_types: li
 
     from database import command_center_job_seen
 
-    # Progressive recency window: try the freshest postings first (past 24h), only
-    # widening if that tier didn't turn up enough genuinely NEW postings — jobs already
-    # in the DB from a prior search (found, scored, rejected, or applied) are skipped
-    # before they'd ever reach Claude, so re-running a search doesn't re-spend AI calls
-    # re-scoring things it already knows about. JSearch's date_posted only supports these
-    # four buckets (no exact 48h/2-3-week option) — "month" is the closest available
-    # upper bound to the ~2-3 week horizon requested; it's only reached when the
-    # narrower tiers came up short. Stopping early once enough new jobs are found also
-    # protects the JSearch free tier's 200-searches/month quota — the common case
-    # (today's tier already has fresh unseen postings) costs exactly 1 JSearch call.
+    # Progressive recency window: try the freshest postings first, widening only when
+    # needed. Scraping now walks real result pages (page=1,2,3,...) until JSearch
+    # returns no results for that query/tier. Raw scraping is intentionally uncapped;
+    # AI scoring remains capped later so discovery can be broad without runaway model
+    # token spend.
     JSEARCH_DATE_TIERS = ["today", "3days", "week", "month"]
-    MIN_NEW_JOBS_TARGET = 6
-    MAX_JOB_TEXTS = 8
+    TARGET_PASSING_JOBS = 8
+    MAX_JOBS_TO_SCORE = 8
+    MAX_JSEARCH_PAGES_PER_QUERY_TIER = 10
+    MAX_STALE_PAGES_PER_QUERY_TIER = 2
+    passing_job_texts = []
+    rule_rejected = []
+
 
     if rapidapi_key:
         import requests
         from services.usage_tracker import log_api_call
         url = "https://jsearch.p.rapidapi.com/search"
 
-        # Build advanced query modifiers for JSearch. Platform names (linkedin,
-        # dice, etc.) are NOT included here — JSearch already aggregates across
-        # boards on its own, and appending them as literal keywords to the query
-        # text (e.g. "... in USA linkedin dice indeed ziprecruiter") confuses the
-        # search and reliably returns zero results. Platform filtering is applied
-        # separately to the site-scraping fallback below via `site:` operators.
-        # contract_types ("c2c"/"c2h") are ALSO excluded here for the same reason —
-        # confirmed empirically that adding them zeros out JSearch results even with
-        # remote_jobs_only=true. C2C/C2H-only is enforced reliably after scraping via
-        # _check_c2c_c2h_only instead.
         modifiers = list(work_types)
-
         full_query = f"{search_terms} in USA"
         if modifiers:
             full_query += " " + " ".join(modifiers)
+
+        allowed_contracts = {t.lower() for t in contract_types}
+        contract_queries = []
+        if allowed_contracts <= {"c2c", "c2h"} or {"c2c", "c2h"} & allowed_contracts:
+            contract_terms = []
+            if "c2c" in allowed_contracts or not allowed_contracts:
+                contract_terms.extend(["C2C", "corp to corp", "1099 contractor"])
+            if "c2h" in allowed_contracts or not allowed_contracts:
+                contract_terms.extend(["C2H", "contract to hire"])
+            contract_queries = [f"{search_terms} {term} remote United States" for term in contract_terms]
+
+        # Broad query first, then explicit contract phrases. Targeted queries are what
+        # usually surface C2C/C2H postings that broad job-board search buries.
+        jsearch_queries = [full_query] + contract_queries
 
         headers = {
             "X-RapidAPI-Key": rapidapi_key,
             "X-RapidAPI-Host": "jsearch.p.rapidapi.com"
         }
         seen_urls_this_run = set()
-        for tier in JSEARCH_DATE_TIERS:
-            try:
-                # remote_jobs_only is JSearch's own native filter — more reliable than
-                # stuffing "remote" into the free-text query (keyword-stuffing the query
-                # has previously zeroed out results, see the platform-name incident above).
-                querystring = {
-                    "query": full_query, "page": "1", "num_pages": "1",
-                    "remote_jobs_only": "true", "date_posted": tier,
-                }
-                # The broadened OR-of-titles query takes longer for JSearch to process
-                # than a single-term search (observed 10-15s), so give it more headroom
-                # than the old 10s timeout to avoid spurious empty results.
-                resp = requests.get(url, headers=headers, params=querystring, timeout=25)
-                log_api_call("jsearch-api", "auto_search", input_tokens=1, output_tokens=0)
-                if resp.status_code != 200:
-                    logger.warning(f"JSearch API returned non-200 status for tier '{tier}': {resp.status_code} - {resp.text[:300]}")
-                    continue
-
-                jdata = resp.json().get("data", [])
-                for j in jdata:
-                    apply_link = j.get("job_apply_link", "")
-                    if apply_link and apply_link in seen_urls_this_run:
-                        continue  # same posting surfaced again in a wider tier
-                    title = j.get("job_title", "")
-                    company = j.get("employer_name", "")
-                    if command_center_job_seen(company, title):
-                        skipped_seen_count += 1
-                        continue
-                    if apply_link:
-                        seen_urls_this_run.add(apply_link)
-
-                    city = j.get("job_city") or ""
-                    state = j.get("job_state") or ""
-                    location = f"{city}, {state}".strip(", ")
-                    # Full description, not a truncated snippet — JSearch descriptions
-                    # rarely exceed a few KB and Claude's context easily holds several of
-                    # these; a low cap here was silently cutting off requirements,
-                    # qualifications, and any contact/recruiter info near the end of the
-                    # posting before Claude ever saw it. This no longer needs to be
-                    # weighed against Claude's *output* token budget either — Claude
-                    # doesn't reproduce the description in its response anymore, the
-                    # backend attaches this exact text via posting_index (see
-                    # _score_jobs_with_claude) — so 20000 is just a sanity ceiling
-                    # against pathological outliers, not a normal truncation point.
-                    desc = (j.get("job_description") or "")[:20000]
-                    employer_website = j.get("employer_website") or ""
-                    job_texts.append(
-                        f"Title: {title}\nCompany: {company}\nLocation: {location}\nURL: {apply_link}\n"
-                        f"Employer Website: {employer_website}\nDescription: {desc}"
-                    )
-                    if len(job_texts) >= MAX_JOB_TEXTS:
-                        break
-
-                if job_texts:
-                    jsearch_success = True
-                logger.info(f"JSearch tier '{tier}': {len(jdata)} results, {len(job_texts)} new unseen so far, {skipped_seen_count} already known")
-                if len(job_texts) >= MIN_NEW_JOBS_TARGET:
+        jsearch_call_count = 0
+        for search_idx, active_query in enumerate(jsearch_queries):
+            if len(passing_job_texts) >= TARGET_PASSING_JOBS:
+                break
+            for tier in JSEARCH_DATE_TIERS:
+                if len(passing_job_texts) >= TARGET_PASSING_JOBS:
                     break
-            except Exception as e:
-                logger.warning(f"JSearch API error for tier '{tier}': {e}")
-                continue
+                page_num = 1
+                seen_page_fingerprints = set()
+                stale_pages = 0
+                while True:
+                    if len(passing_job_texts) >= TARGET_PASSING_JOBS:
+                        break
+                    if page_num > MAX_JSEARCH_PAGES_PER_QUERY_TIER:
+                        logger.info(f"JSearch query {search_idx + 1}/{len(jsearch_queries)} tier '{tier}' stopped at page {page_num}: page safety limit")
+                        break
+                    if stale_pages >= MAX_STALE_PAGES_PER_QUERY_TIER:
+                        logger.info(f"JSearch query {search_idx + 1}/{len(jsearch_queries)} tier '{tier}' stopped at page {page_num}: no new usable jobs on recent pages")
+                        break
+                    try:
+                        # Real pagination: request exactly one provider page at a time
+                        # and increment `page` until the API returns an empty page.
+                        querystring = {
+                            "query": active_query,
+                            "page": str(page_num),
+                            "num_pages": "1",
+                            "remote_jobs_only": "true" if search_idx == 0 else "false",
+                            "date_posted": tier,
+                        }
+                        resp = requests.get(url, headers=headers, params=querystring, timeout=25)
+                        jsearch_call_count += 1
+                        log_api_call("jsearch-api", "auto_search", input_tokens=1, output_tokens=0)
+                        if resp.status_code != 200:
+                            logger.warning(f"JSearch API returned non-200 status for query {search_idx + 1}, tier '{tier}', page {page_num}: {resp.status_code} - {resp.text[:300]}")
+                            break
+
+                        jdata = resp.json().get("data", [])
+                        if not jdata:
+                            logger.info(f"JSearch query {search_idx + 1}/{len(jsearch_queries)} tier '{tier}' ended at page {page_num}: no results")
+                            break
+
+                        page_fingerprint = tuple((j.get("job_apply_link") or j.get("job_id") or j.get("job_title") or "") for j in jdata)
+                        if page_fingerprint in seen_page_fingerprints:
+                            logger.info(f"JSearch query {search_idx + 1}/{len(jsearch_queries)} tier '{tier}' stopped at page {page_num}: repeated provider page")
+                            break
+                        seen_page_fingerprints.add(page_fingerprint)
+
+                        new_usable_this_page = 0
+                        for j in jdata:
+                            apply_link = j.get("job_apply_link", "")
+                            if apply_link and apply_link in seen_urls_this_run:
+                                continue
+                            title = j.get("job_title", "")
+                            company = j.get("employer_name", "")
+                            if command_center_job_seen(company, title):
+                                skipped_seen_count += 1
+                                if apply_link:
+                                    seen_urls_this_run.add(apply_link)
+                                continue
+                            if apply_link:
+                                seen_urls_this_run.add(apply_link)
+
+                            city = j.get("job_city") or ""
+                            state = j.get("job_state") or ""
+                            location = f"{city}, {state}".strip(", ")
+                            desc = (j.get("job_description") or "")[:20000]
+                            employer_website = j.get("employer_website") or ""
+                            jt = (
+                                f"Title: {title}\nCompany: {company}\nLocation: {location}\nURL: {apply_link}\n"
+                                f"Employer Website: {employer_website}\nDescription: {desc}"
+                            )
+                            job_texts.append(jt)
+                            reason = (
+                                _check_position_filled(jt)
+                                or _check_lead_role(jt)
+                                or _check_visa_eligibility(jt)
+                                or _check_foreign_language(jt)
+                                or _check_remote_only(jt)
+                                or _check_c2c_c2h_only(jt, contract_types)
+                                or _check_experience_years(jt)
+                            )
+                            if reason:
+                                rule_rejected.append({
+                                    'company': company or _extract_company_name(jt) or 'Unknown',
+                                    'title': title or _guess_title_from_job_text(jt),
+                                    'reason': reason,
+                                })
+                            else:
+                                passing_job_texts.append(jt)
+                                new_usable_this_page += 1
+                                if len(passing_job_texts) >= TARGET_PASSING_JOBS:
+                                    break
+
+                        if job_texts:
+                            jsearch_success = True
+                        stale_pages = 0 if new_usable_this_page else stale_pages + 1
+                        logger.info(
+                            f"JSearch query {search_idx + 1}/{len(jsearch_queries)} tier '{tier}' page {page_num}: "
+                            f"{len(jdata)} results, {len(passing_job_texts)} usable, {len(rule_rejected)} rejected, "
+                            f"{skipped_seen_count} already known"
+                        )
+                        page_num += 1
+                    except Exception as e:
+                        logger.warning(f"JSearch API error for query {search_idx + 1}, tier '{tier}', page {page_num}: {e}")
+                        break
 
     if not jsearch_success:
         sites = []
@@ -4650,7 +4695,7 @@ async def _run_command_center_search(query: str, platforms: list, work_types: li
         seen_urls_this_run = set()
         for tier in DDG_TIME_TIERS:
             try:
-                results = DDGS().text(search_query, max_results=5, timelimit=tier)
+                results = DDGS().text(search_query, max_results=50, timelimit=tier)
             except Exception as e:
                 logger.warning(f"DDG search failed for tier '{tier}': {e}")
                 continue
@@ -4678,50 +4723,44 @@ async def _run_command_center_search(query: str, platforms: list, work_types: li
                         job_texts.append(candidate_text)
                 except Exception as e:
                     logger.warning(f"Error fetching {page_url}: {e}")
-                if len(job_texts) >= MIN_NEW_JOBS_TARGET:
-                    break
-            if len(job_texts) >= MIN_NEW_JOBS_TARGET:
-                break
 
     if not job_texts:
         message = f'No postings found for "{query}" on the selected platforms. Try different platforms, work types, or a broader search term.'
         if skipped_seen_count:
             message = f'Found {skipped_seen_count} posting(s) for "{query}", but all were already in your Command Center from a previous search. Try a broader search term to find new ones.'
-        return {
+        result = {
             "jobs": [],
             "count": 0,
             "rejected_count": 0,
             "skipped_seen_count": skipped_seen_count,
             "query": query,
-            "message": message
+            "message": message,
+            "cached": False,
+            "api_spent": True,
         }
+        return result
 
-    # Apply the same hard-reject rules Job Matcher uses (lead/management titles,
-    # visa/sponsorship mismatch, foreign-language requirements), plus Command
-    # Center-specific rules (closed/filled postings, on-site-required postings — this
-    # search is remote-US-only, and C2C/C2H-only — W2/full-time and unspecified
-    # employment type are both rejected) — all BEFORE spending AI calls scoring a
-    # posting that's going to be skipped anyway.
-    passing_job_texts = []
-    rule_rejected = []
-    for jt in job_texts:
-        reason = (
-            _check_position_filled(jt)
-            or _check_lead_role(jt)
-            or _check_visa_eligibility(jt)
-            or _check_foreign_language(jt)
-            or _check_remote_only(jt)
-            or _check_c2c_c2h_only(jt, contract_types)
-            or _check_experience_years(jt)
-        )
-        if reason:
-            rule_rejected.append({
-                'company': _extract_company_name(jt) or 'Unknown',
-                'title': _guess_title_from_job_text(jt),
-                'reason': reason,
-            })
-        else:
-            passing_job_texts.append(jt)
+    # JSearch filters postings as it scrapes so it can stop once enough usable jobs are
+    # found. The DDG fallback appends raw job_texts, so filter those here if needed.
+    if not passing_job_texts and job_texts:
+        for jt in job_texts:
+            reason = (
+                _check_position_filled(jt)
+                or _check_lead_role(jt)
+                or _check_visa_eligibility(jt)
+                or _check_foreign_language(jt)
+                or _check_remote_only(jt)
+                or _check_c2c_c2h_only(jt, contract_types)
+                or _check_experience_years(jt)
+            )
+            if reason:
+                rule_rejected.append({
+                    'company': _extract_field_from_job_text(jt, 'Company:') or _extract_company_name(jt) or 'Unknown',
+                    'title': _extract_field_from_job_text(jt, 'Title:') or _guess_title_from_job_text(jt),
+                    'reason': reason,
+                })
+            else:
+                passing_job_texts.append(jt)
 
     if rule_rejected:
         from database import save_rejected_job
@@ -4733,7 +4772,7 @@ async def _run_command_center_search(query: str, platforms: list, work_types: li
 
     job_texts = passing_job_texts
     if not job_texts:
-        return {
+        result = {
             "jobs": [],
             "count": 0,
             "rejected_count": len(rule_rejected),
@@ -4743,7 +4782,14 @@ async def _run_command_center_search(query: str, platforms: list, work_types: li
                 f'All {len(rule_rejected)} posting(s) for "{query}" were filtered out by your hard rules '
                 f'(visa/lead-level/experience/language/remote-only/C2C-C2H-only) — see Jobs to Skip for why. Try a broader search term.'
             ),
+            "cached": False,
+            "api_spent": True,
         }
+        return result
+
+    if len(job_texts) > MAX_JOBS_TO_SCORE:
+        logger.info(f"Scoring first {MAX_JOBS_TO_SCORE} of {len(job_texts)} passing postings to control AI token spend")
+        job_texts = job_texts[:MAX_JOBS_TO_SCORE]
 
     jobs = _score_jobs_with_claude(job_texts, query)
 
@@ -4780,7 +4826,9 @@ async def _run_command_center_search(query: str, platforms: list, work_types: li
         "rejected_count": len(rule_rejected),
         "skipped_seen_count": skipped_seen_count,
         "query": query,
-        "message": message
+        "message": message,
+        "cached": False,
+        "api_spent": True,
     }
 
 
