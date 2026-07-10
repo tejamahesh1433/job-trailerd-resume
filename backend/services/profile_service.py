@@ -7,6 +7,7 @@ from google import genai
 from google.genai import types
 from services.docx_service import extract_text_from_docx
 from services.usage_tracker import log_api_call
+from services.model_config import GEMINI_FAST_MODEL
 
 DATA_DIR = os.getenv("DATA_DIR", "data")
 PROFILE_PATH = os.path.join(DATA_DIR, "profile.txt")
@@ -32,7 +33,7 @@ def _extract_pdf_with_vision(file_bytes: bytes) -> str:
     client = genai.Client(api_key=api_key)
 
     response = client.models.generate_content(
-        model='gemini-2.5-flash',
+        model=GEMINI_FAST_MODEL,
         contents=[
             types.Part.from_bytes(data=file_bytes, mime_type='application/pdf'),
             "Extract ALL text visible in this PDF document. Return only the raw text, nothing else.",
@@ -41,11 +42,11 @@ def _extract_pdf_with_vision(file_bytes: bytes) -> str:
     )
     usage = response.usage_metadata
     if usage:
-        log_api_call("gemini-2.5-flash", "profile_pdf_ocr",
+        log_api_call(GEMINI_FAST_MODEL, "profile_pdf_ocr",
                      input_tokens=usage.prompt_token_count or 0,
                      output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
     else:
-        log_api_call("gemini-2.5-flash", "profile_pdf_ocr", input_tokens=2000, output_tokens=500)
+        log_api_call(GEMINI_FAST_MODEL, "profile_pdf_ocr", input_tokens=2000, output_tokens=500)
     return response.text.strip()
 
 
@@ -63,7 +64,7 @@ def extract_text_from_image(file_bytes: bytes, filename: str) -> str:
     mime_type = mime_map.get(ext, 'image/jpeg')
 
     response = client.models.generate_content(
-        model='gemini-2.5-flash',
+        model=GEMINI_FAST_MODEL,
         contents=[
             types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
             "Extract ALL text visible in this document/image. Return only the raw text, nothing else.",
@@ -72,11 +73,11 @@ def extract_text_from_image(file_bytes: bytes, filename: str) -> str:
     )
     usage = response.usage_metadata
     if usage:
-        log_api_call("gemini-2.5-flash", "profile_image_ocr",
+        log_api_call(GEMINI_FAST_MODEL, "profile_image_ocr",
                      input_tokens=usage.prompt_token_count or 0,
                      output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
     else:
-        log_api_call("gemini-2.5-flash", "profile_image_ocr", input_tokens=2000, output_tokens=500)
+        log_api_call(GEMINI_FAST_MODEL, "profile_image_ocr", input_tokens=2000, output_tokens=500)
     return response.text.strip()
 
 
@@ -108,17 +109,17 @@ If no relevant facts found, return "No relevant facts found."
 """
 
     response = client.models.generate_content(
-        model='gemini-2.5-flash',
+        model=GEMINI_FAST_MODEL,
         contents=prompt,
         config=types.GenerateContentConfig(temperature=0.1),
     )
     usage = response.usage_metadata
     if usage:
-        log_api_call("gemini-2.5-flash", "profile_extract_facts",
+        log_api_call(GEMINI_FAST_MODEL, "profile_extract_facts",
                      input_tokens=usage.prompt_token_count or 0,
                      output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
     else:
-        log_api_call("gemini-2.5-flash", "profile_extract_facts", input_tokens=1000, output_tokens=200)
+        log_api_call(GEMINI_FAST_MODEL, "profile_extract_facts", input_tokens=1000, output_tokens=200)
     return response.text.strip()
 
 

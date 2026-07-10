@@ -1,4 +1,4 @@
-annotated-doc==0.0.4
+﻿annotated-doc==0.0.4
 annotated-types==0.7.0
 anthropic==0.109.2
 anyio==4.14.0
@@ -70,3 +70,7 @@ watchfiles==1.2.0
 websockets==16.0
 wrapt==2.2.1
 prometheus-fastapi-instrumentator==8.0.2
+duckduckgo-search
+beautifulsoup4
+requests
+tzdata

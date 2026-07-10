@@ -18,6 +18,7 @@ backend/data/
 # User Data & Generated Outputs
 backend/original/
 backend/trailerd/
+backend/online-platform/
 backend/output_resumes/
 
 # Logs

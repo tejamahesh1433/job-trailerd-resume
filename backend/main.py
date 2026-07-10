@@ -1,3 +1,6 @@
+from bs4 import BeautifulSoup
+import requests
+from duckduckgo_search import DDGS
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -24,7 +27,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from fastapi.responses import RedirectResponse
-from services.ai_service import analyze_resume, generate_cover_letter, analyze_job_metadata, generate_additional_points
+from services.ai_service import analyze_resume, generate_cover_letter, analyze_job_metadata, generate_additional_points, generate_recruiter_outreach_email, generate_checkin_followup_email, generate_linkedin_message, extract_contacts_from_text
 from services.ollama_service import generate_mail_draft, generate_follow_up, detect_w2_fulltime
 from services.docx_service import extract_text_from_docx, create_tailored_docx, insert_bullets_after
 from services import gmail_service
@@ -212,6 +215,7 @@ def _scrape_jd_from_url(url: str) -> str:
     # Use AI to clean up the scraped text
     try:
         from services.ai_service import client as ai_client
+        from services.model_config import GEMINI_QUALITY_MODEL
         import google.genai as genai
         from google.genai import types
 
@@ -219,7 +223,7 @@ def _scrape_jd_from_url(url: str) -> str:
         if api_key:
             client = genai.Client(api_key=api_key)
             response = client.models.generate_content(
-                model='gemini-2.5-flash',
+                model=GEMINI_QUALITY_MODEL,
                 contents=f"""Extract ONLY the job description from this scraped web page text.
 Remove all navigation, ads, cookie notices, sidebar content, and other non-JD text.
 Return the clean job description including: job title, company name, location, requirements, responsibilities, qualifications, and any other JD-related content.
@@ -234,7 +238,7 @@ Scraped text (first 8000 chars):
                 from services.usage_tracker import log_api_call
                 usage = response.usage_metadata
                 if usage:
-                    log_api_call("gemini-2.5-flash", "url_jd_extract",
+                    log_api_call(GEMINI_QUALITY_MODEL, "url_jd_extract",
                                  input_tokens=usage.prompt_token_count or 0,
                                  output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
                 return cleaned
@@ -314,29 +318,79 @@ def _extract_company_name(jd_text: str) -> str:
     return "Unknown_Company"
 
 
-def _make_company_dir(company_name: str, email: str = "") -> str:
-    """Build a unique trailerd/<company> directory path. Uses email if unknown, appends _1, _2 if duplicate."""
+def _guess_title_from_job_text(jt: str) -> str:
+    """Best-effort job title for a raw scraped/aggregated job text blob, used to label
+    postings that get filtered out by hard-reject rules before reaching AI scoring."""
+    marker = 'Title:'
+    if jt.startswith(marker):
+        rest = jt[len(marker):]
+        for sep in ('\\nCompany:', '\nCompany:', '\\n', '\n'):
+            if sep in rest:
+                return rest.split(sep)[0].strip()[:80]
+        return rest.strip()[:80]
+    return jt.strip().split('\n')[0][:80].strip()
+
+
+def _make_company_dir(company_name: str, email: str = "", root: str = "trailerd") -> str:
+    """Build a unique <root>/<company> directory path. Uses email if unknown, appends _1, _2 if duplicate.
+    root must be one of the two allowed storage roots — 'trailerd' for the Dashboard's regular
+    resume tailoring, 'online-platform' for jobs tailored from the Command Center."""
+    if root not in ("trailerd", "online-platform"):
+        root = "trailerd"
     safe = "".join([c for c in company_name if c.isalpha() or c.isdigit() or c == ' ' or c == '@' or c == '.']).strip()
     if not safe or safe.lower() in ("unknown company", "unknowncompany", "unknown", "unknown_company"):
         if email and isinstance(email, str) and '@' in email:
             safe = email.split('@')[0]
             safe = "".join([c for c in safe if c.isalnum()]).strip()
-        
+
         if not safe or safe.lower() in ("unknown company", "unknowncompany", "unknown", "unknown_company"):
             safe = "Unknown"
 
     safe = safe.replace(' ', '_')
-    base_dir = f"trailerd/{safe}"
+    base_dir = f"{root}/{safe}"
     
-    # Handle duplicates by appending _1, _2, etc.
+    # Handle duplicates by appending _1, _2, etc. — check-then-create (os.path.exists
+    # followed by a separate os.makedirs) has a TOCTOU race: two concurrent requests
+    # for the same company (e.g. a double-submit) can both see the directory as "not
+    # existing" and both settle on the same path, then both write into it and silently
+    # clobber each other's output. Making the directory itself the atomic check (via
+    # exist_ok=False raising FileExistsError) closes that window.
     company_dir = base_dir
     counter = 1
-    while os.path.exists(company_dir):
-        company_dir = f"{base_dir}_{counter}"
-        counter += 1
-        
-    os.makedirs(company_dir, exist_ok=True)
+    while True:
+        try:
+            os.makedirs(company_dir, exist_ok=False)
+            break
+        except FileExistsError:
+            company_dir = f"{base_dir}_{counter}"
+            counter += 1
     return company_dir
+
+
+def _job_artifact_dir(record_id: int, company_name: str) -> str:
+    """Deterministic online-platform/<company>_<job_id> folder for every AI-generated
+    artifact tied to one Command Center job — keyed by job id (not name-dedup counters)
+    so every action (tailor, cover letter, drafts, contact info, match explanation,
+    status changes) always lands in the exact same folder for that job, regardless of
+    which action ran first or how the AI spelled the company name."""
+    safe = "".join([c for c in (company_name or "") if c.isalpha() or c.isdigit() or c == ' ' or c == '@' or c == '.']).strip()
+    safe = safe.replace(' ', '_') or "Unknown"
+    job_dir = f"online-platform/{safe}_{record_id}"
+    os.makedirs(job_dir, exist_ok=True)
+    return job_dir
+
+
+def _write_job_artifact(record_id: int, company_name: str, filename: str, content: str):
+    """Best-effort text artifact write for a Command Center job action. Never raises —
+    a disk hiccup here shouldn't break the actual action (draft generation, status
+    update, etc.) it's just leaving a record of."""
+    try:
+        job_dir = _job_artifact_dir(record_id, company_name)
+        with open(f"{job_dir}/{filename}", "w", encoding="utf-8") as f:
+            f.write(content)
+    except Exception as e:
+        logger.warning(f"Failed to write job artifact {filename} for job {record_id}: {e}")
+
 
 def get_output_filename(filename_type: str, record_id: int = 0) -> str:
     """Generate non-revealing output filenames using record ID hash."""
@@ -366,8 +420,12 @@ def _extract_experience_years(jd_text: str) -> int:
     text_lower = jd_text.lower()
     max_years = 0
 
-    # Range patterns: "10-15 years experience"
-    range_pattern = r'(\d{1,2})\s*[\-–to]+\s*\d{1,2}\s*(?:years?|yrs?)(?:\s+of)?(?:\s+\w+){0,3}\s*(?:experience|exp\b)'
+    # Range patterns: "10-15 years experience" — this function extracts the MAXIMUM
+    # years required, so the capture group must be around the upper bound (15), not the
+    # lower bound (10). Capturing the lower bound made a "5-15 years" JD register as
+    # only 5 years, silently letting postings requiring far more than the max-10-years
+    # cutoff pass the hard-reject filter.
+    range_pattern = r'\d{1,2}\s*[\-–to]+\s*(\d{1,2})\s*(?:years?|yrs?)(?:\s+of)?(?:\s+\w+){0,3}\s*(?:experience|exp\b)'
     for m in re.finditer(range_pattern, text_lower):
         years = int(m.group(1))
         if 1 <= years <= 30:
@@ -450,8 +508,13 @@ def _check_lead_role(jd_text: str) -> str | None:
         r'\bstaff\s+(?:engineer|architect|devops|sre)\b',
     ]
 
+    # Both pattern groups are scoped to title_area, not the full JD body — a normal
+    # individual-contributor posting can easily mention "reports to the Team Lead" or
+    # "collaborates with our DevOps Lead" in its body without the ADVERTISED ROLE
+    # itself being a lead position. Searching the whole text (the original bug here)
+    # mass-false-rejected legitimate IC postings over an incidental mention elsewhere.
     for pattern in lead_patterns:
-        if re.search(pattern, text_lower):
+        if re.search(pattern, title_area):
             return "JD is for a lead-level position — skipping"
 
     for pattern in mgmt_patterns:
@@ -476,10 +539,15 @@ def _check_visa_eligibility(jd_text: str) -> str | None:
         if re.search(pattern, text_lower):
             return "Rejected: JD explicitly excludes Green Card holders"
 
+    # NOTE: "citizen"/"US citizen"/"USC" were previously (wrongly) treated as
+    # GC-friendly signals — but a posting can say "US Citizens Only" (which EXCLUDES
+    # Green Card holders, the opposite of GC-friendly). That made has_gc=True for such
+    # postings, which then defeated the found_visas rejection below and let a
+    # citizens-only posting silently pass. Genuine GC-friendly signals only ever
+    # mention Green Card / permanent residency directly.
     gc_patterns = [
         r'\bgreen\s*card\b', r'\bgc\b', r'\bpermanent\s+resident\b',
-        r'\bpermanent\s+residency\b', r'\busc\b', r'\bus\s+citizen\b',
-        r'\bcitizen\b',
+        r'\bpermanent\s+residency\b',
     ]
 
     visa_labels = {
@@ -587,6 +655,136 @@ def _check_employment_type(jd_text: str) -> tuple[str, str | None]:
 
     # Default: unclear employment type — pass as soft warning, not hard reject
     return ('unknown', None)
+
+
+def _check_position_filled(jd_text: str) -> str | None:
+    """Return a skip reason if the scraped page shows the posting is already closed/
+    filled — this is common on the DDG-scraping fallback path, where the fetched page
+    is the live posting and may already say so, even though it still ranked in search."""
+    text_lower = jd_text.lower()
+    patterns = [
+        r'\bposition\s+has\s+been\s+filled\b',
+        r'\bjob\s+has\s+been\s+filled\b',
+        r'\brole\s+has\s+been\s+filled\b',
+        r'\bthis\s+job\s+is\s+no\s+longer\s+available\b',
+        r'\bno\s+longer\s+accepting\s+applications\b',
+        r'\bno\s+longer\s+accepting\s+applicants\b',
+        r'\bposting\s+has\s+expired\b',
+        r'\bthis\s+posting\s+has\s+expired\b',
+        r'\bjob\s+posting\s+has\s+expired\b',
+        r'\bposition\s+(?:is\s+)?closed\b',
+        r'\bthis\s+position\s+is\s+no\s+longer\s+open\b',
+        r'\bapplications?\s+(?:are\s+)?closed\b',
+        r'\bhas\s+been\s+filled\b',
+    ]
+    for p in patterns:
+        if re.search(p, text_lower):
+            return "Posting appears to be closed or already filled — skipping before AI scoring"
+    return None
+
+
+def _check_remote_only(jd_text: str) -> str | None:
+    """Command Center only wants FULLY remote roles in the US — reject postings that
+    are explicitly hybrid or require on-site/in-office work. Hybrid is checked first
+    and rejected unconditionally, even if the posting also mentions 'remote' somewhere
+    (e.g. "Hybrid — 3 days/week in office, remote flexibility considered" is still not
+    fully remote). Absence of the word 'remote' entirely is NOT enough to reject on its
+    own (many postings just don't mention work mode) — only an explicit hybrid/onsite
+    signal is.
+
+    IMPORTANT: hybrid detection must require WORK-MODE context (e.g. "hybrid role",
+    "hybrid work model", "Hybrid (3 days/week)"), never a bare "\\bhybrid\\b" match — a
+    huge fraction of DevOps/Cloud postings say things like "hybrid cloud architecture"
+    or "hybrid infrastructure", which is a technology description, not a work-location
+    one. Matching on the bare word silently mass-rejected genuinely fully-remote
+    postings that happened to mention hybrid cloud tech (caught live: a posting titled
+    "Senior DevOps Engineer - Remote" was rejected solely because its JD mentioned
+    "hybrid cloud")."""
+    text_lower = jd_text.lower()
+
+    hybrid_patterns = [
+        r'\bhybrid\s+(?:role|position|schedule|arrangement|setup|work(?:place)?)\b',
+        r'\bwork\s+model\s*:?\s*hybrid\b',
+        r'\bhybrid\s+work\s+model\b',
+        r'\b\d+\s*days?\s*(?:/|a|per)?\s*week\s+(?:in\s+(?:the\s+)?office\s+)?hybrid\b',
+        r'\bhybrid\s*[:\-]\s*\d+\s*days?\b',
+        r'\bhybrid\s*\(\s*\d+\s*days?',
+        r'\bhybrid\s+\d+\s*days?\s*(?:a|per)?\s*week\b',
+        r'\bhybrid\s*/\s*(?:onsite|remote|on-?site)\b',
+        r'\b(?:onsite|remote|on-?site)\s*/\s*hybrid\b',
+        r'\(\s*hybrid\s*/',
+        r'\b(?:location|work\s+type|work\s+arrangement|worksite)\s*:?\s*hybrid\b',
+    ]
+    for p in hybrid_patterns:
+        if re.search(p, text_lower):
+            return "This role is hybrid — you're only searching for fully remote."
+
+    if re.search(r'\bremote\b', text_lower):
+        return None
+
+    onsite_patterns = [
+        r'\bon-?site\s+(?:only|required|position|role)\b',
+        r'\bmust\s+(?:work|be)\s+on-?site\b',
+        r'\bin-?office\s+(?:only|required|position|role|5\s*days)\b',
+        r'\bno\s+remote\b',
+        r'\bremote\s+work\s+is\s+not\s+(?:available|permitted|offered)\b',
+        r'\brelocation\s+required\b',
+        r'\bmust\s+relocate\b',
+        r'\bcandidates?\s+must\s+reside\s+in\b',
+        r'\b100%\s+on-?site\b',
+        r'\b5\s+days\s+(?:a\s+week\s+)?in\s+(?:the\s+)?office\b',
+    ]
+    for p in onsite_patterns:
+        if re.search(p, text_lower):
+            return "This role requires on-site work — you're only searching for remote."
+    return None
+
+
+def _check_experience_years(jd_text: str, max_years: int = 10) -> str | None:
+    """Reject postings that require more experience than the candidate has — same
+    max-10-years cutoff already enforced on the Dashboard/Job Matcher scan paths
+    (_extract_experience_years / max allowed: 10), just not previously wired into
+    Command Center's own hard-reject chain."""
+    years = _extract_experience_years(jd_text)
+    if years > max_years:
+        return f"Requires {years}+ years experience (max allowed: {max_years})"
+    return None
+
+
+def _check_c2c_c2h_only(jd_text: str, contract_types: list = None) -> str | None:
+    """Reject postings whose employment type isn't one the user actually selected in
+    Command Center's search filters (contract_types: any of 'w2'/'c2c'/'c2h' from the
+    UI checkboxes). Previously this was hardcoded to a strict C2C/C2H-only allowlist
+    REGARDLESS of what the frontend's W2 checkbox was set to — meaning toggling W2 on
+    in the UI did nothing, and (combined with the fact that most LinkedIn/Indeed/etc.
+    postings are W2 or don't state a contract type at all) silently rejected almost
+    every posting, even with W2 selected. Falls back to the old strict C2C/C2H-only
+    allowlist only if contract_types is empty/not provided, so any other caller that
+    doesn't pass it keeps prior behavior.
+
+    Unspecified/ambiguous employment type (most postings don't explicitly say "C2C" or
+    "W2") is treated as compatible with a W2 selection — most unlabeled postings are
+    effectively standard W2 hires — but still rejected when only C2C/C2H were
+    selected, preserving a genuine C2C/C2H-only search when that's what's wanted."""
+    allowed = {t.lower() for t in (contract_types or [])} or {'c2c', 'c2h'}
+    allowed_label = '/'.join(sorted(t.upper() for t in allowed))
+
+    employment_type, _ = _check_employment_type(jd_text)
+
+    if employment_type in ('c2c', 'c2h'):
+        if employment_type in allowed:
+            return None
+        return f"This is a {employment_type.upper()} contract position — you're only searching for {allowed_label}."
+
+    if employment_type == 'w2':
+        if 'w2' in allowed:
+            return None
+        return f"This is a W2/Full-time position — you're only searching for {allowed_label}."
+
+    if 'w2' in allowed:
+        return None
+    return f"No explicit {allowed_label} contract terms found — only searching for {allowed_label}."
+
 
 def extract_job_keywords(jd_text: str) -> dict:
     """
@@ -766,8 +964,9 @@ def append_job_matcher_to_csv(company_name, jd_text, match_pct, status, rejectio
             sanitize_csv_field(rejection_reason),
         ])
 
-# Ensure output directory exists
+# Ensure output directories exist
 os.makedirs("trailerd", exist_ok=True)
+os.makedirs("online-platform", exist_ok=True)
 os.makedirs("original", exist_ok=True)
 init_db()
 
@@ -901,9 +1100,27 @@ async def delete_named_resume(request: Request, filename: str):
         logger.error(f"Resume deletion error: {e}")
         raise HTTPException(status_code=500, detail="Failed to delete resume")
 
-@app.post("/api/scan")
-@limiter.limit("10/minute")
-async def scan_resume(request: Request, jd_text: str = Form(...), resume: Optional[UploadFile] = File(None), selected_resume: Optional[str] = Form(None), ai_notes: Optional[str] = Form(None), rerun_id: Optional[int] = Form(None)):
+async def _scan_resume_core(
+    request: Request,
+    jd_text: str,
+    resume: Optional[UploadFile] = None,
+    selected_resume: Optional[str] = None,
+    ai_notes: Optional[str] = None,
+    rerun_id: Optional[int] = None,
+    storage_root: str = "trailerd",
+    override_company_dir: Optional[str] = None,
+    skip_duplicate_check: bool = False,
+):
+    """Internal scan/tailor implementation. storage_root, override_company_dir, and
+    skip_duplicate_check are internal-only — never accept these from an HTTP request.
+    The public /api/scan endpoint below only forwards the plain user-facing fields;
+    only trusted internal callers (Command Center tailoring) pass the rest, and even
+    then override_company_dir is validated to stay inside an allowed root before use."""
+    if override_company_dir:
+        allowed_roots = (os.path.abspath("trailerd"), os.path.abspath("online-platform"))
+        resolved = os.path.abspath(override_company_dir)
+        if not any(resolved == root or resolved.startswith(root + os.sep) for root in allowed_roots):
+            raise HTTPException(status_code=400, detail="Invalid storage location")
     try:
         rerun_record = None
         if rerun_id and rerun_id > 0:
@@ -992,8 +1209,10 @@ async def scan_resume(request: Request, jd_text: str = Form(...), resume: Option
 
         resume_text = extract_text_from_docx(file_bytes)
 
-        # ── Duplicate JD check — skipped when explicitly re-running an existing record ──
-        if not rerun_record:
+        # ── Duplicate JD check — skipped when explicitly re-running an existing record,
+        # or when the caller is Command Center tailoring the same job a second time
+        # (its own JD naturally matches the scan record it created the first time) ──
+        if not rerun_record and not skip_duplicate_check:
             all_history = get_all_resumes(limit=1000)
             for item in all_history:
                 if not item.get('jd_text'):
@@ -1030,8 +1249,14 @@ async def scan_resume(request: Request, jd_text: str = Form(...), resume: Option
             # Re-run: reuse the SAME company directory/file — never create a new entry
             company_dir = os.path.dirname(rerun_record['file_path'])
             os.makedirs(company_dir, exist_ok=True)
+        elif override_company_dir:
+            # Command Center tailoring: use the job's own deterministic artifact
+            # folder instead of an AI-detected company name, which can mismatch the
+            # job's actual stored company (e.g. JD text with no explicit company line).
+            company_dir = override_company_dir
+            os.makedirs(company_dir, exist_ok=True)
         else:
-            company_dir = _make_company_dir(company_name, vendor_email)
+            company_dir = _make_company_dir(company_name, vendor_email, root=storage_root)
 
         file_path = f"{company_dir}/resume.docx"
         jd_path = f"{company_dir}/jd_info.txt"
@@ -1125,6 +1350,16 @@ async def scan_resume(request: Request, jd_text: str = Form(...), resume: Option
     except Exception as e:
         logger.error(f"Scan resume error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to process resume. Please try again later.")
+
+
+@app.post("/api/scan")
+@limiter.limit("10/minute")
+async def scan_resume(request: Request, jd_text: str = Form(...), resume: Optional[UploadFile] = File(None), selected_resume: Optional[str] = Form(None), ai_notes: Optional[str] = Form(None), rerun_id: Optional[int] = Form(None)):
+    """Public HTTP endpoint — only forwards user-facing fields. storage_root,
+    override_company_dir, and skip_duplicate_check are internal-only and can never be
+    set by a request to this endpoint; see _scan_resume_core."""
+    return await _scan_resume_core(request, jd_text, resume, selected_resume, ai_notes, rerun_id)
+
 
 def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, ai_notes: str = "") -> dict:
     resume_text = extract_text_from_docx(file_bytes)
@@ -1556,7 +1791,14 @@ async def api_generate_cover_letter(request: Request, record_id: int):
         with open(abs_path, "rb") as f:
             resume_text = extract_text_from_docx(f.read())
 
-        cover_letter = generate_cover_letter(resume_text, record['jd_text'], record['company_name'])
+        # Command Center records store only the job title in jd_text — the full
+        # description lives in scan_result['description']. Prefer that when present
+        # so the cover letter is written against the real JD, not just the title.
+        scan_result = record.get('scan_result')
+        command_center_description = (scan_result.get('description') or '').strip() if isinstance(scan_result, dict) else ''
+        jd_text = command_center_description if len(command_center_description) >= 50 else record['jd_text']
+
+        cover_letter = generate_cover_letter(resume_text, jd_text, record['company_name'])
 
         company_dir = os.path.dirname(abs_path)
         cl_filename = get_output_filename("cover_letter", record_id)
@@ -1565,6 +1807,9 @@ async def api_generate_cover_letter(request: Request, record_id: int):
         cl_doc = docx.Document()
         cl_doc.add_paragraph(cover_letter)
         cl_doc.save(cl_path)
+
+        from database import mark_cover_letter_generated
+        mark_cover_letter_generated(record_id)
 
         logger.info(f"Cover letter generated for record: {record_id}")
         return {"cover_letter": cover_letter, "cl_path": cl_path}
@@ -1873,11 +2118,22 @@ def download_resume(file_path: str):
     try:
         # Security: allow subdirectories (e.g. CompanyName/resume.docx) but
         # prevent path traversal by resolving and checking against base_path.
+        # Files live under one of two roots: "trailerd" (Dashboard tailoring) or
+        # "online-platform" (Command Center tailoring). Existing frontend callers only
+        # ever strip a leading "trailerd/" prefix, so a path still carrying an
+        # "online-platform/" prefix is resolved against that root instead; anything with
+        # neither prefix falls back to the legacy "trailerd" default.
         rel = file_path.lstrip('/').replace('\\', '/')
-        full_path = os.path.abspath(os.path.join("trailerd", rel))
-        base_path = os.path.abspath("trailerd")
+        first_segment = rel.split('/', 1)[0]
+        if first_segment in ("trailerd", "online-platform"):
+            root = first_segment
+            rel = rel[len(first_segment) + 1:]
+        else:
+            root = "trailerd"
+        full_path = os.path.abspath(os.path.join(root, rel))
+        base_path = os.path.abspath(root)
 
-        # Verify path stays inside trailerd/
+        # Verify path stays inside the resolved root
         if not full_path.startswith(base_path + os.sep):
             raise HTTPException(status_code=404, detail="File not found")
 
@@ -2093,13 +2349,97 @@ async def gmail_save_draft(request: Request, draft: GmailDraftRequest):
 
 # ─── Gmail Inbox (for follow-up) ───
 
+@app.get("/api/gmail/inbox/filters")
+@limiter.limit("60/minute")
+async def gmail_inbox_filters(request: Request):
+    return {"filters": gmail_service.list_inbox_filters()}
+
 @app.get("/api/gmail/inbox")
 @limiter.limit("60/minute")
-async def gmail_inbox(request: Request, q: str = ""):
-    """Search Gmail inbox for messages matching a query."""
+async def gmail_inbox(request: Request, q: str = "", category: str = "all", limit: int = 25,
+                       page_token: str = None, mode: str = "smart"):
+    """Search Gmail messages, then have AI actually read each subject/snippet and
+    classify it — one single batched Gemini call for the whole page (not one call per
+    email), so accuracy is far better than local keyword rules while staying a fraction
+    of a cent per load. Results are cached per message id + content hash (see
+    services/inbox_cache.py), so re-visiting a filter after the first read costs nothing
+    and feels instant. mode="cheap" skips the AI call entirely and uses Gmail's keyword
+    query + local rules only, for zero-API-cost browsing. Falls back to the local-rule
+    category for any message the AI call couldn't classify (or if the AI call fails
+    entirely — never blocks the inbox from loading). If a specific category was
+    requested, the AI's classification (the more accurate read) is used to do the actual
+    filtering, not just Gmail's keyword query — and the Gmail query itself now casts a
+    broad "job mail" net for any category rather than that category's own narrow
+    keywords, so differently-worded messages aren't silently dropped before AI ever sees
+    them."""
     try:
-        messages = gmail_service.search_inbox(q or "in:inbox", max_results=15)
-        return {"messages": messages}
+        max_results = max(1, min(limit, 50))
+        requested_category = (category or "all").lower()
+        search_result = gmail_service.search_inbox(q, max_results=max_results, category=requested_category, page_token=page_token)
+        messages = search_result["messages"]
+        next_page_token = search_result.get("next_page_token")
+
+        if messages and mode != "cheap":
+            try:
+                from services.ai_service import classify_inbox_messages
+                from services import inbox_cache
+                cached, uncached = inbox_cache.split_cached(messages)
+                ai_categories = dict(cached)
+                if uncached:
+                    fresh = classify_inbox_messages(uncached)
+                    ai_categories.update(fresh)
+                    inbox_cache.store(uncached, fresh)
+            except Exception as e:
+                logger.warning(f"Inbox AI classification failed, keeping local-rule categories: {e}")
+                ai_categories = {}
+
+            if ai_categories:
+                label_by_key = {f['key']: f['label'] for f in gmail_service.list_inbox_filters()}
+                for m in messages:
+                    ai_cat = ai_categories.get(m['id'])
+                    if ai_cat:
+                        m['category'] = ai_cat
+                        m['category_label'] = label_by_key.get(ai_cat, ai_cat.title())
+                        m['classified_by'] = 'ai'
+
+                # Only re-filter using the AI's (more accurate) read when it actually ran —
+                # if it failed, stick with whatever Gmail's own keyword query already
+                # returned rather than risk dropping results based on the cruder local
+                # rule's category guess.
+                if requested_category == "needs_attention":
+                    from services.gmail_service import NEEDS_ATTENTION_CATEGORIES
+                    messages = [m for m in messages if m['category'] in NEEDS_ATTENTION_CATEGORIES]
+                elif requested_category != "all":
+                    messages = [m for m in messages if m['category'] == requested_category]
+        elif requested_category == "needs_attention":
+            # Cheap mode has no AI classification to filter on — fall back to whatever
+            # the local-rule category already guessed.
+            from services.gmail_service import NEEDS_ATTENTION_CATEGORIES
+            messages = [m for m in messages if m['category'] in NEEDS_ATTENTION_CATEGORIES]
+
+        if messages:
+            # Cross-reference with the Command Center pipeline — no extra API cost, just
+            # a text match — so the Inbox can point back to the tracked application and
+            # offer a follow-up action right from the message.
+            try:
+                from database import get_active_applications
+                from services.inbox_matcher import match_message_to_application
+                applications = get_active_applications()
+                if applications:
+                    for m in messages:
+                        app = match_message_to_application(m, applications)
+                        if app:
+                            m['matched_application'] = app
+            except Exception as e:
+                logger.warning(f"Inbox application matching failed: {e}")
+
+        return {
+            "messages": messages,
+            "filters": gmail_service.list_inbox_filters(),
+            "category": requested_category,
+            "next_page_token": next_page_token,
+            "mode": mode,
+        }
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -2118,6 +2458,113 @@ async def gmail_message(request: Request, message_id: str):
     except Exception as e:
         logger.error(f"Gmail message read error: {e}")
         raise HTTPException(status_code=500, detail="Failed to read message")
+
+@app.get("/api/gmail/thread/{thread_id}")
+@limiter.limit("20/minute")
+async def gmail_thread(request: Request, thread_id: str):
+    """Full conversation for a message's thread — recruiter back-and-forth (interview
+    scheduling, assessment follow-ups, offer negotiation) reads much better as a
+    conversation than a single isolated message."""
+    try:
+        messages = gmail_service.get_thread_messages(thread_id)
+        return {"thread_id": thread_id, "messages": messages}
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Gmail thread read error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to read thread")
+
+@app.get("/api/gmail/message/{message_id}/summary")
+@limiter.limit("20/minute")
+async def gmail_message_summary(request: Request, message_id: str, record_id: Optional[int] = None):
+    """Full-body AI read of ONE already-opened email — what happened, the required
+    action, any deadline/interview date, a recruiter email, reply intent, and a draft
+    reply. Reads the WHOLE thread (not just this one message — replies often only make
+    sense in light of earlier messages) and, if the message was matched to a tracked
+    application (record_id), grounds the reply in that job's title/company too.
+    User-triggered only (never run across the inbox list, which stays subject/snippet
+    classification for cost), so this is always exactly one cheap call, not one per
+    email."""
+    try:
+        msg = gmail_service.get_message_body(message_id)
+
+        thread_context = ""
+        if msg.get('thread_id'):
+            try:
+                thread_msgs = gmail_service.get_thread_messages(msg['thread_id'])
+                earlier = [t for t in thread_msgs if t['id'] != message_id]
+                if earlier:
+                    thread_context = "\n\n---\n\n".join(
+                        f"From: {t['from']}\nDate: {t['date']}\n{t['body'][:1500]}" for t in earlier
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to fetch thread context for summary: {e}")
+
+        application_context = ""
+        if record_id:
+            try:
+                from database import get_job_detail
+                job = get_job_detail(record_id)
+                if job:
+                    application_context = f"{job.get('title', '')} at {job.get('company', '')}"
+            except Exception as e:
+                logger.warning(f"Failed to load application context for summary: {e}")
+
+        from services.ai_service import summarize_inbox_message
+        summary = summarize_inbox_message(
+            msg.get('subject', ''), msg.get('from', ''), msg.get('body', ''),
+            thread_context=thread_context, application_context=application_context,
+        )
+        return summary
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Gmail message summary error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to summarize message")
+
+
+class LabelMessageRequest(BaseModel):
+    category: str
+
+@app.post("/api/gmail/message/{message_id}/label")
+@limiter.limit("30/minute")
+async def gmail_label_message(request: Request, message_id: str, payload: LabelMessageRequest):
+    """Apply the Job/<Category> Gmail label — requires the gmail.modify scope granted
+    on reconnect; raises a clear reconnect prompt (400) if the connected account
+    doesn't have it yet, same pattern as the read-permission check on search_inbox."""
+    try:
+        return gmail_service.apply_job_label(message_id, payload.category)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Gmail label error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to apply label")
+
+@app.post("/api/gmail/message/{message_id}/archive")
+@limiter.limit("30/minute")
+async def gmail_archive_message(request: Request, message_id: str):
+    try:
+        return gmail_service.archive_message(message_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Gmail archive error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to archive message")
+
+@app.post("/api/gmail/message/{message_id}/mark-read")
+@limiter.limit("30/minute")
+async def gmail_mark_read(request: Request, message_id: str):
+    try:
+        return gmail_service.mark_message_read(message_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Gmail mark-read error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to mark message read")
 
 # ─── Personal Documents (DL, GC, etc.) ───
 
@@ -2542,7 +2989,13 @@ async def apply_to_job(request: Request, jd_text: str = Form(...), resume: Optio
     Reuses existing scan logic with job matcher context.
     """
     try:
-        result = await scan_resume(request, jd_text, resume, selected_resume, ai_notes="From Job Matcher")
+        # Call the internal function directly, not the @app.post-decorated scan_resume —
+        # that wrapper's parameters default to FastAPI's Form(...) marker objects, which
+        # only resolve to real values when FastAPI's own request pipeline invokes it.
+        # Calling it as a plain function (as this did previously) leaves unset params
+        # holding the marker object itself instead of None, breaking any code that
+        # touches them (e.g. `rerun_id > 0`).
+        result = await _scan_resume_core(request, jd_text, resume, selected_resume, ai_notes="From Job Matcher")
         return result
 
     except HTTPException:
@@ -2868,6 +3321,49 @@ def _telegram_save_gmail_draft(record_id: int, chat_id: int):
             pass
 
 
+def _telegram_truncate(text: str, max_len: int = 50) -> str:
+    """Some legacy records store the FULL scraped job text in the 'title' field
+    (jd_text), not a short title — without this, a single item can turn into a
+    multi-KB wall of text in a Telegram message."""
+    text = (text or '').strip().split('\n')[0]
+    return text[:max_len].strip() + '...' if len(text) > max_len else text
+
+
+def _telegram_matches_text(limit: int = 5) -> str:
+    from database import get_found_jobs
+    jobs = get_found_jobs(limit=limit, offset=0)
+    if not jobs:
+        return "No Command Center matches yet. Run a search from the app first."
+    lines = ["Recent matches:"]
+    for j in jobs:
+        lines.append(f"- {j.get('company', '')} - {_telegram_truncate(j.get('title', ''))} ({j.get('score', 0)}%)")
+    return "\n".join(lines)
+
+
+def _telegram_followups_text() -> str:
+    from database import get_action_queue
+    queue = get_action_queue(item_limit=10)
+    items = queue.get('follow_ups_due', {}).get('items', [])
+    if not items:
+        return "No follow-ups due right now."
+    lines = ["Follow-ups due:"]
+    for item in items:
+        days = item.get('days_since')
+        lines.append(f"- {item.get('company', '')} - {_telegram_truncate(item.get('title', ''))}" + (f" ({days}d)" if days is not None else ""))
+    return "\n".join(lines)
+
+
+def _telegram_queue_text() -> str:
+    from database import get_action_queue
+    from services.telegram_notifier import SECTION_LABELS
+    queue = get_action_queue()
+    lines = ["Action Queue:"]
+    for key, label in SECTION_LABELS.items():
+        count = queue.get(key, {}).get('count', 0)
+        lines.append(f"- {label}: {count}")
+    return "\n".join(lines)
+
+
 _telegram_polling = False
 _telegram_msg_buffers: dict[int, list[str]] = {}
 _telegram_flush_tasks: dict[int, asyncio.Task] = {}
@@ -2978,8 +3474,25 @@ async def _telegram_poll_loop():
                 if not text or not chat_id:
                     continue
 
+                # Remember this chat so proactive pushes (new matches, daily digest,
+                # periodic action-queue check) have somewhere to send to — Telegram has
+                # no "message whoever set up the bot" API, only reply-to-an-existing-chat.
+                telegram_service.add_known_chat_id(chat_id)
+
+                if text.startswith("/matches"):
+                    await telegram_service.send_message(chat_id, _telegram_matches_text())
+                    continue
+
+                if text.startswith("/followups"):
+                    await telegram_service.send_message(chat_id, _telegram_followups_text())
+                    continue
+
+                if text.startswith("/queue"):
+                    await telegram_service.send_message(chat_id, _telegram_queue_text())
+                    continue
+
                 if text.startswith("/start"):
-                    await telegram_service.send_message(chat_id, "Welcome to Job Tailored Resume Bot!\n\nSend me a Job Description and I'll:\n- Analyze it against your resume\n- Tailor your resume automatically\n- Save everything to your dashboard\n\nJust paste a JD and hit send.\n\nTips:\n- Long JDs split across messages are auto-combined\n- Use --- between JDs to send multiple at once\n- Use /scan to start a new JD (flushes any pending text)")
+                    await telegram_service.send_message(chat_id, "Welcome to Job Tailored Resume Bot!\n\nSend me a Job Description and I'll:\n- Analyze it against your resume\n- Tailor your resume automatically\n- Save everything to your dashboard\n\nJust paste a JD and hit send.\n\nCommand Center:\n- /matches - recent auto-search matches\n- /followups - applications due for a follow-up\n- /queue - Action Queue summary\nYou'll also get pushed here automatically when new matches or action items show up.\n\nTips:\n- Long JDs split across messages are auto-combined\n- Use --- between JDs to send multiple at once\n- Use /scan to start a new JD (flushes any pending text)")
                     continue
 
                 if text.startswith("/status"):
@@ -3007,7 +3520,7 @@ async def _telegram_poll_loop():
                     continue
 
                 if text.startswith("/"):
-                    await telegram_service.send_message(chat_id, "Commands:\n/start - Welcome message\n/status - Check bot status\n/scan - Start a new JD (flushes pending text)\n\nOr just send a Job Description to process it.\nUse --- between JDs to send multiple at once.")
+                    await telegram_service.send_message(chat_id, "Commands:\n/start - Welcome message\n/status - Check bot status\n/scan - Start a new JD (flushes pending text)\n/matches - Recent Command Center matches\n/followups - Applications due for a follow-up\n/queue - Action Queue summary\n\nOr just send a Job Description to process it.\nUse --- between JDs to send multiple at once.")
                     continue
 
                 logger.info(f"Telegram message from chat {chat_id}: {len(text)} chars")
@@ -3038,6 +3551,25 @@ async def start_telegram_polling():
         asyncio.create_task(_telegram_poll_loop())
 
 
+@app.on_event("startup")
+async def start_telegram_notify_loop():
+    from services import telegram_service, telegram_notifier
+    if telegram_service.is_configured():
+        asyncio.create_task(telegram_notifier.telegram_notify_loop())
+
+
+@app.on_event("startup")
+async def start_daily_search_scheduler():
+    from services import scheduler as scheduler_service
+    asyncio.create_task(scheduler_service.daily_search_loop(_run_command_center_search))
+
+
+@app.on_event("startup")
+async def start_inbox_reply_check_loop():
+    from services import inbox_matcher
+    asyncio.create_task(inbox_matcher.inbox_reply_check_loop())
+
+
 @app.get("/api/telegram/status")
 async def telegram_status():
     """Check if Telegram bot is configured and running."""
@@ -3052,7 +3584,1251 @@ async def telegram_status():
     return result
 
 
+
+PIPELINE_MATCH_SCORE_THRESHOLD = 70
+
+@app.get("/api/command-center/dashboard")
+@limiter.limit("60/minute")
+async def get_command_center_dashboard(request: Request):
+    try:
+        from database import get_all_resumes, get_found_jobs, get_action_queue, get_job_source_breakdown, get_skipped_jobs, get_career_intel
+        records = get_all_resumes(1000, 0)
+
+        # 7-stage pipeline: Discovered/Matched split the raw 'Found' bucket by score
+        # (Matched = scored >= threshold, i.e. a real hit vs. just a scraped listing).
+        # Discovered/Matched are scoped to command-center auto-search results only —
+        # plain resume-tailoring scans from the Dashboard ('Scanned' status) aren't part
+        # of the job-discovery funnel and would otherwise inflate these buckets. Later
+        # stages (Saved/Applied/Interview/Offer/Rejected) apply regardless of source,
+        # since a job can be moved through the funnel from any entry point.
+        pipeline = {'Discovered': 0, 'Matched': 0, 'Saved': 0, 'Applied': 0, 'Interview': 0, 'Offer': 0, 'Rejected': 0}
+
+        for r in records:
+            status = r.get('status', 'Found')
+            score = r.get('score') or 0
+            if status == 'Found' and r.get('source') == 'command-center':
+                if score >= PIPELINE_MATCH_SCORE_THRESHOLD:
+                    pipeline['Matched'] += 1
+                else:
+                    pipeline['Discovered'] += 1
+            elif status in ('Shortlisted', 'Matched'):
+                pipeline['Saved'] += 1
+            elif status == 'Applied':
+                pipeline['Applied'] += 1
+            elif status == 'Interviewing':
+                pipeline['Interview'] += 1
+            elif status == 'Offered':
+                pipeline['Offer'] += 1
+            elif status == 'Rejected':
+                pipeline['Rejected'] += 1
+
+        action_queue = get_action_queue()
+        try:
+            from services.inbox_matcher import get_unhandled_inbox_replies
+            reply_items, reply_count = get_unhandled_inbox_replies()
+            action_queue['inbox_replies'] = {'count': reply_count, 'items': reply_items}
+        except Exception as e:
+            logger.warning(f"Failed to load inbox replies for dashboard: {e}")
+            action_queue['inbox_replies'] = {'count': 0, 'items': []}
+        top_jobs = [_annotate_employment_type(j) for j in get_found_jobs(5)]
+
+        try:
+            from services.scan_status import get_last_scan
+            last_scan = get_last_scan()
+        except Exception:
+            last_scan = None
+
+        try:
+            from services.telegram_service import is_configured as telegram_configured
+            telegram_connected = telegram_configured() and _telegram_polling
+        except Exception:
+            telegram_connected = False
+
+        from services.scheduler import get_schedule_info
+        schedule_info = get_schedule_info()
+
+        return {
+            'metrics': {
+                'new_jobs': pipeline['Discovered'] + pipeline['Matched'],
+                'strong_matches': pipeline['Matched'],
+                'jobs_skip': pipeline['Rejected'],
+                'apps_pending': pipeline['Applied'],
+                'follow_ups': action_queue['follow_ups_due']['count']
+            },
+            'pipeline': pipeline,
+            'top_jobs': top_jobs,
+            'action_queue': action_queue,
+            'skipped_jobs': get_skipped_jobs(),
+            'job_source_health': get_job_source_breakdown(),
+            'last_scan': last_scan,
+            'automation': {
+                'automation_enabled': schedule_info['enabled'],
+                'daily_search_scheduled': schedule_info['enabled'],
+                'daily_search_time': f"{schedule_info['hour']:02d}:{schedule_info['minute']:02d} {schedule_info['timezone']}",
+                'daily_search_next_run': schedule_info['next_run_at'],
+                'daily_search_last_run': schedule_info['last_run_at'],
+                'telegram_connected': telegram_connected,
+            },
+            'career_intel': get_career_intel(),
+        }
+    except Exception as e:
+        logger.error(f"Dashboard error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load dashboard")
+
+
+@app.post("/api/command-center/inbox-replies/check")
+@limiter.limit("10/minute")
+async def check_inbox_replies_now(request: Request):
+    """Manually trigger an inbox check instead of waiting for the 30-min background
+    loop — lets the dashboard feel responsive right after replying to a company."""
+    from services.inbox_matcher import check_inbox_for_replies
+    new_matches = check_inbox_for_replies()
+    return {"new_matches": len(new_matches)}
+
+
+@app.post("/api/command-center/inbox-replies/{message_id}/dismiss")
+@limiter.limit("60/minute")
+async def dismiss_inbox_reply(request: Request, message_id: str):
+    from services.inbox_matcher import mark_inbox_reply_handled
+    found = mark_inbox_reply_handled(message_id)
+    if not found:
+        raise HTTPException(status_code=404, detail="Inbox reply not found")
+    return {"status": "dismissed"}
+
+
+class ManualJobRequest(BaseModel):
+    company: str
+    title: str
+    url: str = ""
+    description: str = ""
+    notes: str = ""
+
+@app.post("/api/jobs/manual-add")
+@limiter.limit("30/minute")
+async def add_manual_job(request: Request, payload: ManualJobRequest):
+    if not payload.company.strip() or not payload.title.strip():
+        raise HTTPException(status_code=400, detail="Company and title are required")
+    from database import save_manual_job
+    record_id = save_manual_job({
+        'company': payload.company.strip(),
+        'title': payload.title.strip(),
+        'url': payload.url.strip(),
+        'description': payload.description.strip(),
+        'notes': payload.notes.strip(),
+    })
+    return {"id": record_id, "status": "saved"}
+
+
+@app.get("/api/jobs/matches")
+@limiter.limit("60/minute")
+async def get_job_matches(request: Request, limit: int = 20, offset: int = 0):
+    """All found jobs, best score first, paginated — backs the Command Center's
+    'View All Matches' page."""
+    from database import get_found_jobs, get_found_jobs_count
+    limit = max(1, min(limit, 100))
+    offset = max(0, offset)
+    jobs = [_annotate_employment_type(j) for j in get_found_jobs(limit=limit, offset=offset)]
+    total = get_found_jobs_count()
+    return {"jobs": jobs, "total": total, "limit": limit, "offset": offset}
+
+
+@app.post("/api/jobs/clear")
+@limiter.limit("5/minute")
+async def clear_command_center_jobs_endpoint(request: Request):
+    """Wipe every job the Command Center tracks (auto-search results + manually added
+    jobs) so the user can start fresh. Does not touch Resume Tailor or Job Finder data."""
+    from database import clear_command_center_jobs
+    deleted = clear_command_center_jobs()
+    try:
+        scan_file = os.path.join(DATA_DIR, "last_scan.json")
+        if os.path.exists(scan_file):
+            os.remove(scan_file)
+    except Exception as e:
+        logger.warning(f"Failed to clear last scan status: {e}")
+    return {"status": "ok", "deleted": deleted}
+
+
+class ScheduleUpdate(BaseModel):
+    enabled: bool = True
+    hour: int = 10
+    minute: int = 0
+
+@app.post("/api/automation/schedule")
+@limiter.limit("10/minute")
+async def update_schedule_endpoint(request: Request, payload: ScheduleUpdate):
+    if not (0 <= payload.hour <= 23) or not (0 <= payload.minute <= 59):
+        raise HTTPException(status_code=400, detail="hour must be 0-23 and minute 0-59")
+    from services.scheduler import set_schedule, get_schedule_info
+    set_schedule(payload.enabled, payload.hour, payload.minute)
+    return get_schedule_info()
+
+
+@app.get("/api/automation/schedule")
+@limiter.limit("30/minute")
+async def get_schedule_endpoint(request: Request):
+    from services.scheduler import get_schedule_info
+    return get_schedule_info()
+
+
+EMPLOYMENT_TYPE_LABELS = {
+    'c2c': 'C2C', 'c2h': 'C2H', 'w2': 'W2', 'contract': 'Contract', 'unknown': 'Unspecified',
+}
+
+def _annotate_employment_type(job: dict) -> dict:
+    """Adds employment_type/employment_type_label to a job dict if not already present.
+    Command Center auto-search jobs already have this persisted from search time (see
+    _score_jobs_with_claude), detected against the FULL scraped posting — the exact text
+    the hard-reject rule evaluated. This only recomputes as a fallback for older/manual
+    records that predate that (from just the saved `description` field, a narrower slice
+    of the original page that can under-detect a contract-type signal sitting outside
+    the specific "Description:" section). Mutates and returns job for easy use in a list
+    comprehension/loop."""
+    if job.get('employment_type_label'):
+        return job
+    description = (job.get('description') or '').strip()
+    if description:
+        employment_type, _ = _check_employment_type(description)
+        job['employment_type'] = employment_type
+        job['employment_type_label'] = EMPLOYMENT_TYPE_LABELS.get(employment_type, 'Unspecified')
+    else:
+        job['employment_type'] = None
+        job['employment_type_label'] = None
+    return job
+
+@app.get("/api/jobs/{job_id}")
+@limiter.limit("60/minute")
+async def get_job_detail_endpoint(request: Request, job_id: int):
+    """Full job object for the Command Center's Job Detail Workspace."""
+    from database import get_job_detail
+    job = get_job_detail(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return _annotate_employment_type(job)
+
+
+# Pipeline statuses as used throughout Command Center (pipeline overview, action
+# queue, skip reasons) — kept separate from /api/history/{id}/status's own enum
+# ("Scanned"/"Phone Screen"/"Interview"/"Offer") since that endpoint serves the
+# Resume Tailor production log and uses different status names for the same stages.
+JOB_STATUS_VALUES = ["Found", "Shortlisted", "Applied", "Interviewing", "Offered", "Rejected"]
+
+class JobStatusUpdate(BaseModel):
+    status: str
+    rejection_reason: Optional[str] = None
+
+@app.post("/api/jobs/{job_id}/status")
+@limiter.limit("30/minute")
+async def update_job_status_endpoint(request: Request, job_id: int, payload: JobStatusUpdate):
+    if payload.status not in JOB_STATUS_VALUES:
+        raise HTTPException(status_code=400, detail=f"status must be one of {JOB_STATUS_VALUES}")
+    from database import get_resume_by_id, update_resume_status, get_job_detail
+    existing = get_resume_by_id(job_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Job not found")
+    update_resume_status(job_id, payload.status, rejection_reason=payload.rejection_reason)
+    updated_job = get_job_detail(job_id)
+
+    # Each status-transition button (Mark Applied/Interview/Rejected, Skip Job) gets its
+    # own artifact file, keyed by the exact status+reason combo the frontend sends —
+    # "Rejected by employer" vs "Skipped by user" both map to status='Rejected' but are
+    # distinct user actions, so they get distinct files.
+    status_filenames = {
+        ("Applied", None): "mark_applied.txt",
+        ("Interviewing", None): "mark_interview.txt",
+        ("Interviewing", "Assessment stage"): "mark_assessment.txt",
+        ("Offered", None): "mark_offer.txt",
+        ("Rejected", "Rejected by employer"): "mark_rejected.txt",
+        ("Rejected", "Skipped by user"): "skip_job.txt",
+    }
+    filename = status_filenames.get((payload.status, payload.rejection_reason))
+    if filename:
+        content = (
+            f"Status changed to {payload.status} at {datetime.now().isoformat()}\n"
+            f"Job: {updated_job.get('title', '')} at {updated_job.get('company', '')}\n"
+        )
+        if payload.rejection_reason:
+            content += f"Reason: {payload.rejection_reason}\n"
+        _write_job_artifact(job_id, updated_job.get('company', ''), filename, content)
+
+    return updated_job
+
+
+@app.post("/api/jobs/{job_id}/rescore")
+@limiter.limit("10/minute")
+async def rescore_job_endpoint(request: Request, job_id: int):
+    """Re-run the same Claude scoring pass used by auto-search against this job's
+    already-stored description — for when the user wants a fresh AI opinion."""
+    from database import get_job_detail, update_job_score
+    job = get_job_detail(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    description = (job.get('description') or '').strip()
+    if len(description) < 40:
+        raise HTTPException(status_code=400, detail="Not enough job description text to re-score. Try 'Fetch job details' first.")
+
+    job_text = f"Title: {job.get('title', '')}\nCompany: {job.get('company', '')}\nLocation: {job.get('location', '')}\nDescription: {description}"
+    try:
+        results = _score_jobs_with_claude([job_text], job.get('title') or 'this role')
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not results:
+        raise HTTPException(status_code=502, detail="AI scoring returned no result — try again.")
+
+    scored = results[0]
+    return update_job_score(
+        job_id,
+        score=scored.get('score', job.get('score', 0)),
+        tags=scored.get('tags', []),
+        reasons=scored.get('reasons', []),
+        next_action=scored.get('next_action', ''),
+    )
+
+
+class DescriptionUpdate(BaseModel):
+    description: str
+
+@app.post("/api/jobs/{job_id}/description")
+@limiter.limit("30/minute")
+async def paste_job_description_endpoint(request: Request, job_id: int, payload: DescriptionUpdate):
+    if len(payload.description.strip()) < 20:
+        raise HTTPException(status_code=400, detail="Description is too short to be useful")
+    from database import get_resume_by_id, update_job_description
+    if not get_resume_by_id(job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    return update_job_description(job_id, payload.description.strip())
+
+
+@app.post("/api/jobs/{job_id}/fetch-description")
+@limiter.limit("10/minute")
+async def fetch_job_description_endpoint(request: Request, job_id: int):
+    """Re-scrape the posting URL for full description text — same fetch approach as
+    the auto-search scraping fallback, just targeted at one already-saved job."""
+    from database import get_job_detail, update_job_description
+    job = get_job_detail(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    url = job.get('url')
+    if not url:
+        raise HTTPException(status_code=400, detail="This job has no source URL to fetch from")
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"Fetch failed with status {resp.status_code}")
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        # Match the cap used everywhere else JDs are scraped (auto-search, contact
+        # discovery) — this was capped lower here, so a manual "Fetch description"
+        # re-fetch could produce a shorter JD than the one auto-search originally found.
+        text = soup.get_text(separator=' ', strip=True)[:20000]
+        if len(text.strip()) < 40:
+            raise HTTPException(status_code=502, detail="Fetched page had no usable text")
+        return update_job_description(job_id, text.strip())
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"Failed to fetch description for job {job_id}: {e}")
+        raise HTTPException(status_code=502, detail="Could not fetch the job page — try pasting the description manually")
+
+
+@app.post("/api/jobs/{job_id}/tailor")
+@limiter.limit("10/minute")
+async def tailor_job_endpoint(request: Request, job_id: int, selected_resume: Optional[str] = None):
+    """Tailor a resume against this job's own description without leaving the Command
+    Center workspace. Reuses the existing /api/scan flow directly (same function call,
+    not a re-implementation) so there's exactly one resume-tailoring code path in the
+    app; this just calls it with the job's description as the JD and links the
+    resulting file back onto this job so Generate Cover Letter etc. can find it."""
+    from database import get_job_detail, link_tailored_resume
+    job = get_job_detail(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    jd_text = (job.get('description') or '').strip()
+    if len(jd_text) < 50:
+        raise HTTPException(status_code=400, detail="Not enough job description text to tailor against — fetch or paste the description first.")
+
+    job_dir = _job_artifact_dir(job_id, job.get('company') or 'Unknown')
+    scan_response = await _scan_resume_core(
+        request=request,
+        jd_text=jd_text,
+        resume=None,
+        selected_resume=selected_resume,
+        ai_notes=None,
+        rerun_id=None,
+        storage_root="online-platform",
+        override_company_dir=job_dir,
+        # Re-tailoring the same Command Center job produces the same JD text every
+        # time by design (it's this job's own stored description) — the duplicate-JD
+        # check exists to catch accidental double-submissions elsewhere, not this.
+        # Without this flag, clicking "Generate Tailored Resume" a second time for the
+        # same job would 409 against the scan record the first click created.
+        skip_duplicate_check=True,
+    )
+
+    file_path = scan_response.get('file_path') if isinstance(scan_response, dict) else None
+    updated_job = link_tailored_resume(job_id, file_path) if file_path else job
+    return {"tailor_result": scan_response, "job": updated_job}
+
+
+@app.post("/api/jobs/{job_id}/explain-match")
+@limiter.limit("30/minute")
+async def explain_match_endpoint(request: Request, job_id: int):
+    """Persist the AI match explanation (score/reasons/tags/next_action already produced
+    by scoring) as a standalone artifact — doesn't call the AI again, just writes down
+    what it already said the last time this job was scored."""
+    from database import get_job_detail
+    job = get_job_detail(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.get('reasons'):
+        raise HTTPException(status_code=400, detail="This job hasn't been scored yet — score it first.")
+
+    lines = [
+        f"Match Explanation — {job.get('title', '')} at {job.get('company', '')}",
+        f"Score: {job.get('score', 0)}",
+        "",
+        "Reasons:",
+    ]
+    lines += [f"- {r}" for r in job.get('reasons', [])]
+    if job.get('tags'):
+        lines += ["", f"Tags: {', '.join(job['tags'])}"]
+    if job.get('next_action'):
+        lines += [f"Suggested next action: {job['next_action']}"]
+    content = "\n".join(lines) + "\n"
+
+    _write_job_artifact(job_id, job.get('company', ''), "explain_match.txt", content)
+    return {"explain_match": content}
+
+
+@app.post("/api/jobs/{job_id}/send-to-tailor")
+@limiter.limit("30/minute")
+async def send_to_tailor_log_endpoint(request: Request, job_id: int):
+    """Log that this job's JD was handed off to the Dashboard's standalone resume
+    tailor flow — that flow isn't job-linked (it writes to trailerd/, not this job's
+    online-platform folder), so this just leaves a record that the handoff happened."""
+    from database import get_job_detail
+    job = get_job_detail(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    content = (
+        f"Sent to Resume Tailor (Dashboard) at {datetime.now().isoformat()}\n"
+        f"Job: {job.get('title', '')} at {job.get('company', '')}\n"
+    )
+    _write_job_artifact(job_id, job.get('company', ''), "send_to_resume_tailor.txt", content)
+    return {"status": "logged"}
+
+
+DRAFT_TYPES = ["recruiter_email", "follow_up_email", "linkedin_message"]
+
+class GenerateDraftRequest(BaseModel):
+    draft_type: str
+
+@app.post("/api/jobs/{job_id}/draft")
+@limiter.limit("15/minute")
+async def generate_job_draft_endpoint(request: Request, job_id: int, payload: GenerateDraftRequest):
+    if payload.draft_type not in DRAFT_TYPES:
+        raise HTTPException(status_code=400, detail=f"draft_type must be one of {DRAFT_TYPES}")
+    from database import get_job_detail, save_job_draft
+    job = get_job_detail(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    title = job.get('title') or 'this role'
+    company = job.get('company') or 'the company'
+    candidate_profile = _load_candidate_profile()
+
+    try:
+        if payload.draft_type == "recruiter_email":
+            desc = (job.get('description') or '').strip()
+            if len(desc) < 40:
+                raise HTTPException(status_code=400, detail="Not enough job description to write from. Try 'Fetch job details' first.")
+            draft = generate_recruiter_outreach_email(title, company, desc, candidate_profile)
+        elif payload.draft_type == "follow_up_email":
+            days_since = 0
+            if job.get('status_updated_at'):
+                try:
+                    days_since = (datetime.now() - datetime.fromisoformat(job['status_updated_at'])).days
+                except (ValueError, TypeError):
+                    days_since = 0
+            draft = generate_checkin_followup_email(title, company, days_since, candidate_profile)
+        else:  # linkedin_message
+            draft = generate_linkedin_message(title, company, candidate_profile)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=f"The AI provider is unavailable: {e}")
+
+    saved = save_job_draft(job_id, payload.draft_type, draft.get('subject', ''), draft.get('body', ''))
+
+    artifact_filenames = {
+        "recruiter_email": "recruiter_email.txt",
+        "follow_up_email": "follow_up_email.txt",
+        "linkedin_message": "linkedin_message.txt",
+    }
+    artifact_content = f"Subject: {saved.get('subject', '')}\n\n{saved.get('body', '')}\n"
+    _write_job_artifact(job_id, company, artifact_filenames[payload.draft_type], artifact_content)
+
+    return {"draft_type": payload.draft_type, "draft": saved}
+
+
+class SaveDraftRequest(BaseModel):
+    draft_type: str
+    subject: str = ""
+    body: str
+
+@app.post("/api/jobs/{job_id}/draft/save")
+@limiter.limit("30/minute")
+async def save_job_draft_endpoint(request: Request, job_id: int, payload: SaveDraftRequest):
+    if payload.draft_type not in DRAFT_TYPES:
+        raise HTTPException(status_code=400, detail=f"draft_type must be one of {DRAFT_TYPES}")
+    from database import get_resume_by_id, save_job_draft
+    if not get_resume_by_id(job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    saved = save_job_draft(job_id, payload.draft_type, payload.subject, payload.body)
+    return {"draft_type": payload.draft_type, "draft": saved}
+
+
+class SaveNotesRequest(BaseModel):
+    notes: str
+
+@app.post("/api/jobs/{job_id}/notes")
+@limiter.limit("30/minute")
+async def save_job_notes_endpoint(request: Request, job_id: int, payload: SaveNotesRequest):
+    if len(payload.notes) > 2000:
+        raise HTTPException(status_code=400, detail="Notes must be 2000 characters or fewer")
+    from database import get_resume_by_id, update_user_notes, get_job_detail
+    if not get_resume_by_id(job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    update_user_notes(job_id, payload.notes)
+    return get_job_detail(job_id)
+
+
+def _guess_domain_from_url(url: str) -> str:
+    if not url:
+        return ""
+    m = re.search(r'https?://(?:www\.)?([a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+)', url)
+    if not m:
+        return ""
+    domain = m.group(1).lower()
+    # Job-board/ATS domains aren't the employer's own domain — skip those, we only
+    # want to guess an email/careers-page domain when the link is the company's own site.
+    board_domains = {'linkedin.com', 'dice.com', 'indeed.com', 'ziprecruiter.com', 'glassdoor.com',
+                      'greenhouse.io', 'lever.co', 'myworkdayjobs.com', 'workday.com', 'icims.com',
+                      'smartrecruiters.com', 'jobvite.com', 'monster.com'}
+    if any(domain == b or domain.endswith('.' + b) for b in board_domains):
+        return ""
+    return domain
+
+def _scrape_contact_candidates(company: str, title: str) -> str:
+    """Free contact discovery, step 1: DDGS search + scrape (same approach the
+    auto-search fallback already uses) for recruiter/talent-acquisition mentions and
+    the company's own careers/contact page. Returns combined scraped text with source
+    URL markers for the AI extraction step, or "" if nothing could be fetched. This
+    does NOT call any AI — it's plain search + scraping, same as the rest of the app."""
+    if not company:
+        return ""
+    queries = [
+        # Careers/official-site query goes first — it's the highest-value source (gets
+        # us the real company domain, which everything else — email guess, careers page
+        # link — depends on) but was previously missing entirely; the other two queries
+        # only ever found generic recruiter mentions, rarely the company's own site.
+        f'"{company}" official website OR careers',
+        f'"{company}" recruiter OR "talent acquisition"',
+        f'"{company}" hiring manager {title}'.strip(),
+    ]
+    snippets = []
+    seen_urls = set()
+    for q in queries:
+        try:
+            results = DDGS().text(q, max_results=3)
+        except Exception as e:
+            logger.warning(f"Contact search failed for '{q}': {e}")
+            continue
+        for r in results:
+            url = r.get("href", "")
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            try:
+                headers = {"User-Agent": "Mozilla/5.0"}
+                resp = requests.get(url, headers=headers, timeout=5)
+                if resp.status_code == 200:
+                    soup = BeautifulSoup(resp.text, 'html.parser')
+                    text = soup.get_text(separator=' ', strip=True)[:2500]
+                    snippets.append(f"SOURCE: {url}\n{text}")
+            except Exception as e:
+                logger.warning(f"Contact page fetch failed for {url}: {e}")
+            if len(snippets) >= 6:
+                break
+        if len(snippets) >= 6:
+            break
+    return "\n\n---\n\n".join(snippets)
+
+
+def _find_company_domain(company: str, job_url: str = "", employer_website: str = "") -> str:
+    """Find the employer's own domain, trying the most reliable source first:
+    (1) employer_website, if JSearch/Claude already gave us one — no guessing needed.
+    (2) the job posting URL itself — works when it's a company ATS page, not a job board.
+    (3) a quick DDGS search for the company's official site — most postings route
+    through a job board (LinkedIn/Indeed/Dice/etc.) whose domain _guess_domain_from_url
+    deliberately rejects, so without this fallback the domain comes back empty for the
+    large majority of postings and every field derived from it (careers page, email
+    guess) goes blank too.
+    Returns "" if nothing usable found — never fabricates a domain."""
+    domain = _guess_domain_from_url(employer_website)
+    if domain:
+        return domain
+    domain = _guess_domain_from_url(job_url)
+    if domain:
+        return domain
+    if not company:
+        return ""
+    try:
+        results = DDGS().text(f'"{company}" official website', max_results=3)
+        for r in results:
+            candidate = _guess_domain_from_url(r.get("href", ""))
+            if candidate:
+                return candidate
+    except Exception as e:
+        logger.warning(f"Company domain search failed for '{company}': {e}")
+    return ""
+
+
+@app.post("/api/jobs/{job_id}/contact")
+@limiter.limit("30/minute")
+async def find_job_contact_endpoint(request: Request, job_id: int):
+    """Best-effort contact discovery in two cheap steps, NOT live AI web search:
+    (1) free DDGS search + page scraping (same approach auto-search already uses) for
+    recruiter/talent-acquisition mentions and the company's careers/contact page, then
+    (2) one Gemini call to ORGANIZE/EXTRACT any real names/emails already present in
+    that scraped text — never to search the web itself or invent a person. Also builds
+    deterministic LinkedIn search links and a plausible email guess as a fallback.
+    Every result is labeled with where it came from so nothing looks more verified
+    than it is."""
+    from database import get_resume_by_id, save_job_contact, get_job_detail
+    job = get_job_detail(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    company = (job.get('company') or '').strip()
+    title = (job.get('title') or '').strip()
+    domain = _find_company_domain(company, job.get('url') or '', job.get('employer_website') or '')
+    company_slug = re.sub(r'[^a-z0-9]+', '-', company.lower()).strip('-')
+
+    import urllib.parse
+    recruiter_kw = urllib.parse.quote(f"{company} recruiter")
+    hiring_manager_kw = urllib.parse.quote(f"{company} hiring manager {title}".strip())
+
+    # Preserve any real contact info the scoring pass already pulled out of the
+    # posting text — this call adds LinkedIn/careers-page suggestions on top of it,
+    # it shouldn't overwrite a real extracted name/email with a guessed one.
+    scraped_name = (job.get('contact_name') or '').strip()
+    scraped_email = (job.get('contact_email') or '').strip()
+    scraped_phone = (job.get('contact_phone') or '').strip()
+
+    # Step 1 + 2: free search/scrape, then AI-organize whatever text that turns up.
+    # found_contacts entries are labeled "found_on_web" (from company/contact pages)
+    # to distinguish them from scraped_name/scraped_email above, which are labeled
+    # "verified_from_posting" (pulled straight from the job description itself).
+    found_contacts = []
+    company_page_url = None
+    try:
+        scraped_text = _scrape_contact_candidates(company, title)
+        if scraped_text:
+            extraction = extract_contacts_from_text(company, title, scraped_text)
+            for c in (extraction.get('contacts') or []):
+                if c.get('name') or c.get('email'):
+                    found_contacts.append({**c, 'provenance': 'found_on_web'})
+            company_page_url = (extraction.get('company_page_url') or '').strip() or None
+    except Exception as e:
+        logger.warning(f"Free contact discovery failed for job {job_id}: {e}")
+
+    contact = {
+        "contact_name": scraped_name or None,
+        "contact_phone": scraped_phone or None,
+        "contact_provenance": "verified_from_posting" if (scraped_name or scraped_email) else None,
+        "found_contacts": found_contacts,
+        "linkedin_recruiter_search": f"https://www.linkedin.com/search/results/people/?keywords={recruiter_kw}",
+        "linkedin_hiring_manager_search": f"https://www.linkedin.com/search/results/people/?keywords={hiring_manager_kw}",
+        "linkedin_company_url": f"https://www.linkedin.com/company/{company_slug}" if company_slug else None,
+        "careers_page": company_page_url or (f"https://{domain}/careers" if domain else None),
+        "email_guess": scraped_email or (found_contacts[0].get('email') if found_contacts and found_contacts[0].get('email') else None) or (f"careers@{domain}" if domain else None),
+        "outreach_strategy": (
+            f"Search LinkedIn for a recruiter or hiring manager at {company or 'this company'}, "
+            f"send a short connection note referencing the {title or 'role'} posting, then follow up "
+            f"by email if there's no response within 3-5 business days. Verify any guessed email/domain "
+            f"before sending — these are suggestions, not confirmed contacts."
+        ),
+        "verified": bool(scraped_name or scraped_email),
+    }
+    saved = save_job_contact(job_id, contact)
+
+    contact_lines = [f"Contact Info — {title or 'this role'} at {company or 'the company'}", ""]
+    if saved.get('verified'):
+        # verified is True when a name OR email was scraped directly from the posting
+        # (see contact['verified'] above) — the old condition only checked
+        # contact_name/contact_phone, so a posting with a scraped email but no name/
+        # phone (e.g. "apply by emailing jane@company.com") silently lost its
+        # "verified" line here even though the UI correctly showed it as verified.
+        contact_lines.append(
+            f"Verified from job posting: {saved.get('contact_name') or 'N/A'} — {saved.get('contact_phone') or 'N/A'}"
+            + (f" — {scraped_email}" if scraped_email else "")
+        )
+    for c in saved.get('found_contacts') or []:
+        contact_lines.append(f"Found on web: {c.get('name', '')} — {c.get('title', '')} — {c.get('email', '')} (source: {c.get('source_url', '')})")
+    contact_lines.append(f"Email guess: {saved.get('email_guess') or 'N/A'}")
+    contact_lines.append(f"Careers page: {saved.get('careers_page') or 'N/A'}")
+    contact_lines.append(f"LinkedIn recruiter search: {saved.get('linkedin_recruiter_search') or 'N/A'}")
+    contact_lines.append(f"LinkedIn hiring manager search: {saved.get('linkedin_hiring_manager_search') or 'N/A'}")
+    contact_lines.append("")
+    contact_lines.append(f"Outreach strategy: {saved.get('outreach_strategy') or ''}")
+    _write_job_artifact(job_id, company, "contact_info.txt", "\n".join(contact_lines) + "\n")
+
+    return {"contact": saved}
+
+
+from typing import List, Optional
+
+class AutoSearchRequest(BaseModel):
+    query: str = ""
+    platforms: Optional[List[str]] = ["linkedin", "dice", "indeed", "ziprecruiter"]
+    work_types: Optional[List[str]] = []
+    contract_types: Optional[List[str]] = []
+
+DEVOPS_RELATED_TITLES = [
+    "DevOps Engineer",
+    "Site Reliability Engineer",
+    "SRE",
+    "Cloud Engineer",
+    "Platform Engineer",
+    "Infrastructure Engineer",
+    "Cloud DevOps Engineer",
+    "DevSecOps Engineer",
+]
+DEVOPS_TRIGGER_WORDS = [
+    "devops", "sre", "site reliability", "platform engineer",
+    "cloud engineer", "infrastructure engineer", "devsecops",
+]
+
+def _broaden_devops_query(query: str) -> str:
+    """If the query is DevOps-flavored, widen it to an OR of closely related
+    role titles so the search isn't limited to the literal keyword."""
+    q = (query or "").strip()
+    if not q:
+        return q
+    q_lower = q.lower()
+    if not any(w in q_lower for w in DEVOPS_TRIGGER_WORDS):
+        return q
+
+    terms = [q] + [t for t in DEVOPS_RELATED_TITLES if t.lower() not in q_lower and q_lower not in t.lower()]
+    seen = set()
+    uniq = []
+    for t in terms:
+        key = t.lower()
+        if key not in seen:
+            seen.add(key)
+            uniq.append(t)
+    return "(" + " OR ".join(f'"{t}"' for t in uniq[:6]) + ")"
+
+
+def _load_candidate_profile() -> str:
+    profile_path = os.path.join(DATA_DIR, "profile.txt")
+    if os.path.exists(profile_path):
+        try:
+            with open(profile_path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except Exception:
+            return ""
+    return ""
+
+
+_JOB_TEXT_FIELD_LABELS = ['Title:', 'Company:', 'Location:', 'URL:', 'Employer Website:', 'Description:', 'Content:']
+
+
+def _extract_field_from_job_text(text: str, labels) -> str:
+    """Pull the value of the first matching 'Label:' line out of a job_text blob (up to
+    the next recognized field label, or end of string). Used to recover the ORIGINAL
+    scraped description/url/employer_website after Claude scoring — Claude is not
+    asked to reproduce these fields itself (see _score_jobs_with_claude), so matching
+    back to the source via posting_index is exact and has zero output-token
+    truncation risk, no matter how long the original text is."""
+    if isinstance(labels, str):
+        labels = [labels]
+    for label in labels:
+        marker = f"\n{label}"
+        idx = text.find(marker)
+        if idx != -1:
+            start = idx + len(marker)
+        elif text.startswith(label):
+            start = len(label)
+        else:
+            continue
+        end = len(text)
+        for kl in _JOB_TEXT_FIELD_LABELS:
+            pos = text.find(f"\n{kl}", start)
+            if pos != -1 and pos < end:
+                end = pos
+        return text[start:end].strip()
+    return ""
+
+
+def _score_jobs_with_claude(job_texts: list, query: str) -> list:
+    """Shared Claude scoring/ranking call used by both auto-search and single-job
+    re-scoring. Returns a list of job dicts (title/company/location/score/tags/reasons/
+    next_action/description/url/employer_website). Does not persist anything — callers
+    decide what to do with the result. Raises RuntimeError if ANTHROPIC_API_KEY is not
+    set.
+
+    Claude is NOT asked to reproduce description/url/employer_website in its own
+    output — earlier versions did, which meant a long JD either burned huge amounts of
+    output tokens or got silently truncated once max_tokens ran out, no matter how
+    generous the *input* truncation was. Instead, each posting is tagged with a
+    [POSTING #N] marker; Claude only has to echo back which N a job came from
+    (posting_index), and the backend pulls description/url/employer_website straight
+    from the original job_texts entry. This is exact (no LLM copy-through risk) and
+    much cheaper (no giant verbatim JD in the response)."""
+    import anthropic
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set")
+
+    indexed_texts = [f"[POSTING #{i}]\n{jt}" for i, jt in enumerate(job_texts)]
+    context = "\n\n---\n\n".join(indexed_texts)
+
+    candidate_profile = _load_candidate_profile()
+
+    profile_block = (
+        f"\nCandidate background (use this to judge fit, not just the query text):\n{candidate_profile}\n"
+        if candidate_profile else ""
+    )
+
+    client = anthropic.Anthropic(api_key=api_key)
+    prompt = f'''You are a job search assistant for a candidate whose primary target roles are DevOps / Cloud
+Engineering (CI/CD, Kubernetes, Terraform/IaC, AWS/Azure/GCP, containerization, observability, automation).
+I have scraped some real job postings from the web based on the query: "{query}". Each posting below is labeled
+with a "[POSTING #N]" marker.
+{profile_block}
+Here is the scraped text from the job pages:
+
+{context}
+
+Extract the real job postings from this text. For each job you find, create a JSON object and set `posting_index`
+to the exact N from its "[POSTING #N]" marker — this is how the app matches your result back to the original
+posting's full text, so it must be accurate. Do not include description, url, or employer_website fields — the app
+already has the original text and will attach those itself.
+Estimate a match score (0-100) weighted toward DevOps/Cloud relevance and the candidate's background above (experience level,
+tooling overlap, work authorization/relocation constraints if listed). Provide 3 brief reasons that reference specific
+requirements from the posting, not generic filler.
+Also provide a `next_action`: one short, concrete instruction for what the candidate should do next about this specific
+posting (e.g. "Apply now — strong match", "Tailor resume first — highlight Kubernetes", "Save for later — good but not urgent").
+Base it on the score and reasons, not a generic phrase.
+Also look for a recruiter/hiring contact in the scraped text (a name, an email address, or a phone number near words
+like "contact", "recruiter", "hiring manager", "apply by emailing", a signature block, etc.) and fill in contact_name,
+contact_email, contact_phone with EXACTLY what's in the text. Leave any of these as an empty string if not literally
+present — never invent or guess a contact.'''
+
+    response = client.messages.create(
+        model="claude-sonnet-5",
+        # No verbatim job descriptions in the output anymore (see docstring), so this
+        # comfortably covers up to 8 jobs' worth of reasons/tags/contact info.
+        max_tokens=8000,
+        thinking={"type": "disabled"},
+        messages=[{"role": "user", "content": prompt}],
+        output_config={
+            "format": {
+                "type": "json_schema",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "jobs": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "posting_index": {"type": "integer"},
+                                    "title": {"type": "string"},
+                                    "company": {"type": "string"},
+                                    "location": {"type": "string"},
+                                    "score": {"type": "integer"},
+                                    "tags": {"type": "array", "items": {"type": "string"}},
+                                    "reasons": {"type": "array", "items": {"type": "string"}},
+                                    "next_action": {"type": "string"},
+                                    "contact_name": {"type": "string"},
+                                    "contact_email": {"type": "string"},
+                                    "contact_phone": {"type": "string"}
+                                },
+                                "required": ["posting_index", "title", "company", "location", "score", "tags", "reasons", "next_action", "contact_name", "contact_email", "contact_phone"],
+                                "additionalProperties": False
+                            }
+                        }
+                    },
+                    "required": ["jobs"],
+                    "additionalProperties": False
+                }
+            }
+        }
+    )
+
+    try:
+        from services.usage_tracker import log_api_call
+        log_api_call("claude-sonnet-5", "auto_search_scoring",
+                     input_tokens=response.usage.input_tokens,
+                     output_tokens=response.usage.output_tokens)
+    except Exception as e:
+        logger.warning(f"Failed to log claude usage: {e}")
+
+    if response.stop_reason == "max_tokens":
+        logger.warning(
+            f"Claude scoring response hit max_tokens ({response.usage.output_tokens} tokens) — "
+            "output was likely truncated mid-JSON; consider fewer jobs per batch."
+        )
+
+    resp_text = next(b.text for b in response.content if b.type == "text")
+    data = json.loads(resp_text.strip())
+    jobs = data.get('jobs', []) if isinstance(data, dict) else []
+
+    for j in jobs:
+        idx = j.pop('posting_index', None)
+        raw = job_texts[idx] if isinstance(idx, int) and 0 <= idx < len(job_texts) else ""
+        j['description'] = _extract_field_from_job_text(raw, ['Description:', 'Content:'])
+        j['url'] = _extract_field_from_job_text(raw, 'URL:')
+        j['employer_website'] = _extract_field_from_job_text(raw, 'Employer Website:')
+
+        # Detect employment type from the FULL scraped blob (raw) — the exact same text
+        # _check_c2c_c2h_only evaluated to decide whether this posting even reached
+        # scoring — and persist it now, rather than recomputing later from just the
+        # narrower saved `description` field. Recomputing from `description` alone can
+        # under-detect: a contract-type signal ("C2C", "1099", "W2") sometimes sits
+        # outside the specific "Description:" section of a scraped page (e.g. a "Job
+        # Type:" sidebar field), so the badge could show "Unspecified" even though the
+        # hard-reject rule that let the posting through actually saw a real signal.
+        employment_type, _ = _check_employment_type(raw)
+        j['employment_type'] = employment_type
+        j['employment_type_label'] = EMPLOYMENT_TYPE_LABELS.get(employment_type, 'Unspecified')
+
+    return jobs
+
+
+async def _run_command_center_search(query: str, platforms: list, work_types: list, contract_types: list) -> dict:
+    """Core Command Center auto-search pipeline: scrape (JSearch or DDG fallback) ->
+    hard-reject rules -> Claude scoring -> persist. Shared by the HTTP endpoint and the
+    daily scheduled search so neither duplicates this logic. Raises RuntimeError if
+    ANTHROPIC_API_KEY is not set (callers decide how to surface that)."""
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set")
+
+    query = query if query else "DevOps Engineer"
+    search_terms = _broaden_devops_query(query)
+    job_texts = []
+    skipped_seen_count = 0
+    rapidapi_key = os.getenv("RAPIDAPI_KEY")
+    jsearch_success = False
+    platforms = platforms if platforms else ["linkedin", "dice", "indeed", "ziprecruiter"]
+    work_types = work_types or []
+    contract_types = contract_types or []
+
+    from database import command_center_job_seen
+
+    # Progressive recency window: try the freshest postings first (past 24h), only
+    # widening if that tier didn't turn up enough genuinely NEW postings — jobs already
+    # in the DB from a prior search (found, scored, rejected, or applied) are skipped
+    # before they'd ever reach Claude, so re-running a search doesn't re-spend AI calls
+    # re-scoring things it already knows about. JSearch's date_posted only supports these
+    # four buckets (no exact 48h/2-3-week option) — "month" is the closest available
+    # upper bound to the ~2-3 week horizon requested; it's only reached when the
+    # narrower tiers came up short. Stopping early once enough new jobs are found also
+    # protects the JSearch free tier's 200-searches/month quota — the common case
+    # (today's tier already has fresh unseen postings) costs exactly 1 JSearch call.
+    JSEARCH_DATE_TIERS = ["today", "3days", "week", "month"]
+    MIN_NEW_JOBS_TARGET = 6
+    MAX_JOB_TEXTS = 8
+
+    if rapidapi_key:
+        import requests
+        from services.usage_tracker import log_api_call
+        url = "https://jsearch.p.rapidapi.com/search"
+
+        # Build advanced query modifiers for JSearch. Platform names (linkedin,
+        # dice, etc.) are NOT included here — JSearch already aggregates across
+        # boards on its own, and appending them as literal keywords to the query
+        # text (e.g. "... in USA linkedin dice indeed ziprecruiter") confuses the
+        # search and reliably returns zero results. Platform filtering is applied
+        # separately to the site-scraping fallback below via `site:` operators.
+        # contract_types ("c2c"/"c2h") are ALSO excluded here for the same reason —
+        # confirmed empirically that adding them zeros out JSearch results even with
+        # remote_jobs_only=true. C2C/C2H-only is enforced reliably after scraping via
+        # _check_c2c_c2h_only instead.
+        modifiers = list(work_types)
+
+        full_query = f"{search_terms} in USA"
+        if modifiers:
+            full_query += " " + " ".join(modifiers)
+
+        headers = {
+            "X-RapidAPI-Key": rapidapi_key,
+            "X-RapidAPI-Host": "jsearch.p.rapidapi.com"
+        }
+        seen_urls_this_run = set()
+        for tier in JSEARCH_DATE_TIERS:
+            try:
+                # remote_jobs_only is JSearch's own native filter — more reliable than
+                # stuffing "remote" into the free-text query (keyword-stuffing the query
+                # has previously zeroed out results, see the platform-name incident above).
+                querystring = {
+                    "query": full_query, "page": "1", "num_pages": "1",
+                    "remote_jobs_only": "true", "date_posted": tier,
+                }
+                # The broadened OR-of-titles query takes longer for JSearch to process
+                # than a single-term search (observed 10-15s), so give it more headroom
+                # than the old 10s timeout to avoid spurious empty results.
+                resp = requests.get(url, headers=headers, params=querystring, timeout=25)
+                log_api_call("jsearch-api", "auto_search", input_tokens=1, output_tokens=0)
+                if resp.status_code != 200:
+                    logger.warning(f"JSearch API returned non-200 status for tier '{tier}': {resp.status_code} - {resp.text[:300]}")
+                    continue
+
+                jdata = resp.json().get("data", [])
+                for j in jdata:
+                    apply_link = j.get("job_apply_link", "")
+                    if apply_link and apply_link in seen_urls_this_run:
+                        continue  # same posting surfaced again in a wider tier
+                    title = j.get("job_title", "")
+                    company = j.get("employer_name", "")
+                    if command_center_job_seen(company, title):
+                        skipped_seen_count += 1
+                        continue
+                    if apply_link:
+                        seen_urls_this_run.add(apply_link)
+
+                    city = j.get("job_city") or ""
+                    state = j.get("job_state") or ""
+                    location = f"{city}, {state}".strip(", ")
+                    # Full description, not a truncated snippet — JSearch descriptions
+                    # rarely exceed a few KB and Claude's context easily holds several of
+                    # these; a low cap here was silently cutting off requirements,
+                    # qualifications, and any contact/recruiter info near the end of the
+                    # posting before Claude ever saw it. This no longer needs to be
+                    # weighed against Claude's *output* token budget either — Claude
+                    # doesn't reproduce the description in its response anymore, the
+                    # backend attaches this exact text via posting_index (see
+                    # _score_jobs_with_claude) — so 20000 is just a sanity ceiling
+                    # against pathological outliers, not a normal truncation point.
+                    desc = (j.get("job_description") or "")[:20000]
+                    employer_website = j.get("employer_website") or ""
+                    job_texts.append(
+                        f"Title: {title}\nCompany: {company}\nLocation: {location}\nURL: {apply_link}\n"
+                        f"Employer Website: {employer_website}\nDescription: {desc}"
+                    )
+                    if len(job_texts) >= MAX_JOB_TEXTS:
+                        break
+
+                if job_texts:
+                    jsearch_success = True
+                logger.info(f"JSearch tier '{tier}': {len(jdata)} results, {len(job_texts)} new unseen so far, {skipped_seen_count} already known")
+                if len(job_texts) >= MIN_NEW_JOBS_TARGET:
+                    break
+            except Exception as e:
+                logger.warning(f"JSearch API error for tier '{tier}': {e}")
+                continue
+
+    if not jsearch_success:
+        sites = []
+        if "linkedin" in platforms: sites.append("site:linkedin.com/jobs/view/")
+        if "dice" in platforms: sites.append("site:dice.com/jobs/")
+        if "indeed" in platforms: sites.append("site:indeed.com/viewjob")
+        if "ziprecruiter" in platforms: sites.append("site:ziprecruiter.com/jobs")
+        if not sites: sites = ["site:linkedin.com/jobs/view/"]
+
+        site_query = " OR ".join(sites)
+        search_query = f"({site_query}) {search_terms} remote United States"
+
+        # Same progressive-recency idea as the JSearch tiers above, using DDGS' own
+        # timelimit filter: d=past day, w=past week, m=past month — the closest DDGS
+        # equivalent to the 24h/72h/2-3-week escalation (DDGS has no 3-day bucket).
+        DDG_TIME_TIERS = ["d", "w", "m"]
+        seen_urls_this_run = set()
+        for tier in DDG_TIME_TIERS:
+            try:
+                results = DDGS().text(search_query, max_results=5, timelimit=tier)
+            except Exception as e:
+                logger.warning(f"DDG search failed for tier '{tier}': {e}")
+                continue
+            for r in results:
+                page_url = r.get("href", "")
+                if not page_url or page_url in seen_urls_this_run:
+                    continue
+                seen_urls_this_run.add(page_url)
+                try:
+                    headers = {"User-Agent": "Mozilla/5.0"}
+                    resp = requests.get(page_url, headers=headers, timeout=5)
+                    if resp.status_code == 200:
+                        soup = BeautifulSoup(resp.text, 'html.parser')
+                        text = soup.get_text(separator=' ', strip=True)
+                        # Same reasoning as the JSearch cap above — no more Claude
+                        # output-token pressure to weigh this against, so raw scraped
+                        # page text (nav/ads/footer included, diluting useful content)
+                        # gets a generous ceiling rather than a tight one.
+                        candidate_text = f"URL: {page_url}\nContent: {text[:20000]}"
+                        company_guess = _extract_company_name(candidate_text) or ''
+                        title_guess = _guess_title_from_job_text(candidate_text) or ''
+                        if company_guess and title_guess and command_center_job_seen(company_guess, title_guess):
+                            skipped_seen_count += 1
+                            continue
+                        job_texts.append(candidate_text)
+                except Exception as e:
+                    logger.warning(f"Error fetching {page_url}: {e}")
+                if len(job_texts) >= MIN_NEW_JOBS_TARGET:
+                    break
+            if len(job_texts) >= MIN_NEW_JOBS_TARGET:
+                break
+
+    if not job_texts:
+        message = f'No postings found for "{query}" on the selected platforms. Try different platforms, work types, or a broader search term.'
+        if skipped_seen_count:
+            message = f'Found {skipped_seen_count} posting(s) for "{query}", but all were already in your Command Center from a previous search. Try a broader search term to find new ones.'
+        return {
+            "jobs": [],
+            "count": 0,
+            "rejected_count": 0,
+            "skipped_seen_count": skipped_seen_count,
+            "query": query,
+            "message": message
+        }
+
+    # Apply the same hard-reject rules Job Matcher uses (lead/management titles,
+    # visa/sponsorship mismatch, foreign-language requirements), plus Command
+    # Center-specific rules (closed/filled postings, on-site-required postings — this
+    # search is remote-US-only, and C2C/C2H-only — W2/full-time and unspecified
+    # employment type are both rejected) — all BEFORE spending AI calls scoring a
+    # posting that's going to be skipped anyway.
+    passing_job_texts = []
+    rule_rejected = []
+    for jt in job_texts:
+        reason = (
+            _check_position_filled(jt)
+            or _check_lead_role(jt)
+            or _check_visa_eligibility(jt)
+            or _check_foreign_language(jt)
+            or _check_remote_only(jt)
+            or _check_c2c_c2h_only(jt, contract_types)
+            or _check_experience_years(jt)
+        )
+        if reason:
+            rule_rejected.append({
+                'company': _extract_company_name(jt) or 'Unknown',
+                'title': _guess_title_from_job_text(jt),
+                'reason': reason,
+            })
+        else:
+            passing_job_texts.append(jt)
+
+    if rule_rejected:
+        from database import save_rejected_job
+        for rj in rule_rejected:
+            try:
+                save_rejected_job(rj)
+            except Exception as e:
+                logger.warning(f"Failed to persist rule-rejected job for {rj.get('company')}: {e}")
+
+    job_texts = passing_job_texts
+    if not job_texts:
+        return {
+            "jobs": [],
+            "count": 0,
+            "rejected_count": len(rule_rejected),
+            "skipped_seen_count": skipped_seen_count,
+            "query": query,
+            "message": (
+                f'All {len(rule_rejected)} posting(s) for "{query}" were filtered out by your hard rules '
+                f'(visa/lead-level/experience/language/remote-only/C2C-C2H-only) — see Jobs to Skip for why. Try a broader search term.'
+            ),
+        }
+
+    jobs = _score_jobs_with_claude(job_texts, query)
+
+    from database import save_found_job
+    for j in jobs:
+        try:
+            save_found_job(j)
+        except Exception as e:
+            logger.warning(f"Failed to persist found job for {j.get('company')}: {e}")
+
+    if jobs:
+        try:
+            from services.telegram_notifier import notify_new_action_items
+            notify_new_action_items()
+        except Exception as e:
+            logger.warning(f"Failed to send Telegram notification for new matches: {e}")
+
+    try:
+        from services.scan_status import save_last_scan
+        save_last_scan(platforms, query, len(jobs))
+    except Exception as e:
+        logger.warning(f"Failed to save last scan status: {e}")
+
+    message = None if jobs else f'No postings could be extracted for "{query}". Try a different search term.'
+    if rule_rejected and jobs:
+        message = f'{len(rule_rejected)} posting(s) filtered out by your hard rules (visa/lead-level/experience/language/remote-only/C2C-C2H-only) — see Jobs to Skip.'
+    if skipped_seen_count and jobs:
+        already_seen_note = f'{skipped_seen_count} already-seen posting(s) skipped (no re-scan).'
+        message = f'{message} {already_seen_note}' if message else already_seen_note
+
+    return {
+        "jobs": jobs,
+        "count": len(jobs),
+        "rejected_count": len(rule_rejected),
+        "skipped_seen_count": skipped_seen_count,
+        "query": query,
+        "message": message
+    }
+
+
+@app.post("/api/jobs/auto-search")
+@limiter.limit("5/minute")
+async def auto_search_jobs(request: Request, payload: AutoSearchRequest):
+    try:
+        return await _run_command_center_search(payload.query, payload.platforms, payload.work_types, payload.contract_types)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Auto search error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class ApplicationSaveRequest(BaseModel):
+    company: str
+    source: str = "command-center"
+    status: str = "Shortlisted"
+    notes: str = ""
+    title: str = ""
+    url: str = ""
+
+@app.post("/api/applications")
+@limiter.limit("30/minute")
+async def save_application(request: Request, payload: ApplicationSaveRequest):
+    if not payload.company or not payload.company.strip():
+        raise HTTPException(status_code=400, detail="Company name is required")
+    from database import save_application_from_job
+    record_id = save_application_from_job(
+        company_name=payload.company.strip(),
+        status=payload.status or "Shortlisted",
+        source=payload.source or "command-center",
+        notes=payload.notes or "",
+        title=payload.title or "",
+        url=payload.url or "",
+    )
+    content = (
+        f"Saved to Applications at {datetime.now().isoformat()}\n"
+        f"Job: {payload.title or ''} at {payload.company.strip()}\n"
+        f"URL: {payload.url or 'N/A'}\n"
+    )
+    _write_job_artifact(record_id, payload.company.strip(), "save_to_applications.txt", content)
+    return {"id": record_id, "status": "saved"}
+
+
 if __name__ == "__main__":
     # Don't use reload in production
     reload = "--reload" in sys.argv or os.getenv("ENVIRONMENT") == "development"
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=reload)
+

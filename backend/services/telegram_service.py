@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 import asyncio
 import httpx
@@ -6,6 +7,32 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://api.telegram.org/bot{token}"
+
+DATA_DIR = os.getenv("DATA_DIR", "data")
+KNOWN_CHATS_FILE = os.path.join(DATA_DIR, "telegram_chats.json")
+
+
+def get_known_chat_ids() -> list:
+    """Chat IDs that have messaged the bot at least once — proactive pushes (new
+    matches, daily digest) can only reach chats that exist, and Telegram's API has no
+    'send to whoever set up the bot' concept, so we remember who's said hello."""
+    if os.path.exists(KNOWN_CHATS_FILE):
+        try:
+            with open(KNOWN_CHATS_FILE, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return []
+    return []
+
+
+def add_known_chat_id(chat_id: int):
+    chat_ids = set(get_known_chat_ids())
+    if chat_id in chat_ids:
+        return
+    chat_ids.add(chat_id)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(KNOWN_CHATS_FILE, "w") as f:
+        json.dump(sorted(chat_ids), f)
 
 
 def _token():

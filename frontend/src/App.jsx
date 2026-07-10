@@ -2,6 +2,9 @@ import React, { useState, useEffect, useRef } from 'react';
 import './index.css';
 import JobMatcher from './JobMatcher';
 import SearchPage from './SearchPage';
+import CommandCenter from './CommandCenter';
+import JobMatches from './JobMatches';
+import InboxPage from './InboxPage';
 
 function ScoreRing({ score, label, accent }) {
   const [display, setDisplay] = useState(0);
@@ -82,11 +85,11 @@ export default function App() {
   // Navigation — persist in URL hash so refresh stays on the same page
   const [currentPage, setCurrentPageState] = useState(() => {
     const hash = window.location.hash.replace('#', '');
-    return hash || 'dashboard';
+    return hash || 'command-center';
   });
   const setCurrentPage = (page) => {
     setCurrentPageState(page);
-    window.location.hash = page === 'dashboard' ? '' : page;
+    window.location.hash = page === 'command-center' ? '' : page;
   };
 
   const [jdText, setJdText] = useState('');
@@ -120,6 +123,11 @@ export default function App() {
   const [storedResumes, setStoredResumes] = useState([]);
   const [selectedResumeName, setSelectedResumeName] = useState(() => localStorage.getItem('selectedResume') || null);
   const [uploadingResume, setUploadingResume] = useState(false);
+  // Latest requested cover-letter/mail-draft record id — lets a slow request that
+  // resolves after the user has already moved on (closed the modal, clicked a
+  // different row) detect it's stale and skip reopening the modal with old data.
+  const latestCLRequestId = useRef(null);
+  const latestMailRequestId = useRef(null);
   const [loadingCLId, setLoadingCLId] = useState(null);
   const [historyCLModal, setHistoryCLModal] = useState(null);
   const [batchMode, setBatchMode] = useState(false);
@@ -147,6 +155,9 @@ export default function App() {
   // Active record for panels 03 + 04
   const [activeRecordId, setActiveRecordId] = useState(null);
   const [activeCompanyName, setActiveCompanyName] = useState(null);
+  // Lets handleSelectRecord's async content fetch detect it's been superseded by a
+  // newer selection before applying cover letter / mail draft / follow-up state.
+  const activeRecordRequestRef = useRef(null);
   // Re-run an already-scanned JD — updates that record's tailored resume in place
   const [rerunRecordId, setRerunRecordId] = useState(null);
   const [rerunCompanyName, setRerunCompanyName] = useState(null);
@@ -169,8 +180,11 @@ export default function App() {
   // Gmail integration
   const [gmailConnected, setGmailConnected] = useState(false);
   const [gmailEmail, setGmailEmail] = useState('');
+  const [gmailCanOrganize, setGmailCanOrganize] = useState(false);
   const [savingToGmail, setSavingToGmail] = useState(false);
   const [gmailSaved, setGmailSaved] = useState(false);
+  // Cross-page deep link: Inbox -> Command Center job workspace
+  const [pendingCommandCenterJobId, setPendingCommandCenterJobId] = useState(null);
   // Follow-up mail
   const [followUpEmail, setFollowUpEmail] = useState('');
   const [followUpInstructions, setFollowUpInstructions] = useState('');
@@ -247,6 +261,7 @@ export default function App() {
         const data = await res.json();
         setGmailConnected(data.connected);
         setGmailEmail(data.email || '');
+        setGmailCanOrganize(!!data.can_organize);
       }
     } catch { /* ignore */ }
   };
@@ -379,7 +394,7 @@ export default function App() {
 
   const handleAddResume = async (file) => {
     if (!file) return;
-    if (!file.name.endsWith('.docx')) { setError('Only .docx files are supported.'); return; }
+    if (!file.name.toLowerCase().endsWith('.docx')) { setError('Only .docx files are supported.'); return; }
     setUploadingResume(true);
     const formData = new FormData();
     formData.append('resume', file);
@@ -521,6 +536,30 @@ export default function App() {
     }
   };
 
+    const handleSaveToApplications = async (job) => {
+    try {
+      const res = await fetch('http://localhost:8000/api/applications', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          company: job.company,
+          title: job.title || '',
+          url: job.url || '',
+          source: 'command-center',
+          status: 'Shortlisted',
+          notes: job.url || ''
+        }),
+      });
+      if (res.ok) {
+        alert('Saved to applications!');
+      } else {
+        alert('Failed to save (check if backend supports /api/applications)');
+      }
+    } catch (err) {
+      console.error('Failed to save to Applications:', err);
+    }
+  };
+
   const handleGenerateCL = async () => {
     if (!activeRecordId) { setError('Select a company first.'); return; }
     setGeneratingCL(true);
@@ -570,20 +609,21 @@ export default function App() {
   };
 
   const handleHistoryCL = async (id, companyName) => {
+    latestCLRequestId.current = id;
     setLoadingCLId(id);
     try {
       const res = await fetch(`http://localhost:8000/api/history/${id}/cover-letter`, { method: 'POST' });
+      const data = await res.json();
+      if (latestCLRequestId.current !== id) return; // superseded by a newer request
       if (!res.ok) {
-        const data = await res.json();
         setError(data.detail || `Failed to generate cover letter (${res.status})`);
         return;
       }
-      const data = await res.json();
       setHistoryCLModal({ cover_letter: data.cover_letter, cl_path: data.cl_path, company_name: companyName });
     } catch {
-      setError('Failed to generate cover letter.');
+      if (latestCLRequestId.current === id) setError('Failed to generate cover letter.');
     } finally {
-      setLoadingCLId(null);
+      if (latestCLRequestId.current === id) setLoadingCLId(null);
     }
   };
 
@@ -693,6 +733,7 @@ export default function App() {
   };
 
   const handleSelectRecord = async (item) => {
+    activeRecordRequestRef.current = item.id;
     setActiveRecordId(item.id);
     setActiveCompanyName(item.company_name);
     setAddPointsText('');
@@ -730,6 +771,7 @@ export default function App() {
       const res = await fetch(`http://localhost:8000/api/history/${item.id}/content`);
       if (res.ok) {
         const data = await res.json();
+        if (activeRecordRequestRef.current !== item.id) return; // superseded by a newer selection
         if (data.cover_letter) { setCoverLetter(data.cover_letter); setCoverLetterPath(data.cl_path); }
         if (data.mail_draft) { setMailDraft(data.mail_draft); setDraftPath(data.draft_path); }
         if (data.follow_up_draft) { setFollowUpDraft(data.follow_up_draft); }
@@ -743,17 +785,19 @@ export default function App() {
   };
 
   const handleHistoryMail = async (id, companyName) => {
+    latestMailRequestId.current = id;
     setLoadingMailId(id);
     try {
       const res = await fetch(`http://localhost:8000/api/history/${id}/mail-draft`, { method: 'POST' });
       const data = await res.json();
+      if (latestMailRequestId.current !== id) return; // superseded by a newer request
       if (!res.ok) { setError(data.detail || `Error ${res.status}`); return; }
       setHistoryMailModal({ ...data, company_name: companyName, record_id: id });
       setHistoryDraftPath(null);
     } catch {
-      setError('Failed to generate mail draft.');
+      if (latestMailRequestId.current === id) setError('Failed to generate mail draft.');
     } finally {
-      setLoadingMailId(null);
+      if (latestMailRequestId.current === id) setLoadingMailId(null);
     }
   };
 
@@ -892,6 +936,14 @@ export default function App() {
       <ul style={sidebarStyles.navList}>
         <li>
           <button
+            style={activePage === 'command-center' ? sidebarStyles.navItemActive : sidebarStyles.navItem}
+            onClick={() => setCurrentPage('command-center')}
+          >
+            Command Center
+          </button>
+        </li>
+        <li>
+          <button
             style={activePage === 'dashboard' ? sidebarStyles.navItemActive : sidebarStyles.navItem}
             onClick={() => setCurrentPage('dashboard')}
           >
@@ -916,6 +968,14 @@ export default function App() {
         </li>
         <li>
           <button
+            style={activePage === 'inbox' ? sidebarStyles.navItemActive : sidebarStyles.navItem}
+            onClick={() => setCurrentPage('inbox')}
+          >
+            Inbox
+          </button>
+        </li>
+        <li>
+          <button
             style={activePage === 'info' ? sidebarStyles.navItemActive : sidebarStyles.navItem}
             onClick={() => setCurrentPage('info')}
           >
@@ -926,6 +986,61 @@ export default function App() {
     </nav>
   );
 
+
+  // Show Command Center
+  if (currentPage === 'command-center') {
+    return (
+      <div style={{ display: 'flex', minHeight: '100vh' }}>
+        {sidebarNav('command-center')}
+        <div style={{ flex: 1, overflow: 'auto', background: 'var(--ink)' }}>
+          <CommandCenter
+            onSendToTailor={(jd) => { setJdText(jd); setCurrentPage('dashboard'); }}
+            onSaveToApplications={handleSaveToApplications}
+            onViewAllMatches={() => setCurrentPage('job-matches')}
+            selectedResumeName={selectedResumeName}
+            onChangeResume={() => setCurrentPage('dashboard')}
+            initialJobId={pendingCommandCenterJobId}
+            onConsumeInitialJobId={() => setPendingCommandCenterJobId(null)}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  // Show All Job Matches (drill-down from Command Center)
+  if (currentPage === 'job-matches') {
+    return (
+      <div style={{ display: 'flex', minHeight: '100vh' }}>
+        {sidebarNav('command-center')}
+        <div style={{ flex: 1, overflow: 'auto', background: 'var(--ink)' }}>
+          <JobMatches
+            onBack={() => setCurrentPage('command-center')}
+            onSendToTailor={(jd) => { setJdText(jd); setCurrentPage('dashboard'); }}
+            onSaveToApplications={handleSaveToApplications}
+            selectedResumeName={selectedResumeName}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  if (currentPage === 'inbox') {
+    return (
+      <div style={{ display: 'flex', minHeight: '100vh' }}>
+        {sidebarNav('inbox')}
+        <div style={{ flex: 1, overflow: 'auto', background: 'var(--ink)' }}>
+          <InboxPage
+            gmailConnected={gmailConnected}
+            gmailEmail={gmailEmail}
+            gmailCanOrganize={gmailCanOrganize}
+            onRefreshStatus={checkGmailStatus}
+            onDisconnect={handleDisconnectGmail}
+            onOpenJob={(jobId) => { setPendingCommandCenterJobId(jobId); setCurrentPage('command-center'); }}
+          />
+        </div>
+      </div>
+    );
+  }
   // Show SearchPage
   if (currentPage === 'search') {
     return (
@@ -986,6 +1101,16 @@ export default function App() {
                   <div className="info-contact-row">
                     <span className="info-contact-key">Tel</span>
                     <span className="info-contact-value">14694441962 ext : 8406</span>
+                  </div>
+                </div>
+                <div className="info-contact-card" style={{ marginTop: '0.75rem' }}>
+                  <div className="info-contact-row">
+                    <span className="info-contact-key">Email</span>
+                    <span className="info-contact-value">ushasri@coreit-tech.com</span>
+                  </div>
+                  <div className="info-contact-row">
+                    <span className="info-contact-key">Tel</span>
+                    <span className="info-contact-value">14694447419 ext : 8408</span>
                   </div>
                 </div>
               </div>
@@ -1104,6 +1229,9 @@ export default function App() {
 
         {usageOpen && usageStats && (
           <div className="usage-dashboard">
+            <div style={{ fontSize: '0.75rem', color: 'var(--muted)', marginBottom: '0.75rem' }}>
+              Gemini/Claude costs below are estimates based on published per-token rates, not billing-account data — actual charges may differ slightly.
+            </div>
             <div className="usage-cards">
               <div className="usage-card">
                 <div className="usage-card-label">Today</div>
@@ -1137,6 +1265,23 @@ export default function App() {
                       <span className="usage-row-cost">${info.cost?.toFixed(4)}</span>
                     </div>
                   ))}
+                </div>
+              </div>
+            )}
+            {usageStats.jsearch_quota && (
+              <div className="usage-breakdown">
+                <div className="usage-breakdown-title">JSearch Free Tier</div>
+                <div className="jsearch-quota">
+                  <div className="jsearch-quota-bar">
+                    <div
+                      className="jsearch-quota-fill"
+                      style={{ width: `${Math.min(100, (usageStats.jsearch_quota.used / usageStats.jsearch_quota.limit) * 100)}%` }}
+                    />
+                  </div>
+                  <div className="jsearch-quota-label">
+                    {usageStats.jsearch_quota.used} / {usageStats.jsearch_quota.limit} free searches used this month
+                    <span className="jsearch-quota-remaining"> ({usageStats.jsearch_quota.remaining} left)</span>
+                  </div>
                 </div>
               </div>
             )}
@@ -1879,7 +2024,7 @@ export default function App() {
                   {pagedHistory.map((item, idx) => (
                     <React.Fragment key={item.id}>
                       <tr className={`history-row${expandedJdId === item.id ? ' jd-open' : ''}`}>
-                        <td className="scene-num">{String((historyPage - 1) * HISTORY_PAGE_SIZE + idx + 1).padStart(2, '0')}</td>
+                        <td className="scene-num">{String((computedPage - 1) * HISTORY_PAGE_SIZE + idx + 1).padStart(2, '0')}</td>
                         <td className="company-col">
                           <button className="jd-toggle-btn" onClick={() => toggleJdExpand(item.id)} title={expandedJdId === item.id ? 'Hide JD' : 'Preview JD'}>
                             {expandedJdId === item.id ? '▾' : '▸'}
@@ -1927,7 +2072,7 @@ export default function App() {
                             <a href={`http://localhost:8000/api/download/${item.file_path.replace(/^trailerd\//, '')}`} className="dl-link" download title="Download resume">↓</a>
                           )}
                           {item.file_path && (
-                            <a href={`http://localhost:8000/api/download/${item.file_path.replace('tejamahesh_resume.docx', 'jd_info.txt').replace(/^trailerd\//, '')}`} className="dl-link" download title="Download JD info">JD</a>
+                            <a href={`http://localhost:8000/api/download/${item.file_path.replace(/[^/]+\.docx$/, 'jd_info.txt').replace(/^trailerd\//, '')}`} className="dl-link" download title="Download JD info">JD</a>
                           )}
                           <button className="cl-hist-btn" onClick={() => handleHistoryCL(item.id, item.company_name)} disabled={loadingCLId === item.id} title="Generate cover letter">
                             {loadingCLId === item.id ? '…' : 'CL'}
@@ -2106,3 +2251,4 @@ const sidebarStyles = {
     borderLeft: '2px solid var(--gold)',
   },
 };
+

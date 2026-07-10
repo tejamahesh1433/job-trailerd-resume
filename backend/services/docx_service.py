@@ -61,6 +61,16 @@ def _find_best_paragraph_match(paragraphs, original_text):
     return best_para, original_text
 
 def replace_text_in_paragraph(paragraph, original_text, new_text):
+    """Exact/normalized match ONLY — no fuzzy fallback here. create_tailored_docx's
+    first pass calls this expecting purely exact matching, with fuzzy matching handled
+    separately (and correctly) by _find_best_paragraph_match in its second pass, which
+    picks the single BEST match across the whole document. This function fuzzy-matching
+    on its own used to defeat that design: the first pass iterates paragraphs in
+    document order and stops at whichever paragraph FIRST crossed the 0.75 similarity
+    threshold, not necessarily the correct/best one — on a resume with two similar
+    bullets (e.g. "Managed AWS infrastructure..." appearing under two different jobs),
+    this could silently overwrite the wrong bullet instead of the one the AI actually
+    intended to replace."""
     if not paragraph.text.strip() or not original_text.strip():
         return False
 
@@ -73,11 +83,6 @@ def replace_text_in_paragraph(paragraph, original_text, new_text):
     normalized_match = norm_original in norm_para
 
     if not exact_match and not normalized_match:
-        # Fuzzy: if the paragraph is very similar to original, replace the whole paragraph
-        ratio = difflib.SequenceMatcher(None, norm_original, norm_para).ratio()
-        if ratio >= 0.75:
-            _replace_entire_paragraph(paragraph, new_text)
-            return True
         return False
 
     if exact_match:

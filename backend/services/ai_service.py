@@ -3,6 +3,7 @@ from google import genai
 from google.genai import types
 import json
 from services.usage_tracker import log_api_call
+from services.model_config import GEMINI_QUALITY_MODEL, GEMINI_FAST_MODEL, GEMINI_PRO_FALLBACK_MODEL
 
 def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "") -> dict:
     api_key = os.getenv("GEMINI_API_KEY")
@@ -85,7 +86,7 @@ def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "") -> dict:
     }}
     """
     
-    models_to_try = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite']
+    models_to_try = [GEMINI_QUALITY_MODEL, GEMINI_FAST_MODEL, GEMINI_PRO_FALLBACK_MODEL]
     last_error = None
     for model_name in models_to_try:
         try:
@@ -107,7 +108,7 @@ def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "") -> dict:
             return json.loads(response.text)
         except Exception as e:
             last_error = e
-            if "503" in str(e) or "UNAVAILABLE" in str(e) or "429" in str(e):
+            if "503" in str(e) or "UNAVAILABLE" in str(e) or "429" in str(e) or "404" in str(e) or "NOT_FOUND" in str(e):
                 print(f"{model_name} unavailable, trying next model...")
                 continue
             raise RuntimeError(f"API Error: {str(e)}")
@@ -164,7 +165,7 @@ def generate_additional_points(resume_text: str, jd_text: str, points_text: str,
     }}
     """
 
-    models_to_try = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite']
+    models_to_try = [GEMINI_QUALITY_MODEL, GEMINI_FAST_MODEL, GEMINI_PRO_FALLBACK_MODEL]
     last_error = None
     for model_name in models_to_try:
         try:
@@ -186,7 +187,7 @@ def generate_additional_points(resume_text: str, jd_text: str, points_text: str,
             return json.loads(response.text)
         except Exception as e:
             last_error = e
-            if "503" in str(e) or "UNAVAILABLE" in str(e) or "429" in str(e):
+            if "503" in str(e) or "UNAVAILABLE" in str(e) or "429" in str(e) or "404" in str(e) or "NOT_FOUND" in str(e):
                 print(f"{model_name} unavailable, trying next model...")
                 continue
             raise RuntimeError(f"API Error: {str(e)}")
@@ -223,16 +224,16 @@ def generate_cover_letter(resume_text: str, jd_text: str, company_name: str) -> 
 """
     try:
         response = client.models.generate_content(
-            model='gemini-2.5-pro',
+            model=GEMINI_QUALITY_MODEL,
             contents=prompt,
         )
         usage = response.usage_metadata
         if usage:
-            log_api_call("gemini-2.5-pro", "cover_letter",
+            log_api_call(GEMINI_QUALITY_MODEL, "cover_letter",
                          input_tokens=usage.prompt_token_count or 0,
                          output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
         else:
-            log_api_call("gemini-2.5-pro", "cover_letter", input_tokens=8000, output_tokens=400)
+            log_api_call(GEMINI_QUALITY_MODEL, "cover_letter", input_tokens=8000, output_tokens=400)
         return response.text.strip()
     except Exception as e:
         print(f"Error generating cover letter: {e}")
@@ -250,8 +251,8 @@ def analyze_job_metadata(jd_text: str, extracted_keywords: dict) -> dict:
 
     prompt = f"""Analyze this job description and extract key metadata.
 
-Job Description (first 3000 chars):
-{jd_text[:3000]}
+Job Description:
+{jd_text[:8000]}
 
 Extracted Keywords: {keyword_summary}
 
@@ -274,7 +275,7 @@ If a field is not specified in the job description, set its value to 'Not specif
 """
     try:
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model=GEMINI_FAST_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -283,11 +284,11 @@ If a field is not specified in the job description, set its value to 'Not specif
         )
         usage = response.usage_metadata
         if usage:
-            log_api_call("gemini-2.5-flash", "categorize_job",
+            log_api_call(GEMINI_FAST_MODEL, "categorize_job",
                          input_tokens=usage.prompt_token_count or 0,
                          output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
         else:
-            log_api_call("gemini-2.5-flash", "categorize_job", input_tokens=1000, output_tokens=200)
+            log_api_call(GEMINI_FAST_MODEL, "categorize_job", input_tokens=1000, output_tokens=200)
         return json.loads(response.text)
     except Exception as e:
         print(f"Error generating job metadata: {e}")
@@ -305,4 +306,300 @@ If a field is not specified in the job description, set its value to 'Not specif
             "clearance_level": "Unknown",
             "employment_type": "Unknown"
         }
+
+
+def generate_recruiter_outreach_email(job_title: str, company_name: str, jd_text: str, candidate_profile: str = "") -> dict:
+    """Cold outreach email to a recruiter/hiring contact for a job the candidate hasn't
+    necessarily tailored a resume for yet — distinct from the existing mail-draft flow,
+    which requires an already-tailored resume file to attach."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is not set")
+    client = genai.Client(api_key=api_key)
+
+    profile_block = f"\nMy background:\n{candidate_profile.strip()}\n" if candidate_profile.strip() else ""
+    prompt = f"""Write a short, professional cold outreach email FROM ME, in first person ("I have...", "I'm reaching
+out..."), addressed to a recruiter about a specific job opening. I am the candidate — do not write about me in the
+third person and do not mention "career coach" anywhere. Sign off with just my name (no "Sincerely, A Career Coach").
+Keep it under 150 words, confident but not pushy.
+
+Job Title: {job_title}
+Company: {company_name}
+{profile_block}
+Job Description (for context, reference specific requirements if useful):
+{jd_text[:8000]}
+
+Write a subject line and a short email body. Do not use emojis or placeholder brackets like [Your Name] — use my
+actual name from the background above if given, otherwise sign off with "Best regards," and no name.
+Return ONLY valid JSON: {{"subject": "...", "body": "..."}}"""
+
+    try:
+        response = client.models.generate_content(
+            model=GEMINI_FAST_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.4, response_mime_type="application/json"),
+        )
+        usage = response.usage_metadata
+        if usage:
+            log_api_call(GEMINI_FAST_MODEL, "recruiter_outreach_email",
+                         input_tokens=usage.prompt_token_count or 0,
+                         output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
+        else:
+            log_api_call(GEMINI_FAST_MODEL, "recruiter_outreach_email", input_tokens=1500, output_tokens=200)
+        return json.loads(response.text)
+    except Exception as e:
+        print(f"Error generating recruiter outreach email: {e}")
+        raise RuntimeError(f"API Error: {str(e)}")
+
+
+def generate_checkin_followup_email(job_title: str, company_name: str, days_since_applied: int, candidate_profile: str = "") -> dict:
+    """Check-in follow-up for an application with no response yet — distinct from the
+    existing /follow-up endpoint, which replies to an already-received recruiter email."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is not set")
+    client = genai.Client(api_key=api_key)
+
+    profile_block = f"\nMy background:\n{candidate_profile.strip()}\n" if candidate_profile.strip() else ""
+    prompt = f"""Write a brief, polite check-in email FROM ME, in first person, about a job application I submitted
+that has had no response in {days_since_applied} days. I am the candidate — do not write about me in the third
+person and do not mention "career coach" anywhere. Keep it under 120 words, friendly and low-pressure — reaffirm
+interest, don't sound impatient or entitled.
+
+Job Title: {job_title}
+Company: {company_name}
+Days since applying: {days_since_applied}
+{profile_block}
+Write a subject line and a short email body. No emojis, no placeholder brackets like [Your Name] — use my actual
+name from the background above if given, otherwise sign off with "Best regards," and no name.
+Return ONLY valid JSON: {{"subject": "...", "body": "..."}}"""
+
+    try:
+        response = client.models.generate_content(
+            model=GEMINI_FAST_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.4, response_mime_type="application/json"),
+        )
+        usage = response.usage_metadata
+        if usage:
+            log_api_call(GEMINI_FAST_MODEL, "checkin_followup_email",
+                         input_tokens=usage.prompt_token_count or 0,
+                         output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
+        else:
+            log_api_call(GEMINI_FAST_MODEL, "checkin_followup_email", input_tokens=1000, output_tokens=150)
+        return json.loads(response.text)
+    except Exception as e:
+        print(f"Error generating check-in follow-up email: {e}")
+        raise RuntimeError(f"API Error: {str(e)}")
+
+
+def generate_linkedin_message(job_title: str, company_name: str, candidate_profile: str = "") -> dict:
+    """Short LinkedIn connection/InMail message for reaching out about a specific role."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is not set")
+    client = genai.Client(api_key=api_key)
+
+    profile_block = f"\nMy background:\n{candidate_profile.strip()}\n" if candidate_profile.strip() else ""
+    prompt = f"""Write a short LinkedIn message (connection request note or InMail, under 300 characters) FROM ME,
+in first person, about a specific job opening I'm interested in. I am the candidate — do not write about me in
+the third person and do not mention "career coach" anywhere. Casual-professional tone, no emojis, no placeholder
+brackets.
+
+Job Title: {job_title}
+Company: {company_name}
+{profile_block}
+Return ONLY valid JSON: {{"body": "..."}}"""
+
+    try:
+        response = client.models.generate_content(
+            model=GEMINI_FAST_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.4, response_mime_type="application/json"),
+        )
+        usage = response.usage_metadata
+        if usage:
+            log_api_call(GEMINI_FAST_MODEL, "linkedin_message",
+                         input_tokens=usage.prompt_token_count or 0,
+                         output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
+        else:
+            log_api_call(GEMINI_FAST_MODEL, "linkedin_message", input_tokens=500, output_tokens=100)
+        return json.loads(response.text)
+    except Exception as e:
+        print(f"Error generating LinkedIn message: {e}")
+        raise RuntimeError(f"API Error: {str(e)}")
+
+
+def extract_contacts_from_text(company: str, title: str, scraped_text: str) -> dict:
+    """Organize/extract real names, titles, and emails from ALREADY-scraped web text
+    (search results + company page snippets) — this does NOT search the web itself,
+    it only reads text handed to it and pulls out what's literally present. Never
+    invents a person; returns an empty list if nothing concrete is found."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is not set")
+    client = genai.Client(api_key=api_key)
+
+    prompt = f"""I scraped some web pages (search results and a company's own site) while looking for a RECRUITER or
+HIRING/TALENT-ACQUISITION contact at {company} for a "{title}" role. Read the text below and extract ONLY people
+whose title clearly indicates a recruiting/hiring/HR/staffing role — e.g. "Recruiter", "Technical Recruiter",
+"Talent Acquisition", "Talent Partner", "HR", "People Operations", "Staffing", or someone explicitly described as
+the hiring manager for this role. Only include what's literally present — never guess or invent anyone.
+
+DO NOT include executives, founders, engineers, or any other employee whose title has nothing to do with hiring —
+even if they are the most prominent person mentioned on the page (e.g. a CEO or a random team member on an "About
+Us" page is NOT a hiring contact and must be excluded). If the only people mentioned are not recruiting/HR/hiring
+roles, return an empty "contacts" list rather than including them anyway.
+
+Scraped text:
+{scraped_text[:16000]}
+
+Return ONLY valid JSON in this shape:
+{{"contacts": [{{"name": "...", "title": "...", "email": "...", "source_url": "..."}}], "company_page_url": "..."}}
+Each contact needs at least a name OR an email to be included — skip anything too vague to be useful.
+"contacts" should be an empty array if nothing concrete matching a recruiting/hiring/HR role was found.
+"company_page_url" is the best company careers/about/contact page URL seen in the text, or "" if none."""
+
+    try:
+        response = client.models.generate_content(
+            model=GEMINI_FAST_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.1, response_mime_type="application/json"),
+        )
+        usage = response.usage_metadata
+        if usage:
+            log_api_call(GEMINI_FAST_MODEL, "extract_contacts",
+                         input_tokens=usage.prompt_token_count or 0,
+                         output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
+        else:
+            log_api_call(GEMINI_FAST_MODEL, "extract_contacts", input_tokens=2000, output_tokens=200)
+        return json.loads(response.text)
+    except Exception as e:
+        print(f"Error extracting contacts: {e}")
+        raise RuntimeError(f"API Error: {str(e)}")
+
+
+INBOX_CATEGORY_KEYS = ["verification", "rejection", "interview", "assessment", "reminder", "offer", "applied", "other"]
+
+
+def classify_inbox_messages(messages: list) -> dict:
+    """Classify a batch of already-fetched Gmail message summaries (id/subject/snippet
+    only — never the full body, to keep this cheap) into a job-search inbox category in
+    ONE batched call, instead of one API call per email. Uses the fast/cheap Gemini tier
+    since this is pure classification, not generation — for a typical 25-message inbox
+    page this is a few thousand input tokens and a few hundred output tokens, a fraction
+    of a cent per load. Returns {message_id: category_key}; NEVER raises — callers should
+    keep their existing local-rule category as a fallback for any id missing from the
+    result (empty dict on any failure, e.g. no API key or a transient error)."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key or not messages:
+        return {}
+    client = genai.Client(api_key=api_key)
+
+    items = "\n".join(
+        f'- id="{m.get("id")}" | subject="{(m.get("subject") or "")[:150]}" | snippet="{(m.get("snippet") or "")[:200]}"'
+        for m in messages
+    )
+
+    prompt = f"""You are classifying emails in a job seeker's inbox. For each email below (identified by its id),
+read the subject and snippet and pick the SINGLE best-fitting category from this list:
+
+- verification: account/email verification, security codes, OTPs, "confirm your email"
+- rejection: "not selected", "not moving forward", application rejected, "unfortunately"
+- interview: interview invites, phone/technical screens, scheduling a call
+- assessment: coding challenges, take-home tests, technical assessments
+- reminder: follow-up reminders, deadlines, "complete your application", action required
+- offer: job offer letters, "pleased to offer", congratulations on a job offer
+- applied: application received/submitted confirmations ("thanks for applying")
+- other: anything that doesn't clearly fit one of the above (unrelated mail, newsletters, etc.)
+
+Emails:
+{items}
+
+Return ONLY valid JSON: {{"classifications": [{{"id": "...", "category": "..."}}]}}
+One entry per email id above. "category" must be exactly one of: verification, rejection, interview, assessment,
+reminder, offer, applied, other."""
+
+    try:
+        response = client.models.generate_content(
+            model=GEMINI_FAST_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.1, response_mime_type="application/json"),
+        )
+        usage = response.usage_metadata
+        if usage:
+            log_api_call(GEMINI_FAST_MODEL, "classify_inbox",
+                         input_tokens=usage.prompt_token_count or 0,
+                         output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
+        else:
+            log_api_call(GEMINI_FAST_MODEL, "classify_inbox", input_tokens=1500, output_tokens=300)
+        data = json.loads(response.text)
+        result = {}
+        for c in data.get("classifications", []):
+            mid, cat = c.get("id"), c.get("category")
+            if mid and cat in INBOX_CATEGORY_KEYS:
+                result[mid] = cat
+        return result
+    except Exception as e:
+        print(f"Error classifying inbox messages (falling back to local rules): {e}")
+        return {}
+
+
+def summarize_inbox_message(subject: str, sender: str, body: str, thread_context: str = "", application_context: str = "") -> dict:
+    """Full-body read of a SINGLE already-opened email — extracts what happened, the
+    action needed, any deadline/interview date, a recruiter email address if present,
+    the intent a reply should carry, and a grounded draft reply. Only ever called for
+    the one message the user is actively reading (never batched across the inbox list —
+    list-view classification stays subject/snippet-only for cost), so this stays a
+    single cheap call per read, not per email. thread_context (earlier messages in the
+    same conversation) and application_context (the matched tracked application's
+    company/title) are optional extra grounding — passing them produces a much more
+    specific reply_suggestion than the single message alone would allow."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is not set")
+    client = genai.Client(api_key=api_key)
+
+    context_block = ""
+    if application_context:
+        context_block += f"\nThe candidate applied to: {application_context}\n"
+    if thread_context:
+        context_block += f"\nEarlier messages in this conversation (oldest first, for context only — the email to analyze is the LATEST one below):\n{thread_context[:6000]}\n"
+
+    prompt = f"""Read this job-search-related email and answer briefly and concretely. Base every field only on
+what's literally in the email (and the conversation context, if given) below — never invent details that aren't
+there.
+{context_block}
+Email to analyze:
+From: {sender}
+Subject: {subject}
+Body:
+{body[:8000]}
+
+Return ONLY valid JSON in this shape:
+{{"what_happened": "one sentence summary of what this email is about",
+"required_action": "what the recipient should do next, or \\"None\\" if no action is needed",
+"deadline": "any non-interview date/deadline mentioned (e.g. assessment due date, offer response deadline), or \\"\\" if none",
+"interview_date": "the specific interview/call date or time proposed or confirmed in the email, or \\"\\" if none",
+"recruiter_email": "the recruiter/sender's contact email address to reply to, or \\"\\" if not identifiable",
+"reply_intent": "one of: confirm, decline, ask_question, acknowledge, none — the most sensible intent for a reply",
+"reply_suggestion": "a short 2-4 sentence draft reply matching reply_intent, or \\"\\" if no reply is appropriate (e.g. an automated notification)"}}"""
+
+    try:
+        response = client.models.generate_content(
+            model=GEMINI_FAST_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.3, response_mime_type="application/json"),
+        )
+        usage = response.usage_metadata
+        if usage:
+            log_api_call(GEMINI_FAST_MODEL, "summarize_inbox_message",
+                         input_tokens=usage.prompt_token_count or 0,
+                         output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
+        else:
+            log_api_call(GEMINI_FAST_MODEL, "summarize_inbox_message", input_tokens=1800, output_tokens=250)
+        return json.loads(response.text)
+    except Exception as e:
+        print(f"Error summarizing inbox message: {e}")
+        raise RuntimeError(f"API Error: {str(e)}")
 

@@ -6,20 +6,43 @@ from threading import Lock
 DATA_DIR = os.getenv("DATA_DIR", "data")
 USAGE_FILE = os.path.join(DATA_DIR, "api_usage.json")
 
+JSEARCH_FREE_MONTHLY_LIMIT = 200
+
 _lock = Lock()
 
+# ESTIMATED rates below, not pulled from a live pricing API. "-latest" aliases resolve
+# to whatever model generation Google currently routes them to (confirmed via ListModels
+# that the account has access to gemini-3.x models too), so the actual cost per call can
+# drift without any code change here. Treat Usage panel dollar figures as directional,
+# not exact — re-check https://ai.google.dev/gemini-api/docs/pricing periodically and
+# update these numbers if they've moved.
 PRICING = {
+    "gemini-pro-latest": {"input": 1.25 / 1_000_000, "output": 10.00 / 1_000_000},  # estimate, proxied from 2.5-pro rate
+    "gemini-flash-latest": {"input": 0.15 / 1_000_000, "output": 0.60 / 1_000_000},  # estimate, proxied from 2.5-flash rate
+    "gemini-flash-lite-latest": {"input": 0.075 / 1_000_000, "output": 0.30 / 1_000_000},  # estimate, proxied from 2.5-flash-lite rate
+    # Decommissioned dated model names — kept only so historical usage-log rows (logged
+    # before the -latest migration) still price correctly when displayed.
     "gemini-2.5-pro": {"input": 1.25 / 1_000_000, "output": 10.00 / 1_000_000},
     "gemini-2.5-flash": {"input": 0.15 / 1_000_000, "output": 0.60 / 1_000_000},
     "gpt-4o-mini": {"input": 0.15 / 1_000_000, "output": 0.60 / 1_000_000},
     "gpt-4o": {"input": 2.50 / 1_000_000, "output": 10.00 / 1_000_000},
+    "claude-3-haiku-20240307": {"input": 3.00 / 1_000_000, "output": 15.00 / 1_000_000},
+    "claude-sonnet-5": {"input": 3.00 / 1_000_000, "output": 15.00 / 1_000_000},
+    "jsearch-api": {"input": 0, "output": 0}, # Free up to 200 searches/month on RapidAPI's free tier
 }
 
 
 def _load_usage() -> dict:
     if os.path.exists(USAGE_FILE):
-        with open(USAGE_FILE, "r") as f:
-            return json.load(f)
+        try:
+            with open(USAGE_FILE, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            # log_api_call can run on a background executor thread (e.g. Telegram-
+            # triggered AI calls) while a request thread reads this file — an unlucky
+            # interleaving can catch a partially-written file. Treat it the same as a
+            # missing file rather than 500ing the usage endpoint.
+            return {"calls": [], "total_cost": 0.0}
     return {"calls": [], "total_cost": 0.0}
 
 
@@ -52,7 +75,8 @@ def log_api_call(model: str, operation: str, input_tokens: int = 0, output_token
 
 
 def get_usage_stats() -> dict:
-    data = _load_usage()
+    with _lock:
+        data = _load_usage()
     calls = data.get("calls", [])
 
     now = datetime.now()
@@ -96,6 +120,12 @@ def get_usage_stats() -> dict:
             "cost": round(daily.get(day, {}).get("cost", 0) + c["cost"], 6),
         }
 
+    month_prefix = now.strftime("%Y-%m")
+    jsearch_used = sum(
+        1 for c in calls
+        if c["model"] == "jsearch-api" and c["timestamp"].startswith(month_prefix)
+    )
+
     return {
         "today": _summarize(today_calls),
         "week": _summarize(week_calls),
@@ -103,4 +133,9 @@ def get_usage_stats() -> dict:
         "all_time": _summarize(calls),
         "daily_breakdown": daily,
         "projected_monthly": round(_summarize(today_calls)["cost"] * 30, 2),
+        "jsearch_quota": {
+            "used": jsearch_used,
+            "limit": JSEARCH_FREE_MONTHLY_LIMIT,
+            "remaining": max(0, JSEARCH_FREE_MONTHLY_LIMIT - jsearch_used),
+        },
     }

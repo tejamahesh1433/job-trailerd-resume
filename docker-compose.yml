@@ -22,6 +22,7 @@ services:
       # Output folders
       - ./backend/original:/app/original
       - ./backend/trailerd:/app/trailerd
+      - ./backend/online-platform:/app/online-platform
     restart: unless-stopped
     # Security: Resource limits
     deploy:

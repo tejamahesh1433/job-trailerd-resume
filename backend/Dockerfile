@@ -26,9 +26,9 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY --chown=appuser:appuser . .
 
 # Set proper permissions — code is read-only, data dirs are writable
-RUN mkdir -p /app/data /app/trailerd /app/original /app/logs && \
-    chown -R appuser:appuser /app/data /app/trailerd /app/original /app/logs && \
-    chmod -R 755 /app/data /app/trailerd /app/original /app/logs
+RUN mkdir -p /app/data /app/trailerd /app/online-platform /app/original /app/logs && \
+    chown -R appuser:appuser /app/data /app/trailerd /app/online-platform /app/original /app/logs && \
+    chmod -R 755 /app/data /app/trailerd /app/online-platform /app/original /app/logs
 
 # Switch to non-root user
 USER appuser
