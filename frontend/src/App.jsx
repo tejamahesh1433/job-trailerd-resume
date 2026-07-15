@@ -1483,6 +1483,11 @@ export default function App() {
                     <a href={`http://localhost:8000/api/download/${result.file_path.replace(/^trailerd\//, '')}`} className="download-btn" download>
                       ↓ {result.tailored ? 'Download Tailored Resume' : 'Download Resume'}
                     </a>
+                    {result.pdf_path && (
+                      <a href={`http://localhost:8000/api/download/${result.pdf_path.replace(/^trailerd\//, '')}`} className="download-btn" download>
+                        ↓ Download PDF
+                      </a>
+                    )}
                     <div className="file-dl-row">
                       <a href={`http://localhost:8000/api/download/${result.file_path.replace(/[^/]+\.docx$/, 'jd_info.txt').replace(/^trailerd\//, '')}`} className="file-dl-link" download>
                         ↓ jd_info.txt
@@ -1946,6 +1951,9 @@ export default function App() {
                           {job.status === 'done' && job.result?.id && (
                             <>
                               <a href={`http://localhost:8000/api/download/${job.result.file_path.replace(/^trailerd\//, '')}`} className="dl-link" download title="Resume">↓</a>
+                              {job.result.pdf_path && (
+                                <a href={`http://localhost:8000/api/download/${job.result.pdf_path.replace(/^trailerd\//, '')}`} className="dl-link" download title="Resume PDF">PDF</a>
+                              )}
                               <button className="dl-link" title="Open CL & Email panels" onClick={() => { setBatchMode(false); handleSelectRecord(job.result); }}>CL+✉</button>
                             </>
                           )}
@@ -2070,6 +2078,9 @@ export default function App() {
                         <td className="actions-col">
                           {item.file_path && (
                             <a href={`http://localhost:8000/api/download/${item.file_path.replace(/^trailerd\//, '')}`} className="dl-link" download title="Download resume">↓</a>
+                          )}
+                          {item.pdf_path && (
+                            <a href={`http://localhost:8000/api/download/${item.pdf_path.replace(/^trailerd\//, '')}`} className="dl-link" download title="Download resume PDF">PDF</a>
                           )}
                           {item.file_path && (
                             <a href={`http://localhost:8000/api/download/${item.file_path.replace(/[^/]+\.docx$/, 'jd_info.txt').replace(/^trailerd\//, '')}`} className="dl-link" download title="Download JD info">JD</a>
