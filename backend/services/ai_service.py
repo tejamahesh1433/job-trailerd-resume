@@ -222,22 +222,31 @@ def generate_cover_letter(resume_text: str, jd_text: str, company_name: str) -> 
     Focus on the body paragraphs. Do not include placeholder brackets for things like [Your Address] or [Date] - just write the actual letter.
     Return only the text of the cover letter, nothing else.
 """
-    try:
-        response = client.models.generate_content(
-            model=GEMINI_QUALITY_MODEL,
-            contents=prompt,
-        )
-        usage = response.usage_metadata
-        if usage:
-            log_api_call(GEMINI_QUALITY_MODEL, "cover_letter",
-                         input_tokens=usage.prompt_token_count or 0,
-                         output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
-        else:
-            log_api_call(GEMINI_QUALITY_MODEL, "cover_letter", input_tokens=8000, output_tokens=400)
-        return response.text.strip()
-    except Exception as e:
-        print(f"Error generating cover letter: {e}")
-        raise RuntimeError(f"API Error: {str(e)}")
+    models_to_try = [GEMINI_QUALITY_MODEL, GEMINI_FAST_MODEL, GEMINI_PRO_FALLBACK_MODEL]
+    last_error = None
+    for model_name in models_to_try:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            )
+            usage = response.usage_metadata
+            if usage:
+                log_api_call(model_name, "cover_letter",
+                             input_tokens=usage.prompt_token_count or 0,
+                             output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
+            else:
+                log_api_call(model_name, "cover_letter", input_tokens=8000, output_tokens=400)
+            return response.text.strip()
+        except Exception as e:
+            last_error = e
+            if "503" in str(e) or "UNAVAILABLE" in str(e) or "429" in str(e) or "404" in str(e) or "NOT_FOUND" in str(e):
+                print(f"{model_name} unavailable, trying next model...")
+                continue
+            print(f"Error generating cover letter: {e}")
+            raise RuntimeError(f"API Error: {str(e)}")
+    print(f"Error generating cover letter: {last_error}")
+    raise RuntimeError(f"All models unavailable: {str(last_error)}")
 
 def analyze_job_metadata(jd_text: str, extracted_keywords: dict) -> dict:
     api_key = os.getenv("GEMINI_API_KEY")
