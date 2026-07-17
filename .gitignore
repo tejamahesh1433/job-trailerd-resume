@@ -1,5 +1,6 @@
 # Node.js
 frontend/node_modules/
+node_modules/
 frontend/dist/
 frontend/.env
 frontend/.env.*
@@ -32,3 +33,6 @@ Thumbs.db
 
 # Downloads
 dl/
+
+# One-off patch/migration scripts, not part of the app
+scripts_archive/

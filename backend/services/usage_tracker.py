@@ -74,6 +74,20 @@ def log_api_call(model: str, operation: str, input_tokens: int = 0, output_token
     return cost
 
 
+def _jsearch_used_this_month(calls: list) -> int:
+    month_prefix = datetime.now().strftime("%Y-%m")
+    return sum(
+        1 for c in calls
+        if c["model"] == "jsearch-api" and c["timestamp"].startswith(month_prefix)
+    )
+
+
+def get_jsearch_usage_this_month() -> int:
+    with _lock:
+        data = _load_usage()
+    return _jsearch_used_this_month(data.get("calls", []))
+
+
 def get_usage_stats() -> dict:
     with _lock:
         data = _load_usage()
@@ -120,11 +134,7 @@ def get_usage_stats() -> dict:
             "cost": round(daily.get(day, {}).get("cost", 0) + c["cost"], 6),
         }
 
-    month_prefix = now.strftime("%Y-%m")
-    jsearch_used = sum(
-        1 for c in calls
-        if c["model"] == "jsearch-api" and c["timestamp"].startswith(month_prefix)
-    )
+    jsearch_used = _jsearch_used_this_month(calls)
 
     return {
         "today": _summarize(today_calls),

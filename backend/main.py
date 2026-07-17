@@ -4635,7 +4635,15 @@ async def _run_command_center_search(query: str, platforms: list, work_types: li
     rule_rejected = []
 
 
-    if rapidapi_key:
+    from services.usage_tracker import get_jsearch_usage_this_month, JSEARCH_FREE_MONTHLY_LIMIT
+    jsearch_quota_used = get_jsearch_usage_this_month() if rapidapi_key else 0
+    if rapidapi_key and jsearch_quota_used >= JSEARCH_FREE_MONTHLY_LIMIT:
+        logger.info(
+            f"JSearch free-tier monthly quota ({JSEARCH_FREE_MONTHLY_LIMIT}) already reached "
+            f"({jsearch_quota_used} used) — skipping JSearch and falling back to DDG scraping"
+        )
+
+    if rapidapi_key and jsearch_quota_used < JSEARCH_FREE_MONTHLY_LIMIT:
         import requests
         from services.usage_tracker import log_api_call
         url = "https://jsearch.p.rapidapi.com/search"
@@ -4665,11 +4673,12 @@ async def _run_command_center_search(query: str, platforms: list, work_types: li
         }
         seen_urls_this_run = set()
         jsearch_call_count = 0
+        quota_hit = False
         for search_idx, active_query in enumerate(jsearch_queries):
-            if len(passing_job_texts) >= TARGET_PASSING_JOBS:
+            if quota_hit or len(passing_job_texts) >= TARGET_PASSING_JOBS:
                 break
             for tier in JSEARCH_DATE_TIERS:
-                if len(passing_job_texts) >= TARGET_PASSING_JOBS:
+                if quota_hit or len(passing_job_texts) >= TARGET_PASSING_JOBS:
                     break
                 page_num = 1
                 seen_page_fingerprints = set()
@@ -4682,6 +4691,13 @@ async def _run_command_center_search(query: str, platforms: list, work_types: li
                         break
                     if stale_pages >= MAX_STALE_PAGES_PER_QUERY_TIER:
                         logger.info(f"JSearch query {search_idx + 1}/{len(jsearch_queries)} tier '{tier}' stopped at page {page_num}: no new usable jobs on recent pages")
+                        break
+                    if jsearch_quota_used + jsearch_call_count >= JSEARCH_FREE_MONTHLY_LIMIT:
+                        logger.info(
+                            f"JSearch free-tier monthly quota ({JSEARCH_FREE_MONTHLY_LIMIT}) reached mid-run "
+                            f"at query {search_idx + 1}/{len(jsearch_queries)} tier '{tier}' page {page_num} — stopping further JSearch calls"
+                        )
+                        quota_hit = True
                         break
                     try:
                         # Real pagination: request exactly one provider page at a time
