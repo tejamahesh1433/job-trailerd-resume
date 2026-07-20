@@ -12,6 +12,10 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Final stage
 FROM python:3.11-alpine
 
+# LibreOffice headless — used to convert tailored .docx resumes to PDF (docx2pdf/MS
+# Word COM automation only works on Windows, so this is the Linux-container equivalent)
+RUN apk add --no-cache libreoffice font-noto
+
 # Create non-root user for running the application
 RUN addgroup -g 1000 appuser && \
     adduser -u 1000 -G appuser -s /sbin/nologin -D appuser

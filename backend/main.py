@@ -13,6 +13,7 @@ import re
 import difflib
 import csv
 import shutil
+import subprocess
 import docx
 import json
 import logging
@@ -432,17 +433,35 @@ def _resolve_resume_path(record: dict) -> Optional[str]:
 
 
 def _convert_docx_to_pdf(docx_path: str) -> Optional[str]:
-    """Best-effort docx -> pdf conversion via MS Word COM automation (docx2pdf) — never
-    raises. Requires MS Word installed on the host, so it silently no-ops wherever that
-    isn't true (e.g. the Linux/Alpine Docker image); a scan/tailoring action must still
-    succeed even without a PDF copy."""
+    """Best-effort docx -> pdf conversion — never raises; a scan/tailoring action must
+    still succeed even without a PDF copy. Uses MS Word COM automation (docx2pdf) on
+    Windows, and LibreOffice headless (bundled in the Docker image) everywhere else."""
+    pdf_path = os.path.splitext(docx_path)[0] + ".pdf"
+    if sys.platform == "win32":
+        try:
+            from docx2pdf import convert
+            convert(docx_path, pdf_path)
+            return pdf_path if os.path.exists(pdf_path) else None
+        except Exception as e:
+            logger.warning(f"docx-to-pdf conversion via MS Word failed for {docx_path}: {e}")
+            return None
+
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice:
+        logger.warning("LibreOffice (soffice) not found — skipping docx-to-pdf conversion")
+        return None
     try:
-        from docx2pdf import convert
-        pdf_path = os.path.splitext(docx_path)[0] + ".pdf"
-        convert(docx_path, pdf_path)
+        out_dir = os.path.dirname(os.path.abspath(docx_path))
+        result = subprocess.run(
+            [soffice, "--headless", "--norestore", "--convert-to", "pdf", "--outdir", out_dir, docx_path],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            logger.warning(f"soffice conversion failed for {docx_path}: {result.stderr.strip()}")
+            return None
         return pdf_path if os.path.exists(pdf_path) else None
     except Exception as e:
-        logger.warning(f"docx-to-pdf conversion failed for {docx_path}: {e}")
+        logger.warning(f"docx-to-pdf conversion via LibreOffice failed for {docx_path}: {e}")
         return None
 
 
