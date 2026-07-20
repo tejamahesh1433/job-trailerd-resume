@@ -110,6 +110,12 @@ docker-compose down && docker-compose up --build
 
 `docker-compose.yml` mounts `backend/data`, `backend/original`, `backend/trailerd`, **and** `backend/online-platform` (Command Center's output root) as volumes, and the backend container has a `wget`-based healthcheck the frontend container waits on before starting.
 
+**Important — `backend-api` has no source-code volume mount.** Only the data folders above are mounted; `main.py` and everything under `services/` is baked into the image at build time. This means:
+- After editing any backend Python file, `docker-compose restart backend-api` (or just leaving the container running) **will keep serving the old code** — you must rebuild: `docker-compose up -d --build backend-api`.
+- Same applies to `frontend-ui` for **dependency** changes: `frontend/src` and `frontend/public` are volume-mounted and hot-reload live, but `package.json`/`package-lock.json` are baked in — adding/upgrading an npm package needs `docker-compose up -d --build frontend-ui` too.
+
+This bit us once already (a filename fix sat in `main.py` for days while the running container kept serving the pre-fix behavior) — when in doubt after a backend change, rebuild rather than just restart.
+
 ## Directory Structure at Runtime
 
 ```

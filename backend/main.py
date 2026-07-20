@@ -14,12 +14,15 @@ import difflib
 import csv
 import shutil
 import subprocess
+import tempfile
+import uuid
 import docx
 import json
 import logging
 import hashlib
 import sys
 import time
+from logging.handlers import RotatingFileHandler
 from typing import Optional, List
 from datetime import datetime
 from dotenv import load_dotenv
@@ -45,7 +48,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(os.path.join(DATA_DIR, 'logs', 'app.log')),
+        RotatingFileHandler(os.path.join(DATA_DIR, 'logs', 'app.log'), maxBytes=5 * 1024 * 1024, backupCount=3),
         logging.StreamHandler()
     ]
 )
@@ -450,10 +453,18 @@ def _convert_docx_to_pdf(docx_path: str) -> Optional[str]:
     if not soffice:
         logger.warning("LibreOffice (soffice) not found — skipping docx-to-pdf conversion")
         return None
+    # Each invocation gets its own throwaway profile dir — soffice locks a shared user
+    # profile, so two conversions running at once (e.g. two tailoring requests in
+    # parallel) would otherwise fail to start a second instance.
+    profile_dir = os.path.join(tempfile.gettempdir(), f"lo_profile_{uuid.uuid4().hex}")
     try:
         out_dir = os.path.dirname(os.path.abspath(docx_path))
         result = subprocess.run(
-            [soffice, "--headless", "--norestore", "--convert-to", "pdf", "--outdir", out_dir, docx_path],
+            [
+                soffice, "--headless", "--norestore",
+                f"-env:UserInstallation=file://{profile_dir}",
+                "--convert-to", "pdf", "--outdir", out_dir, docx_path,
+            ],
             capture_output=True, text=True, timeout=60,
         )
         if result.returncode != 0:
@@ -463,6 +474,8 @@ def _convert_docx_to_pdf(docx_path: str) -> Optional[str]:
     except Exception as e:
         logger.warning(f"docx-to-pdf conversion via LibreOffice failed for {docx_path}: {e}")
         return None
+    finally:
+        shutil.rmtree(profile_dir, ignore_errors=True)
 
 
 def _job_artifact_dir(record_id: int, company_name: str) -> str:

@@ -12,9 +12,13 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Final stage
 FROM python:3.11-alpine
 
-# LibreOffice headless — used to convert tailored .docx resumes to PDF (docx2pdf/MS
-# Word COM automation only works on Windows, so this is the Linux-container equivalent)
-RUN apk add --no-cache libreoffice font-noto
+# LibreOffice Writer (headless) — used to convert tailored .docx resumes to PDF
+# (docx2pdf/MS Word COM automation only works on Windows, so this is the Linux-container
+# equivalent). Only the Writer component is installed, not the full `libreoffice` suite
+# (Calc/Impress/Draw/Base/Math). Most of the footprint is libreoffice-common (the shared
+# UNO/rendering core every component depends on), so this only trims ~5% off the image —
+# not worth chasing further without dropping LibreOffice entirely for a lighter tool.
+RUN apk add --no-cache libreoffice-writer font-noto
 
 # Create non-root user for running the application
 RUN addgroup -g 1000 appuser && \

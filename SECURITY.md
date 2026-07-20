@@ -197,7 +197,9 @@ def get_output_filename(filename_type: str, record_id: int = 0) -> str:
 cl_filename = get_output_filename("cover_letter", record_id)
 ```
 
-**Result**: Files now named like `cover_letter_a1b2c3d4.docx` instead of exposing user names.
+**Result**: Cover letters and mail drafts are named like `cover_letter_a1b2c3d4.docx` instead of exposing user names.
+
+**Update (2026-07)**: The resume file itself was later reverted to a hardcoded real name (`RESUME_FILENAME` in `main.py`), on purpose — this is a single-user personal tool and the resume you actually send to a recruiter is more useful named after you than as an opaque hash. So `get_output_filename("resume", ...)` above is defined but not used; only the cover-letter/mail-draft paths still use the hash scheme. Worth knowing if you ever share this codebase or repurpose it for multiple users, since the original privacy rationale for this section no longer applies to the resume path.
 
 ---
 

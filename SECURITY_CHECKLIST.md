@@ -20,7 +20,6 @@ Use this checklist before deploying to production.
 - [ ] Verify health check is configured
 - [ ] Run container with `--read-only` where possible
 - [ ] Set resource limits in docker-compose.yml
-- [ ] Disable hot-reload: remove volume mounts for `main.py` and `services/`
 - [ ] Scan Docker image for vulnerabilities: `trivy image job-trailerd-backend`
 - [ ] Use specific versions in base image (no `:latest`)
 - [ ] Remove unnecessary packages from image
