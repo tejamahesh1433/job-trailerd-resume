@@ -536,19 +536,24 @@ def _extract_experience_years(jd_text: str) -> int:
     # lower bound (10). Capturing the lower bound made a "5-15 years" JD register as
     # only 5 years, silently letting postings requiring far more than the max-10-years
     # cutoff pass the hard-reject filter.
-    range_pattern = r'\d{1,2}\s*[\-–to]+\s*(\d{1,2})\s*(?:years?|yrs?)(?:\s+of)?(?:\s+\w+){0,3}\s*(?:experience|exp\b)'
+    # Optional qualifier ("minimum"/"required"/etc.) between the range and "years" —
+    # handles "12-13 MINIMUM YEARS OF EXP" where the qualifier trails the range instead
+    # of leading it (e.g. as opposed to "minimum 12-13 years").
+    range_pattern = r'\d{1,2}\s*[\-–to]+\s*(\d{1,2})\s*(?:minimum|min\.?|mandatory|required)?\s*(?:years?|yrs?)(?:\s+of)?(?:\s+\w+){0,3}\s*(?:experience|exp\b)'
     for m in re.finditer(range_pattern, text_lower):
         years = int(m.group(1))
         if 1 <= years <= 30:
             max_years = max(max_years, years)
 
-    text_no_ranges = re.sub(r'\d{1,2}\s*[\-–to]+\s*\d{1,2}\s*(?:years?|yrs?)', '', text_lower)
+    text_no_ranges = re.sub(r'\d{1,2}\s*[\-–to]+\s*\d{1,2}\s*(?:minimum|min\.?|mandatory|required)?\s*(?:years?|yrs?)', '', text_lower)
 
     patterns = [
         # "11+ years of experience", "5 years experience"
         r'(\d{1,2})\s*\+?\s*(?:years?|yrs?)(?:\s+of)?(?:\s+\w+){0,3}\s*(?:experience|exp\b|professional)',
         # "minimum 10 years", "at least 8 years", "requires 12 years"
         r'(?:minimum|min\.?|at\s+least|over|requires?|must\s+have)\s*(\d{1,2})\s*\+?\s*(?:years?|yrs?)',
+        # "12 minimum years", "10 min years" — qualifier trailing the number instead of leading it
+        r'(\d{1,2})\s*\+?\s*(?:minimum|min\.?|mandatory)\s*(?:years?|yrs?)',
         # "experience: 10+ years"
         r'(?:experience|exp)\s*(?:required)?[:\s]+(\d{1,2})\s*\+?\s*(?:years?|yrs?)',
         # "10+ years in DevOps/cloud/IT"
@@ -1224,6 +1229,7 @@ async def _scan_resume_core(
     storage_root: str = "trailerd",
     override_company_dir: Optional[str] = None,
     skip_duplicate_check: bool = False,
+    override_experience_check: bool = False,
 ):
     """Internal scan/tailor implementation. storage_root, override_company_dir, and
     skip_duplicate_check are internal-only — never accept these from an HTTP request.
@@ -1251,10 +1257,13 @@ async def _scan_resume_core(
             raise HTTPException(status_code=400, detail="Job description too short (minimum 50 characters)")
 
         years = _extract_experience_years(jd_text)
-        if years > 10:
+        if years > 10 and not override_experience_check:
             reason = f"Requires {years}+ years experience (max allowed: 10)"
-            append_skipped_to_csv(jd_text, reason)
-            raise HTTPException(status_code=400, detail=reason)
+            raise HTTPException(status_code=409, detail={
+                "experience_conflict": True,
+                "years_required": years,
+                "message": f"{reason}. No problem — continue anyway?",
+            })
 
         gc_reason = _check_visa_eligibility(jd_text)
         if gc_reason:
@@ -1471,11 +1480,11 @@ async def _scan_resume_core(
 
 @app.post("/api/scan")
 @limiter.limit("10/minute")
-async def scan_resume(request: Request, jd_text: str = Form(...), resume: Optional[UploadFile] = File(None), selected_resume: Optional[str] = Form(None), ai_notes: Optional[str] = Form(None), rerun_id: Optional[int] = Form(None)):
+async def scan_resume(request: Request, jd_text: str = Form(...), resume: Optional[UploadFile] = File(None), selected_resume: Optional[str] = Form(None), ai_notes: Optional[str] = Form(None), rerun_id: Optional[int] = Form(None), override_experience_check: bool = Form(False)):
     """Public HTTP endpoint — only forwards user-facing fields. storage_root,
     override_company_dir, and skip_duplicate_check are internal-only and can never be
     set by a request to this endpoint; see _scan_resume_core."""
-    return await _scan_resume_core(request, jd_text, resume, selected_resume, ai_notes, rerun_id)
+    return await _scan_resume_core(request, jd_text, resume, selected_resume, ai_notes, rerun_id, override_experience_check=override_experience_check)
 
 
 def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, ai_notes: str = "") -> dict:
@@ -3123,7 +3132,7 @@ async def apply_to_job(request: Request, jd_text: str = Form(...), resume: Optio
         # Calling it as a plain function (as this did previously) leaves unset params
         # holding the marker object itself instead of None, breaking any code that
         # touches them (e.g. `rerun_id > 0`).
-        result = await _scan_resume_core(request, jd_text, resume, selected_resume, ai_notes="From Job Matcher")
+        result = await _scan_resume_core(request, jd_text, resume, selected_resume, ai_notes="From Job Matcher", override_experience_check=True)
         return result
 
     except HTTPException:

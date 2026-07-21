@@ -162,6 +162,7 @@ export default function App() {
   const [rerunRecordId, setRerunRecordId] = useState(null);
   const [rerunCompanyName, setRerunCompanyName] = useState(null);
   const [duplicateConflict, setDuplicateConflict] = useState(null);
+  const [experienceConflict, setExperienceConflict] = useState(null);
   // Additional Points — add extra bullets to the current tailored resume
   const [addPointsText, setAddPointsText] = useState('');
   const [addPointsTarget, setAddPointsTarget] = useState('');
@@ -435,9 +436,10 @@ export default function App() {
     }
   };
 
-  const handleScan = async () => {
+  const handleScan = async (overrideExperienceCheck = false) => {
     setError(null);
     setDuplicateConflict(null);
+    if (!overrideExperienceCheck) setExperienceConflict(null);
     if (!jdText.trim()) { setError('Job Description is required.'); return; }
     if (!selectedResumeName && storedResumes.length === 0) { setError('Please add a base resume first.'); return; }
     setLoading(true);
@@ -451,6 +453,7 @@ export default function App() {
     if (aiNotes.trim()) formData.append('ai_notes', aiNotes.trim());
     if (selectedResumeName) formData.append('selected_resume', selectedResumeName);
     if (rerunRecordId) formData.append('rerun_id', rerunRecordId);
+    if (overrideExperienceCheck) formData.append('override_experience_check', 'true');
     try {
       const res = await fetch('http://localhost:8000/api/scan', { method: 'POST', body: formData });
       const data = await res.json();
@@ -458,11 +461,15 @@ export default function App() {
         if (res.status === 409 && data.detail?.duplicate_id) {
           setDuplicateConflict(data.detail);
           setError(data.detail.message);
+        } else if (res.status === 409 && data.detail?.experience_conflict) {
+          setExperienceConflict(data.detail);
+          setError(data.detail.message);
         } else {
           setError(res.status === 429 ? 'Rate limit hit — wait a moment and try again.' : (data.detail || `Server error (${res.status}). Please try again.`));
         }
         return;
       }
+      setExperienceConflict(null);
       setResult(data);
       setActiveRecordId(data.id);
       setActiveCompanyName(data.company_name);
@@ -502,6 +509,12 @@ export default function App() {
     setError(null);
   };
 
+  const handleAcceptExperienceOverride = () => {
+    setExperienceConflict(null);
+    setError(null);
+    handleScan(true);
+  };
+
   const handleReset = () => {
     setJdText('');
     setAiNotes('');
@@ -516,6 +529,7 @@ export default function App() {
     setRerunRecordId(null);
     setRerunCompanyName(null);
     setDuplicateConflict(null);
+    setExperienceConflict(null);
     setAddPointsText('');
     setAddPointsTarget('');
     setAddPointsSuccess(null);
@@ -1343,6 +1357,13 @@ export default function App() {
               </div>
             )}
 
+            {experienceConflict && (
+              <div className="error-banner duplicate-conflict-banner">
+                <button className="dup-rerun-btn" onClick={handleAcceptExperienceOverride}>No Problem, Continue</button>
+                <button className="dup-dismiss-btn" onClick={() => { setExperienceConflict(null); setError(null); }}>Cancel</button>
+              </div>
+            )}
+
             <div className="field">
               <label className="field-label">AI Notes <span style={{ fontWeight: 400, opacity: 0.5 }}>(optional)</span></label>
               <textarea
@@ -1429,7 +1450,7 @@ export default function App() {
             </div>
 
             <div className="btn-row">
-              <button className={`action-btn${loading ? ' loading' : ''}`} onClick={handleScan} disabled={loading} style={{ flex: 2 }}>
+              <button className={`action-btn${loading ? ' loading' : ''}`} onClick={() => handleScan()} disabled={loading} style={{ flex: 2 }}>
                 {loading
                   ? <span className="btn-loading"><span className="spin-icon">▶</span> {rerunRecordId ? 'Re-running…' : 'Processing…'}</span>
                   : rerunRecordId ? '⟳ RE-RUN' : '▶ ACTION'}

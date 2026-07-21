@@ -97,11 +97,17 @@ export default function JobMatcher({ onApply }) {
           <h3 style={styles.rejectionTitle}>Not a Good Fit</h3>
           {analysis.company_name && <div style={styles.rejectionCompany}>{analysis.company_name}</div>}
           <p style={styles.rejectionMessage}>{analysis.error}</p>
+          <p style={styles.rejectionMessage}>Want to tailor a resume for it anyway?</p>
           <div style={styles.savedBadge}>Saved to history</div>
 
-          <button style={styles.backButton} onClick={() => setAnalysis(null)}>
-            Try Another Job
-          </button>
+          <div style={styles.actionButtons}>
+            <button style={styles.applyButton} onClick={handleApply}>
+              No Problem, Continue
+            </button>
+            <button style={styles.backButton} onClick={() => setAnalysis(null)}>
+              Try Another Job
+            </button>
+          </div>
         </div>
       </div>
     );
