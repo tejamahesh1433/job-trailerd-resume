@@ -21,6 +21,7 @@ backend/original/
 backend/trailerd/
 backend/online-platform/
 backend/output_resumes/
+graphify-out/
 
 # Logs
 backend/logs/
