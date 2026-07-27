@@ -37,3 +37,8 @@ dl/
 
 # One-off patch/migration scripts, not part of the app
 scripts_archive/
+
+# Tool / Agent metadata directories
+.claude/
+.claude-flow/
+

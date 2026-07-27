@@ -6,6 +6,133 @@ import CommandCenter from './CommandCenter';
 import JobMatches from './JobMatches';
 import InboxPage from './InboxPage';
 
+const TECH_EXPERIENCE = [
+  // Cloud Platforms
+  { name: 'AWS (general)', category: 'Cloud Platforms', years: '10+ years', rating: '9.5/10', info: { use: 'It\'s the cloud platform basically everything runs on — compute, storage, databases, networking, all of it.', how: 'You spin up whatever you need on demand and pay for what you use, either through the console, the CLI, or Terraform.', where: 'I\'ve used AWS as the primary cloud at every shop I\'ve been at — Mizuho, State of Tennessee, Omnicell, and Freddie Mac.' } },
+  { name: 'EC2', category: 'Cloud Platforms', years: '10+ years', rating: '9.5/10', info: { use: 'Those are your basic virtual machines — where you run app servers, batch jobs, anything that needs a server.', how: 'You pick an image, pick a size, it boots up, and we\'d usually put it behind an Auto Scaling Group and a load balancer so it scales and stays available.', where: 'Used it at Omnicell and Freddie Mac to run containerized and legacy workloads before we fully moved everything to EKS.' } },
+  { name: 'S3', category: 'Cloud Platforms', years: '10+ years', rating: '9.5/10', info: { use: 'That\'s just object storage — logs, backups, build artifacts, static files, anything like that.', how: 'You drop files into buckets, and it handles versioning, lifecycle rules, and encryption for you.', where: 'At Mizuho I used it to hold our Terraform state, locked with DynamoDB, and at Omnicell we archived backups to S3 Glacier.' } },
+  { name: 'Route53', category: 'Cloud Platforms', years: '10 years', rating: '9/10', info: { use: 'That\'s AWS\'s DNS service — points your domain to the right place and handles failover.', how: 'You set up routing policies — weighted, failover, latency-based — so traffic goes where you want, or fails over automatically if something\'s down.', where: 'Used it at State of Tennessee for our disaster recovery failover, and at Freddie Mac for weighted routing during blue-green releases.' } },
+  { name: 'RDS', category: 'Cloud Platforms', years: '10 years', rating: '9/10', info: { use: 'That\'s managed relational databases — MySQL, Postgres, Oracle, whatever you need.', how: 'AWS handles the patching, backups, and Multi-AZ failover for you, so you\'re not babysitting the database yourself.', where: 'Ran Oracle and Postgres on RDS at Freddie Mac, and set up Multi-AZ failover for it at State of Tennessee.' } },
+  { name: 'Lambda', category: 'Cloud Platforms', years: '8 years', rating: '8.5/10', info: { use: 'Serverless functions — you write the code, and it just runs when something triggers it, no server to manage.', how: 'It kicks off from events — an S3 upload, an SQS message, an API call — and scales automatically without you provisioning anything.', where: 'Used it at Mizuho for trade reconciliation workflows, and at State of Tennessee for auto-remediating non-compliant AWS resources.' } },
+  { name: 'CloudFront', category: 'Cloud Platforms', years: '10 years', rating: '8.5/10', info: { use: 'That\'s AWS\'s CDN — caches your content closer to users so pages load faster.', how: 'It sits in front of S3 or your load balancer and serves cached content from edge locations, and you can bolt WAF onto it for security.', where: 'Used it at State of Tennessee for citizen-facing sites, and at Omnicell and Freddie Mac in front of our load balancers.' } },
+  { name: 'Azure (general)', category: 'Cloud Platforms', years: '8 years', rating: '8.5/10', info: { use: 'That\'s Microsoft\'s cloud — I use it when we\'re running multi-cloud alongside AWS.', how: 'Same general idea as AWS — VMs, managed Kubernetes, identity — just through the Azure Portal, CLI, and ARM/Bicep instead.', where: 'Used it at Mizuho, where we ran a real multi-cloud setup across AWS and Azure for the banking platforms.' } },
+  { name: 'GCP (general)', category: 'Cloud Platforms', years: '6 years', rating: '7.5/10', info: { use: 'That\'s Google\'s cloud — mostly came up for me around GKE and container workloads.', how: 'Same general idea, just Google\'s flavor — Compute Engine, GKE, Cloud Functions, managed through the gcloud CLI.', where: 'Honestly that\'s more from my own hands-on learning than a specific client project — I haven\'t had a GCP-primary engagement yet.' } },
+  { name: 'GCE (Compute Engine)', category: 'Cloud Platforms', years: '5 years', rating: '7/10', info: { use: 'That\'s just Google\'s version of EC2 — plain virtual machines.', how: 'You pick a machine type, boot it up, and use managed instance groups if you need autoscaling.', where: 'Same as GCP overall — that\'s from my own hands-on exposure, not tied to a specific client project.' } },
+  { name: 'Cloud Functions', category: 'Cloud Platforms', years: '5 years', rating: '7/10', info: { use: 'Google\'s version of Lambda — serverless functions triggered by events.', how: 'You write a function, hook it up to a trigger like Pub/Sub or HTTP, and it runs without you managing infrastructure.', where: 'Same story — GCP exposure from my own learning, not a dedicated client project yet.' } },
+
+  // Infrastructure as Code
+  { name: 'AWS CloudFormation', category: 'Infrastructure as Code', years: '9 years', rating: '9/10', info: { use: 'It\'s AWS\'s own infrastructure-as-code tool — same idea as Terraform, just AWS-native.', how: 'You write a YAML or JSON template describing your resources, and it stands them up as a Stack, with automatic rollback if something breaks.', where: 'Used it alongside Terraform at Mizuho with StackSets, and at Omnicell for our multi-account HIPAA setup.' } },
+  { name: 'ARM/Bicep', category: 'Infrastructure as Code', years: '4 years', rating: '8/10', info: { use: 'That\'s how you write infrastructure as code specifically for Azure.', how: 'Bicep is basically a cleaner syntax that compiles down to ARM templates, and you deploy it through the CLI or a pipeline.', where: 'Used it at Mizuho to keep our Azure infrastructure just as version-controlled as our Terraform-managed AWS side.' } },
+  { name: 'Terraform', category: 'Infrastructure as Code', years: '8 years', rating: '9.5/10', info: { use: 'That\'s my main infrastructure-as-code tool — I use it to stand up and manage pretty much everything in the cloud.', how: 'You write your infrastructure in HCL, it plans the changes, applies them, and tracks everything in a state file — I keep that remotely in S3 with a DynamoDB lock.', where: 'Core tool at every job I\'ve had — built a reusable module library at Mizuho, and ran multi-environment workspaces at Omnicell.' } },
+  { name: 'Ansible', category: 'Infrastructure as Code', years: '8 years', rating: '9/10', info: { use: 'Configuration management — enforces the state you want across a fleet of servers.', how: 'It\'s agentless, so it just SSHes in and runs playbooks written in YAML to configure things idempotently.', where: 'Used it at State of Tennessee for provisioning and patching, and at Freddie Mac through Ansible Tower for CIS hardening.' } },
+  { name: 'Packer', category: 'Infrastructure as Code', years: '7 years', rating: '8/10', info: { use: 'It builds machine images — so you\'re deploying a pre-baked, consistent image instead of configuring servers after they boot.', how: 'It spins up a temp instance, runs your provisioning scripts on it, then bakes the result into an AMI.', where: 'That\'s part of the IaC toolchain alongside Terraform and Ansible — standard tool, not tied to one specific project.' } },
+  { name: 'HashiCorp Vault', category: 'Infrastructure as Code', years: '7 years', rating: '8.5/10', info: { use: 'Centralized secrets management, but with dynamic, short-lived credentials instead of static ones.', how: 'It generates secrets on demand — like database credentials — that automatically expire after a set time.', where: 'Implemented it at Mizuho specifically to get rid of hardcoded credentials across our pipelines.' } },
+  { name: 'Chef', category: 'Infrastructure as Code', years: '7 years', rating: '7/10', info: { use: 'Another configuration management tool, similar to Ansible, but agent-based.', how: 'You write cookbooks describing the desired state, and a Chef client on each node pulls that config and applies it.', where: 'Used it at Freddie Mac, alongside Ansible Tower, for hardening servers against CIS benchmarks.' } },
+
+  // Networking
+  { name: 'VPC', category: 'Networking', years: '10 years', rating: '9.5/10', info: { use: 'That\'s your private network in the cloud — where you control subnets, routing, and who can talk to what.', how: 'You carve out subnets, set up route tables and gateways, and lock things down with security groups.', where: 'Every single project I\'ve worked on — Mizuho, State of Tennessee, Omnicell, Freddie Mac — starts with a VPC.' } },
+  { name: 'ELB/ALB/NLB', category: 'Networking', years: '10 years', rating: '9/10', info: { use: 'Load balancers — they spread traffic across your servers so nothing gets overwhelmed and one bad instance doesn\'t take you down.', how: 'ALB works at the application layer for HTTP with routing rules; NLB handles raw high-throughput TCP; both do health checks and work with Auto Scaling.', where: 'Used ELB for blue-green weighted routing at Freddie Mac, and ALBs in front of our containers at State of Tennessee and Omnicell.' } },
+  { name: 'API Gateway', category: 'Networking', years: '8 years', rating: '8.5/10', info: { use: 'That\'s the front door for your APIs when you\'re going serverless.', how: 'It handles routing, throttling, and auth, and plugs straight into Lambda on the backend.', where: 'Used it at State of Tennessee for our citizen-facing APIs, alongside ALB and CloudFront.' } },
+  { name: 'Transit Gateway', category: 'Networking', years: '6 years', rating: '7.5/10', info: { use: 'It\'s basically a hub that connects all your VPCs and on-prem networks together instead of a messy peering setup.', how: 'Everything attaches to the hub, and it routes traffic between them centrally.', where: 'That one\'s more from the skill set — came up in multi-VPC architecture work, not a single standout project.' } },
+  { name: 'Azure Application Gateway', category: 'Networking', years: '6 years', rating: '7.5/10', info: { use: 'Azure\'s version of an application load balancer, with a WAF built in.', how: 'Routes HTTP traffic based on path or host, terminates SSL, and can block bad traffic at the edge.', where: 'Used it at Mizuho alongside AKS to route traffic into our Azure-hosted services.' } },
+
+  // Security & DevSecOps
+  { name: 'IAM', category: 'Security & DevSecOps', years: '10 years', rating: '9.5/10', info: { use: 'That\'s how you control who — or what service — can do what in your AWS account.', how: 'You write policies that grant just the permissions needed, nothing more, and attach them to users or roles.', where: 'Least-privilege IAM was something I enforced at every shop, but it was a real focus at State of Tennessee for FedRAMP and at Freddie Mac for GSE compliance.' } },
+  { name: 'GuardDuty', category: 'Security & DevSecOps', years: '8 years', rating: '8.5/10', info: { use: 'It\'s AWS\'s threat detection — watches for suspicious activity automatically.', how: 'It analyzes your CloudTrail, VPC flow logs, and DNS logs against threat intel and flags anything that looks off.', where: 'Used it at Mizuho and State of Tennessee as part of our overall security posture, alongside Security Hub and Config Rules.' } },
+  { name: 'KMS', category: 'Security & DevSecOps', years: '8 years', rating: '9/10', info: { use: 'That\'s encryption key management — keeps your data encrypted at rest and in transit.', how: 'You create keys, AWS handles rotation, and you use them to encrypt things like S3, RDS, and Secrets Manager.', where: 'Used it at Mizuho for key lifecycle management, and at Omnicell to keep our PHI data encrypted for HIPAA.' } },
+  { name: 'WAF', category: 'Security & DevSecOps', years: '8 years', rating: '8/10', info: { use: 'Web Application Firewall — blocks the common attacks, like SQL injection and XSS, before they hit your app.', how: 'You put it in front of CloudFront or your load balancer and apply rule sets that filter bad requests.', where: 'Used it at State of Tennessee to protect our citizen-facing sites.' } },
+  { name: 'Shield', category: 'Security & DevSecOps', years: '8 years', rating: '8/10', info: { use: 'That\'s AWS\'s DDoS protection.', how: 'The standard tier is on automatically for things like CloudFront and Route 53, and it pairs with WAF for layer 7 attacks.', where: 'That\'s part of the standard AWS security stack we ran — baseline protection alongside WAF and GuardDuty, not a standalone project.' } },
+  { name: 'AWS Config Rules', category: 'Security & DevSecOps', years: '7 years', rating: '8/10', info: { use: 'It continuously checks your AWS resources against your compliance rules and flags — or fixes — anything out of line.', how: 'You define rules, it evaluates your resources against them, and you can wire up a Lambda to auto-remediate when something drifts.', where: 'Used it at State of Tennessee for NIST and FedRAMP compliance with auto-remediation, and at Freddie Mac for GSE regulatory controls.' } },
+  { name: 'Secrets Manager', category: 'Security & DevSecOps', years: '6 years', rating: '8.5/10', info: { use: 'Where you store credentials and API keys instead of hardcoding them anywhere.', how: 'It encrypts secrets with KMS and can automatically rotate things like database passwords.', where: 'That\'s the AWS-native option we had alongside Vault — standard tool in the toolkit rather than a headline project.' } },
+  { name: 'Security Hub', category: 'Security & DevSecOps', years: '5 years', rating: '8/10', info: { use: 'It\'s a dashboard that pulls all your security findings into one place.', how: 'It aggregates stuff from GuardDuty, Inspector, and Config, and scores you against standards like CIS or NIST.', where: 'Used it at State of Tennessee and Freddie Mac as part of meeting FedRAMP and GSE security requirements.' } },
+  { name: 'Inspector', category: 'Security & DevSecOps', years: '7 years', rating: '7.5/10', info: { use: 'It scans your EC2 instances and container images for known vulnerabilities.', how: 'It checks for CVEs and network exposure issues, and sends what it finds into Security Hub.', where: 'Used it at State of Tennessee alongside Config and GuardDuty for ongoing vulnerability management.' } },
+  { name: 'SonarQube', category: 'Security & DevSecOps', years: '6 years', rating: '8.5/10', info: { use: 'Static code analysis — catches bugs, bad code smells, and security issues before code ships.', how: 'It scans your code on every build and can block the pipeline if quality drops below a threshold.', where: 'Had it wired into our Jenkins and GitHub Actions pipelines at Mizuho and Omnicell as a quality gate.' } },
+  { name: 'Trivy', category: 'Security & DevSecOps', years: '4 years', rating: '8/10', info: { use: 'It\'s a vulnerability scanner for containers and infrastructure code.', how: 'It checks your container images and Terraform or Kubernetes manifests for known CVEs and misconfigurations before you deploy.', where: 'Used it at Omnicell alongside ECR scanning to catch container vulnerabilities before they hit production.' } },
+  { name: 'Snyk', category: 'Security & DevSecOps', years: '4 years', rating: '7.5/10', info: { use: 'Similar idea — scans your dependencies and containers for known vulnerabilities.', how: 'It checks your package manifests against a vulnerability database and can suggest or auto-apply fixes.', where: 'That was part of our broader DevSecOps toolchain — standard tool alongside Trivy and Checkov, not a standalone story.' } },
+  { name: 'Checkov', category: 'Security & DevSecOps', years: '4 years', rating: '7.5/10', info: { use: 'Scans your Terraform and CloudFormation code for misconfigurations before you ever deploy it.', how: 'It checks your IaC against built-in policy rules — CIS benchmarks and best practices — and fails the build if something\'s wrong.', where: 'Part of the DevSecOps pipeline for catching bad IaC before it shipped — standard tooling, not a headline project.' } },
+  { name: 'OPA (Policy as Code)', category: 'Security & DevSecOps', years: '5 years', rating: '7.5/10', info: { use: 'It\'s a policy engine — you write rules, and it blocks anything that doesn\'t comply.', how: 'You write policies in Rego, and it evaluates them against Kubernetes admission requests or Terraform plans.', where: 'Used it at Mizuho and State of Tennessee to enforce Kubernetes RBAC and infrastructure policy as part of DevSecOps.' } },
+  { name: 'OWASP Dependency-Check', category: 'Security & DevSecOps', years: '5 years', rating: '7/10', info: { use: 'Scans your app\'s dependencies for known vulnerabilities.', how: 'It cross-checks your dependency list against the national vulnerability database during the build.', where: 'Used it at Omnicell as part of the DevSecOps pipeline, alongside SonarQube and Trivy.' } },
+
+  // CI/CD & DevOps Tools
+  { name: 'Jenkins', category: 'CI/CD & DevOps Tools', years: '10 years', rating: '9.5/10', info: { use: 'That\'s my go-to CI/CD tool — runs the build, test, and deploy pipelines.', how: 'You write pipelines as code in a Jenkinsfile, and it runs them across a master and a pool of agents; Shared Libraries let you reuse pipeline logic across teams.', where: 'Primary CI/CD engine at every job — built out Shared Library frameworks at Mizuho and Freddie Mac.' } },
+  { name: 'GitLab CI/CD', category: 'CI/CD & DevOps Tools', years: '7 years', rating: '9/10', info: { use: 'CI/CD that\'s built right into GitLab, so your pipeline lives next to your code.', how: 'You define stages in a .gitlab-ci.yml file, and GitLab Runners execute them — build, test, scan, deploy.', where: 'Used it at State of Tennessee to run pipelines across 20-plus state applications.' } },
+  { name: 'GitHub Actions', category: 'CI/CD & DevOps Tools', years: '5 years', rating: '8.5/10', info: { use: 'CI/CD triggered straight off GitHub events — push, PR, whatever.', how: 'You write workflows in YAML, and they run on GitHub-hosted or self-hosted runners.', where: 'Built reusable composite workflows at Mizuho, and used it for CI/CD automation at Omnicell.' } },
+  { name: 'Azure DevOps', category: 'CI/CD & DevOps Tools', years: '6 years', rating: '8.5/10', info: { use: 'Microsoft\'s all-in-one — pipelines, boards, repos.', how: 'You write pipelines in YAML, and it can deploy to Azure or AWS, with Boards for tracking work.', where: 'Used it at Mizuho alongside Jenkins and GitHub Actions for our multi-stage pipelines.' } },
+  { name: 'CodePipeline/CodeBuild/CodeDeploy', category: 'CI/CD & DevOps Tools', years: '8 years', rating: '8.5/10', info: { use: 'That\'s AWS\'s own CI/CD suite, if you want to stay fully native.', how: 'CodePipeline orchestrates the stages, CodeBuild compiles and tests, and CodeDeploy handles the actual rollout, including blue-green.', where: 'Used it at Omnicell for our SaaS CI/CD and for blue-green and canary deployments.' } },
+  { name: 'CircleCI', category: 'CI/CD & DevOps Tools', years: '5 years', rating: '7/10', info: { use: 'Another cloud CI/CD option, similar to Jenkins or GitHub Actions.', how: 'Pipelines run in Docker executors, and it\'s pretty good about caching and parallelizing jobs to keep builds fast.', where: 'That\'s more from the skill set than a specific project — we standardized on Jenkins and GitLab at most shops.' } },
+  { name: 'Maven', category: 'CI/CD & DevOps Tools', years: '8 years', rating: '8/10', info: { use: 'Build tool for Java projects — handles dependencies and packaging.', how: 'You define your dependencies and build steps in a pom.xml, and it runs the whole lifecycle — compile, test, package.', where: 'Used it in our Jenkins pipelines for legacy Java apps at State of Tennessee and Freddie Mac.' } },
+  { name: 'Gradle', category: 'CI/CD & DevOps Tools', years: '6 years', rating: '7.5/10', info: { use: 'Another Java build tool — faster and more flexible than Maven.', how: 'Build logic is written in Groovy or Kotlin, with incremental builds that speed up CI.', where: 'That\'s part of the build toolchain alongside Maven — general exposure rather than one flagship project.' } },
+  { name: 'JFrog Artifactory / X-Ray', category: 'CI/CD & DevOps Tools', years: '6 years', rating: '7.5/10', info: { use: 'Stores your build artifacts, and X-Ray scans them for vulnerabilities.', how: 'Artifactory holds your JARs, Docker images, whatever you build, and X-Ray continuously checks them against known CVEs.', where: 'That\'s part of the artifact management layer, alongside Nexus — standard tooling rather than a specific story.' } },
+  { name: 'Nexus', category: 'CI/CD & DevOps Tools', years: '6 years', rating: '8/10', info: { use: 'Artifact repository — where your build outputs and dependencies live.', how: 'It proxies and caches things like Maven Central, and also hosts your own internal releases.', where: 'Used it at State of Tennessee and Freddie Mac as our internal repo for Java build artifacts.' } },
+
+  // Containers & Orchestration
+  { name: 'Docker', category: 'Containers & Orchestration', years: '9 years', rating: '9/10', info: { use: 'Packages up your app with everything it needs so it runs the same anywhere.', how: 'You write a Dockerfile, build an image layer by layer, and run it as an isolated container.', where: 'Used it to containerize over 30 microservices at Mizuho, and 12 legacy .NET and Java apps at State of Tennessee.' } },
+  { name: 'Kubernetes', category: 'Containers & Orchestration', years: '8 years', rating: '9.5/10', info: { use: 'Orchestrates your containers — deploys them, scales them, keeps them running.', how: 'It schedules containers onto a cluster of nodes and manages state through Deployments and Services.', where: 'Core platform at every job, via EKS or AKS — managed multi-tenant namespaces with RBAC at each one.' } },
+  { name: 'Amazon EKS', category: 'Containers & Orchestration', years: '6 years', rating: '9.5/10', info: { use: 'AWS\'s managed Kubernetes — you don\'t run the control plane yourself.', how: 'AWS handles the control plane and etcd, you just run worker nodes, and it ties into IAM for auth.', where: 'Used it at Mizuho, State of Tennessee, Omnicell, and Freddie Mac — that\'s been my main Kubernetes platform.' } },
+  { name: 'AKS', category: 'Containers & Orchestration', years: '5 years', rating: '8.5/10', info: { use: 'Same idea, but on Azure.', how: 'Azure runs the control plane, your node pools are VM scale sets, and it integrates with Azure AD for access.', where: 'Used it at Mizuho for the Azure side of our multi-cloud Kubernetes setup.' } },
+  { name: 'GKE', category: 'Containers & Orchestration', years: '6 years', rating: '8/10', info: { use: 'Google\'s managed Kubernetes.', how: 'Same pattern — Google runs the control plane, you run node pools on Compute Engine.', where: 'That\'s from the skill set, not a specific client engagement — I know it well but haven\'t run it in production for a client yet.' } },
+  { name: 'Helm', category: 'Containers & Orchestration', years: '7 years', rating: '9/10', info: { use: 'Package manager for Kubernetes — packages up your app so you can deploy it as one unit.', how: 'You define a Chart with templated manifests, and Helm installs, upgrades, or rolls it back as a single release.', where: 'Used it at Mizuho, State of Tennessee, and Omnicell to deploy our apps to EKS and AKS.' } },
+  { name: 'Kustomize', category: 'Containers & Orchestration', years: '5 years', rating: '8.5/10', info: { use: 'Manages Kubernetes config differences across environments without templating.', how: 'You start with a base manifest and layer environment-specific patches on top at apply time.', where: 'Used it at State of Tennessee alongside ArgoCD to manage config across environments.' } },
+  { name: 'ArgoCD', category: 'Containers & Orchestration', years: '5 years', rating: '9/10', info: { use: 'GitOps for Kubernetes — your Git repo becomes the source of truth for what\'s running.', how: 'It watches your repo and continuously syncs the cluster to match, so if something drifts, it corrects it.', where: 'Used it at State of Tennessee to run GitOps deployments to EKS.' } },
+  { name: 'FluxCD', category: 'Containers & Orchestration', years: '4 years', rating: '8.5/10', info: { use: 'Similar to ArgoCD — another GitOps tool.', how: 'It watches your Git repo and image registries and reconciles cluster state automatically.', where: 'That\'s more alongside ArgoCD in the toolkit — familiar with it, but ArgoCD is what we standardized on.' } },
+  { name: 'OpenShift / ROSA', category: 'Containers & Orchestration', years: '5 years', rating: '7/10', info: { use: 'Red Hat\'s enterprise flavor of Kubernetes — ROSA is that, but managed on AWS.', how: 'Same Kubernetes core, but with extra developer tooling, built-in CI/CD, and security policy baked in.', where: 'That one\'s from the skill matrix — enterprise Kubernetes exposure alongside EKS, AKS, GKE.' } },
+  { name: 'Docker Swarm', category: 'Containers & Orchestration', years: '5 years', rating: '7/10', info: { use: 'Docker\'s own lightweight orchestrator, an alternative to Kubernetes.', how: 'It clusters a bunch of Docker hosts together and schedules services across them.', where: 'Had some exposure to it earlier on before we standardized fully on Kubernetes.' } },
+  { name: 'Istio', category: 'Containers & Orchestration', years: '5 years', rating: '7.5/10', info: { use: 'Service mesh — handles traffic, security, and observability between your microservices.', how: 'It injects sidecar proxies into your pods that handle things like mTLS and retries without touching your app code.', where: 'That\'s part of the Kubernetes toolchain — familiar with it from the skill matrix, not a headline project.' } },
+  { name: 'Linkerd', category: 'Containers & Orchestration', years: '4 years', rating: '6.5/10', info: { use: 'Lighter-weight service mesh, an alternative to Istio.', how: 'Uses smaller, faster proxies, so it\'s less overhead than Istio.', where: 'Same story — additional service mesh exposure alongside Istio.' } },
+
+  // Monitoring & Observability
+  { name: 'Prometheus', category: 'Monitoring & Observability', years: '7 years', rating: '9/10', info: { use: 'Collects metrics from your infrastructure and apps and alerts you when something\'s off.', how: 'It pulls metrics from your services on a schedule, stores them as time series, and fires alerts through Alertmanager.', where: 'Used it at Mizuho, State of Tennessee, and Omnicell for cluster and application metrics.' } },
+  { name: 'Grafana', category: 'Monitoring & Observability', years: '8 years', rating: '9/10', info: { use: 'Turns your metrics into dashboards you can actually look at.', how: 'You point it at data sources like Prometheus or CloudWatch, and build dashboards and alerts on top.', where: 'Built custom SLI/SLO dashboards with it at Mizuho, and cluster health dashboards at Omnicell.' } },
+  { name: 'Splunk', category: 'Monitoring & Observability', years: '6 years', rating: '8.5/10', info: { use: 'Enterprise log aggregation and SIEM — good for security monitoring at scale.', how: 'It ingests and indexes logs from everywhere, and you search and correlate with SPL to catch security events.', where: 'Set it up at Freddie Mac for SIEM correlation searches and automated security alerts.' } },
+  { name: 'ELK Stack', category: 'Monitoring & Observability', years: '7 years', rating: '8.5/10', info: { use: 'Log aggregation and search — Elasticsearch, Logstash, Kibana.', how: 'Logstash ingests and parses your logs, Elasticsearch indexes them so you can search, and Kibana gives you the visual layer.', where: 'Used it at State of Tennessee and Freddie Mac to centralize logs across 200-plus applications.' } },
+  { name: 'CloudWatch', category: 'Monitoring & Observability', years: '9 years', rating: '8.5/10', info: { use: 'AWS\'s built-in monitoring — metrics, logs, alarms.', how: 'It automatically collects metrics and logs from your AWS services, and you set alarms on top of thresholds.', where: 'Used it at Mizuho for observability, and at Freddie Mac with Logs Insights for our SLA dashboards.' } },
+  { name: 'Azure Monitor', category: 'Monitoring & Observability', years: '7 years', rating: '8/10', info: { use: 'Same idea as CloudWatch, but for Azure.', how: 'It pulls metrics and logs into a Log Analytics workspace, and you query it with KQL.', where: 'That\'s the Azure counterpart we used at Mizuho, alongside CloudWatch on the AWS side.' } },
+  { name: 'Datadog', category: 'Monitoring & Observability', years: '6 years', rating: '8/10', info: { use: 'A SaaS observability platform — metrics, traces, logs all in one place.', how: 'You install an agent, it ships everything to Datadog\'s backend, and you get correlated dashboards and APM out of the box.', where: 'Used it at Mizuho as part of our broader observability stack alongside Prometheus and Grafana.' } },
+  { name: 'PagerDuty', category: 'Monitoring & Observability', years: '6 years', rating: '7.5/10', info: { use: 'Handles incident alerting and on-call rotations.', how: 'It routes alerts from your monitoring tools into escalation policies so the right person gets paged.', where: 'Part of the incident response layer we had running — standard tool alongside Prometheus and Datadog.' } },
+  { name: 'OpenTelemetry', category: 'Monitoring & Observability', years: '4 years', rating: '7.5/10', info: { use: 'A standard way to instrument your apps for traces, metrics, and logs, so you\'re not locked into one vendor.', how: 'You instrument with the OTel SDK, and it exports to whatever backend you\'re using — Jaeger, Datadog, anything.', where: 'That\'s the instrumentation layer feeding our observability stack — familiar with it, standard tooling.' } },
+  { name: 'Jaeger', category: 'Monitoring & Observability', years: '4 years', rating: '7/10', info: { use: 'Distributed tracing — helps you find where latency or failures are happening across microservices.', how: 'It collects trace spans as a request moves through your services and visualizes the whole path.', where: 'Tracing backend alongside OpenTelemetry — part of the toolkit.' } },
+  { name: 'Fluentd', category: 'Monitoring & Observability', years: '5 years', rating: '7/10', info: { use: 'Log shipper — collects logs and forwards them wherever you need.', how: 'It tails logs from different sources, buffers them, and routes them to something like Elasticsearch or S3.', where: 'Alternative to Logstash in the ELK pipeline — standard tool, not a standalone story.' } },
+
+  // Messaging
+  { name: 'Kafka', category: 'Messaging', years: '5 years', rating: '8/10', info: { use: 'Event streaming — good for high-throughput, real-time data pipelines.', how: 'Producers publish to topics, consumers read them in order, and it\'s built to handle a ton of throughput reliably.', where: 'That\'s from the skill set for event-driven workloads — alongside SNS/SQS, which is what we mostly used on AWS projects.' } },
+  { name: 'RabbitMQ', category: 'Messaging', years: '5 years', rating: '8/10', info: { use: 'A traditional message broker for queuing between services.', how: 'Uses AMQP — messages go through exchanges into queues, and consumers pick them up with delivery guarantees.', where: 'Alternative to SNS/SQS in the messaging toolkit — general exposure, not tied to one project.' } },
+  { name: 'SNS / SQS', category: 'Messaging', years: '9 years', rating: '8.5/10', info: { use: 'AWS\'s messaging services — SNS for pub/sub, SQS for queuing.', how: 'SNS fans a message out to multiple subscribers, and SQS buffers messages so consumers can process them reliably at their own pace.', where: 'Used them at Mizuho for event-driven trade reconciliation, and at Omnicell for automating RDS snapshot cleanup.' } },
+
+  // Scripting & Languages
+  { name: 'Python', category: 'Scripting & Languages', years: '8 years', rating: '8.5/10', info: { use: 'My go-to for automation scripts and tooling.', how: 'Mostly used it with boto3 to talk to AWS — writing scripts for deployment validation, health checks, that kind of thing.', where: 'Used it at Omnicell and Freddie Mac for deployment validation, backup verification, and DR failover testing.' } },
+  { name: 'Bash', category: 'Scripting & Languages', years: '10+ years', rating: '9/10', info: { use: 'Shell scripting — automates Linux tasks and glues pipeline steps together.', how: 'Just chaining CLI commands and logic into scripts, run directly or as steps inside a pipeline.', where: 'Used it everywhere — every job I\'ve had leans on Bash for pipeline glue and server automation.' } },
+  { name: 'PowerShell', category: 'Scripting & Languages', years: '8 years', rating: '8/10', info: { use: 'Same idea as Bash, but for Windows and Azure.', how: 'It\'s object-oriented rather than plain text, and the Az modules let you script Azure resources directly.', where: 'That\'s for Windows Server administration — part of the toolkit alongside Linux and Bash.' } },
+  { name: 'Groovy', category: 'Scripting & Languages', years: '7 years', rating: '7.5/10', info: { use: 'The scripting language behind Jenkins pipelines.', how: 'You write your Jenkinsfiles and Shared Library functions in it to define your pipeline logic.', where: 'Used it at Mizuho and Freddie Mac to build out our Jenkins Shared Library frameworks.' } },
+  { name: 'Ruby', category: 'Scripting & Languages', years: '4 years', rating: '6/10', info: { use: 'Mainly came up for me through Chef.', how: 'Chef cookbooks are written in a Ruby-based DSL that describes the config you want.', where: 'Used it indirectly at Freddie Mac through Chef cookbooks for OS hardening.' } },
+  { name: 'Go (Golang)', category: 'Scripting & Languages', years: '2-3 years', rating: '7/10', info: { use: 'Getting more into it since it\'s what most of the Kubernetes ecosystem is built in.', how: 'It\'s statically typed and compiles to a single binary, so it\'s great for small, fast CLI tools.', where: 'That\'s a newer one for me — a couple years writing small internal tools, not a primary language on any one project yet.' } },
+
+  // Version Control & Collab
+  { name: 'Git', category: 'Version Control & Collab', years: '10+ years', rating: '9.5/10', info: { use: 'Version control — tracks every change to code and infrastructure.', how: 'You commit locally, branch for features, and merge through pull requests, synced up to a remote like GitHub or GitLab.', where: 'Used it at every job for Terraform modules, Jenkinsfiles, application code — everything.' } },
+  { name: 'GitHub', category: 'Version Control & Collab', years: '10 years', rating: '9/10', info: { use: 'Where the code lives, plus pull request reviews and Actions for CI/CD.', how: 'You get branch protection, PR review workflows, and it plugs straight into GitHub Actions.', where: 'Used it as our main Git host at Mizuho and Omnicell, tied into GitHub Actions.' } },
+  { name: 'GitLab', category: 'Version Control & Collab', years: '7 years', rating: '8.5/10', info: { use: 'Similar to GitHub, but with CI/CD built right in.', how: 'Merge requests for review, and pipelines defined in a YAML file run by GitLab Runners.', where: 'Used it at State of Tennessee as our Git host and CI/CD platform for the state applications.' } },
+  { name: 'Bitbucket', category: 'Version Control & Collab', years: '6 years', rating: '7/10', info: { use: 'Atlassian\'s Git hosting, usually paired with Jira.', how: 'Pull request workflows that tie directly into Jira tickets.', where: 'That\'s an additional option I\'ve used — alongside GitHub and GitLab, not tied to one specific engagement.' } },
+  { name: 'Jira', category: 'Version Control & Collab', years: '10 years', rating: '9/10', info: { use: 'How we track sprints, stories, and tasks.', how: 'Kanban or Scrum boards, sprint planning, burndown charts — the usual Agile setup.', where: 'Used it at every job for sprint planning and tracking our DevOps and infrastructure work.' } },
+  { name: 'Confluence', category: 'Version Control & Collab', years: '8 years', rating: '7.5/10', info: { use: 'Team wiki — where we kept documentation and runbooks.', how: 'Structured pages linked right to Jira tickets, so docs stay connected to the work.', where: 'Used it at Freddie Mac to write and maintain our incident response runbooks.' } },
+  { name: 'ServiceNow', category: 'Version Control & Collab', years: '6 years', rating: '8/10', info: { use: 'IT service management — handles change requests and incident workflows.', how: 'Everything routes through configurable workflows tied to a CMDB, with approvals built in.', where: 'Used it at State of Tennessee for change management and incident tracking, with full audit documentation.' } },
+  { name: 'MS Teams', category: 'Version Control & Collab', years: '5 years', rating: '7/10', info: { use: 'Team chat, plus it hooks into alerting.', how: 'You wire up webhooks from your monitoring or CI tools so alerts show up directly in a channel.', where: 'Used it alongside Jira and Confluence on the more Azure-heavy engagements.' } },
+
+  // OS & Databases
+  { name: 'Linux Administration', category: 'OS & Databases', years: '10+ years', rating: '9.5/10', info: { use: 'The OS running most of our production servers and containers.', how: 'Package management, systemd services, networking, hardening — the whole administration side, across RHEL, CentOS, Ubuntu.', where: 'Foundational everywhere I\'ve worked — hosting Jenkins agents, Kubernetes nodes, app servers, all of it.' } },
+  { name: 'Windows Server', category: 'OS & Databases', years: '6 years', rating: '7/10', info: { use: 'For hosting legacy .NET applications.', how: 'Managing IIS, Active Directory integration, Windows services — the whole Windows admin side.', where: 'Used it at State of Tennessee and Omnicell to host legacy .NET apps alongside our Linux-based services.' } },
+  { name: 'MySQL', category: 'OS & Databases', years: '8 years', rating: '8/10', info: { use: 'One of the relational databases we ran for application data.', how: 'Standard SQL database, usually managed through RDS so AWS handles replication and backups.', where: 'That\'s one of the RDS-hosted engines I\'ve managed — standard tooling across engagements.' } },
+  { name: 'PostgreSQL', category: 'OS & Databases', years: '7 years', rating: '8/10', info: { use: 'Another relational database — usually my default pick for new development.', how: 'Same as MySQL — ran it through RDS with Multi-AZ for high availability.', where: 'Ran it at Freddie Mac, and set up Multi-AZ failover for it as part of the DR work at State of Tennessee.' } },
+  { name: 'Oracle', category: 'OS & Databases', years: '6 years', rating: '7/10', info: { use: 'Enterprise database — usually for legacy, critical financial systems.', how: 'Handles large-scale relational workloads, with PL/SQL for the more complex logic, run through RDS for Oracle.', where: 'Ran it at Freddie Mac for the mortgage origination and servicing platform data.' } },
+  { name: 'DynamoDB', category: 'OS & Databases', years: '7 years', rating: '8/10', info: { use: 'AWS\'s managed NoSQL database — good for high-scale, low-latency lookups.', how: 'Single-digit millisecond reads and writes, and it auto-scales throughput as you need it.', where: 'Used it at Mizuho as the lock table backing our Terraform remote state in S3.' } },
+  { name: 'MongoDB', category: 'OS & Databases', years: '5 years', rating: '7/10', info: { use: 'Document database, for when your data doesn\'t fit neatly into tables.', how: 'Stores JSON-like documents in collections, and you can shard it horizontally as it grows.', where: 'That\'s from the broader NoSQL exposure alongside DynamoDB — general skill set, not a flagship project.' } },
+  { name: 'Redis', category: 'OS & Databases', years: '5 years', rating: '8/10', info: { use: 'In-memory store — mostly for caching and session data.', how: 'Everything lives in memory so reads are sub-millisecond, which is great for caching query results or storing sessions.', where: 'Part of the caching layer alongside our RDS and DynamoDB setups — standard tooling.' } },
+
+  // SRE & FinOps
+  { name: 'Trusted Advisor / Cost Explorer', category: 'SRE & FinOps', years: '7 years', rating: '8/10', info: { use: 'How we kept an eye on cloud spend and found ways to cut costs.', how: 'Trusted Advisor flags stuff you can optimize, and Cost Explorer shows you spend trends so you can plan Reserved Instances or Savings Plans.', where: 'Used them at Mizuho and Omnicell to drive FinOps work that cut costs by 20 to 30 percent through tagging and RI planning.' } },
+  { name: 'Gremlin (chaos engineering)', category: 'SRE & FinOps', years: '4 years', rating: '7/10', info: { use: 'Chaos engineering — you break things on purpose to make sure your systems actually recover.', how: 'You inject controlled failures, like latency or killing an instance, into a production-like environment and see how the system handles it.', where: 'Used it at Mizuho as part of our SRE practice, alongside tracking error budgets.' } },
+];
+
+const TECH_CATEGORIES = [...new Set(TECH_EXPERIENCE.map(t => t.category))];
+
 function ScoreRing({ score, label, accent }) {
   const [display, setDisplay] = useState(0);
   const raf = useRef(null);
@@ -104,6 +231,9 @@ export default function App() {
   
   const [infoAddresses, setInfoAddresses] = useState([]);
   const [addressSearchQuery, setAddressSearchQuery] = useState('');
+  const [expSearchQuery, setExpSearchQuery] = useState('');
+  const [expCategoryFilter, setExpCategoryFilter] = useState('All');
+  const [expExpanded, setExpExpanded] = useState(() => new Set());
   const [telegramStatus, setTelegramStatus] = useState(null);
 
   useEffect(() => {
@@ -996,6 +1126,14 @@ export default function App() {
             Info
           </button>
         </li>
+        <li>
+          <button
+            style={activePage === 'exp' ? sidebarStyles.navItemActive : sidebarStyles.navItem}
+            onClick={() => setCurrentPage('exp')}
+          >
+            Exp
+          </button>
+        </li>
       </ul>
     </nav>
   );
@@ -1084,6 +1222,130 @@ export default function App() {
   }
 
   // Show Info page
+  if (currentPage === 'exp') {
+    const q = expSearchQuery.toLowerCase();
+    const filteredExperience = TECH_EXPERIENCE.filter(item =>
+      (expCategoryFilter === 'All' || item.category === expCategoryFilter) &&
+      item.name.toLowerCase().includes(q)
+    );
+    const ratingTier = (rating) => {
+      const n = parseFloat(rating);
+      if (Number.isNaN(n)) return 'none';
+      if (n >= 9) return 'high';
+      if (n >= 8) return 'mid';
+      return 'low';
+    };
+    const toggleExpanded = (name) => {
+      setExpExpanded(prev => {
+        const next = new Set(prev);
+        next.has(name) ? next.delete(name) : next.add(name);
+        return next;
+      });
+    };
+
+    return (
+      <div style={{ display: 'flex', minHeight: '100vh' }}>
+        {sidebarNav('exp')}
+        <div style={{ flex: 1, overflow: 'auto' }}>
+          <div className="app">
+            <div className="grain" aria-hidden="true" />
+            <main className="main-content">
+              <div className="exp-page">
+                <div className="exp-header">
+                  <h2 className="exp-title">Technology Experience</h2>
+                  <span className="exp-count">{filteredExperience.length} of {TECH_EXPERIENCE.length}</span>
+                </div>
+
+                <input
+                  type="text"
+                  className="exp-search"
+                  placeholder="Search technology…"
+                  value={expSearchQuery}
+                  onChange={(e) => setExpSearchQuery(e.target.value)}
+                  autoFocus
+                />
+
+                <div className="exp-pills">
+                  <button
+                    className={`exp-pill${expCategoryFilter === 'All' ? ' active' : ''}`}
+                    onClick={() => setExpCategoryFilter('All')}
+                  >
+                    All
+                  </button>
+                  {TECH_CATEGORIES.map(cat => (
+                    <button
+                      key={cat}
+                      className={`exp-pill${expCategoryFilter === cat ? ' active' : ''}`}
+                      onClick={() => setExpCategoryFilter(cat === expCategoryFilter ? 'All' : cat)}
+                    >
+                      {cat}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="exp-table-wrap">
+                  <table className="exp-table">
+                    <thead>
+                      <tr>
+                        <th className="exp-th-toggle"></th>
+                        <th>Technology</th>
+                        <th>Category</th>
+                        <th>Experience</th>
+                        <th>Rating</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredExperience.map(item => {
+                        const isOpen = expExpanded.has(item.name);
+                        return (
+                        <React.Fragment key={item.name}>
+                          <tr
+                            className={`exp-row${isOpen ? ' exp-row-open' : ''}`}
+                            onClick={() => toggleExpanded(item.name)}
+                          >
+                            <td className="exp-toggle-cell">
+                              <span className={`exp-chevron${isOpen ? ' open' : ''}`}>▸</span>
+                            </td>
+                            <td className="exp-name">{item.name}</td>
+                            <td><span className="exp-cat-tag">{item.category}</span></td>
+                            <td className="exp-years">{item.years}</td>
+                            <td><span className={`exp-rating exp-rating-${ratingTier(item.rating)}`}>{item.rating}</span></td>
+                          </tr>
+                          {isOpen && (
+                            <tr className="exp-detail-row">
+                              <td colSpan={5}>
+                                <div className="exp-detail">
+                                  <div className="exp-detail-block">
+                                    <span className="exp-detail-label">What it&rsquo;s used for</span>
+                                    <p className="exp-detail-text">{item.info.use}</p>
+                                  </div>
+                                  <div className="exp-detail-block">
+                                    <span className="exp-detail-label">How it works</span>
+                                    <p className="exp-detail-text">{item.info.how}</p>
+                                  </div>
+                                  <div className="exp-detail-block">
+                                    <span className="exp-detail-label">Where we used it</span>
+                                    <p className="exp-detail-text">{item.info.where}</p>
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  {filteredExperience.length === 0 && <p className="empty-log">No technology matches your search.</p>}
+                </div>
+              </div>
+            </main>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (currentPage === 'info') {
     const filteredAddresses = infoAddresses.filter(item => {
       const q = addressSearchQuery.toLowerCase();
