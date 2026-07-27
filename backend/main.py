@@ -37,6 +37,7 @@ from services.docx_service import extract_text_from_docx, create_tailored_docx, 
 from services import gmail_service
 from services.profile_service import process_uploaded_doc
 from services.usage_tracker import get_usage_stats
+from services import tech_experience_service
 from database import init_db, save_resume_record, save_job_matcher_record, get_all_resumes, delete_resume_record, update_resume_status, get_resume_by_id, find_existing_company, sanitize_csv_field, search_records, update_user_address, save_follow_up_draft, get_follow_up_draft, update_resume_after_edit, update_user_notes, update_resume_rerun
 
 DATA_DIR = os.getenv("DATA_DIR", "data")
@@ -1459,6 +1460,15 @@ async def _scan_resume_core(
             record_id = save_resume_record(company_name, jd_text, after_score, file_path, json.dumps(scan_data))
         append_to_csv(company_name, jd_text, score, after_score, original_filename, file_path)
 
+        # Best-effort: pick up any new named technology from this JD/resume and add it
+        # to the Exp page with AI-generated years/rating/info — never blocks the scan.
+        try:
+            newly_added = tech_experience_service.discover_and_add_tools(jd_text, resume_text)
+            if newly_added:
+                logger.info(f"Exp page: added {len(newly_added)} new tool(s) — {[t['name'] for t in newly_added]}")
+        except Exception as e:
+            logger.warning(f"Exp page tool discovery skipped: {e}")
+
         return {
             "id": record_id,
             "company_name": company_name,
@@ -1707,6 +1717,12 @@ async def get_history(request: Request, limit: int = 50, offset: int = 0):
     except Exception as e:
         logger.error(f"Get history error: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve history")
+@app.get("/api/tech-experience")
+@limiter.limit("60/minute")
+async def get_tech_experience(request: Request):
+    return tech_experience_service.get_tech_experience()
+
+
 @app.get("/api/addresses")
 @limiter.limit("60/minute")
 async def get_addresses(request: Request):
