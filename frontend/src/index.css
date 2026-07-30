@@ -4977,6 +4977,19 @@ body {
 .exp-rating-low  { color: var(--cream-dim); }
 .exp-rating-none { color: var(--faint); }
 
+.cert-status-pill {
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-radius: 999px;
+  padding: 0.2rem 0.55rem;
+  white-space: nowrap;
+  border: 1px solid var(--border);
+}
+.cert-status-pill.active { color: var(--success); border-color: var(--success); }
+.cert-status-pill.pending { color: var(--gold); border-color: var(--gold); }
+
 .exp-th-toggle { width: 2rem; }
 
 .exp-row { cursor: pointer; }

@@ -38,6 +38,7 @@ from services import gmail_service
 from services.profile_service import process_uploaded_doc
 from services.usage_tracker import get_usage_stats
 from services import tech_experience_service
+from services import certifications_service
 from database import init_db, save_resume_record, save_job_matcher_record, get_all_resumes, delete_resume_record, update_resume_status, get_resume_by_id, find_existing_company, sanitize_csv_field, search_records, update_user_address, save_follow_up_draft, get_follow_up_draft, update_resume_after_edit, update_user_notes, update_resume_rerun
 
 DATA_DIR = os.getenv("DATA_DIR", "data")
@@ -1721,6 +1722,24 @@ async def get_history(request: Request, limit: int = 50, offset: int = 0):
 @limiter.limit("60/minute")
 async def get_tech_experience(request: Request):
     return tech_experience_service.get_tech_experience()
+
+
+@app.get("/api/certifications")
+@limiter.limit("60/minute")
+async def get_certifications(request: Request):
+    return certifications_service.get_certifications()
+
+
+@app.post("/api/certifications/refresh")
+@limiter.limit("5/minute")
+async def refresh_certifications(request: Request):
+    """Re-scans the resume files and re-runs the internet search + AI enrichment
+    for every certification found, even ones already cached."""
+    try:
+        return certifications_service.build_certifications(force_refresh=True)
+    except Exception as e:
+        logger.error(f"Certifications refresh error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to refresh certifications")
 
 
 @app.get("/api/addresses")

@@ -109,6 +109,12 @@ export default function App() {
   const [expExpanded, setExpExpanded] = useState(() => new Set());
   const [techExperience, setTechExperience] = useState([]);
   const [techExperienceLoaded, setTechExperienceLoaded] = useState(false);
+  const [certSearchQuery, setCertSearchQuery] = useState('');
+  const [certStatusFilter, setCertStatusFilter] = useState('All');
+  const [certExpanded, setCertExpanded] = useState(() => new Set());
+  const [certifications, setCertifications] = useState([]);
+  const [certificationsLoaded, setCertificationsLoaded] = useState(false);
+  const [certRefreshing, setCertRefreshing] = useState(false);
 
   useEffect(() => {
     if (currentPage === 'exp') {
@@ -118,6 +124,28 @@ export default function App() {
         .catch(err => { console.error("Error fetching tech experience:", err); setTechExperienceLoaded(true); });
     }
   }, [currentPage]);
+
+  const fetchCertifications = () => {
+    return fetch('http://localhost:8000/api/certifications')
+      .then(res => res.json())
+      .then(data => { setCertifications(Array.isArray(data) ? data : []); setCertificationsLoaded(true); })
+      .catch(err => { console.error("Error fetching certifications:", err); setCertificationsLoaded(true); });
+  };
+
+  useEffect(() => {
+    if (currentPage === 'certifications') {
+      fetchCertifications();
+    }
+  }, [currentPage]);
+
+  const handleRefreshCertifications = () => {
+    setCertRefreshing(true);
+    fetch('http://localhost:8000/api/certifications/refresh', { method: 'POST' })
+      .then(res => res.json())
+      .then(data => setCertifications(Array.isArray(data) ? data : []))
+      .catch(err => console.error("Error refreshing certifications:", err))
+      .finally(() => setCertRefreshing(false));
+  };
   const [telegramStatus, setTelegramStatus] = useState(null);
 
   useEffect(() => {
@@ -1018,6 +1046,14 @@ export default function App() {
             Exp
           </button>
         </li>
+        <li>
+          <button
+            style={activePage === 'certifications' ? sidebarStyles.navItemActive : sidebarStyles.navItem}
+            onClick={() => setCurrentPage('certifications')}
+          >
+            Certifications
+          </button>
+        </li>
       </ul>
     </nav>
   );
@@ -1223,6 +1259,151 @@ export default function App() {
                   </table>
                   {!techExperienceLoaded && <p className="empty-log">Loading…</p>}
                   {techExperienceLoaded && filteredExperience.length === 0 && <p className="empty-log">No technology matches your search.</p>}
+                </div>
+              </div>
+            </main>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (currentPage === 'certifications') {
+    const q = certSearchQuery.toLowerCase();
+    const certStatuses = [...new Set(certifications.map(c => c.status))];
+    const filteredCerts = certifications.filter(item =>
+      (certStatusFilter === 'All' || item.status === certStatusFilter) &&
+      item.name.toLowerCase().includes(q)
+    );
+    const toggleCertExpanded = (name) => {
+      setCertExpanded(prev => {
+        const next = new Set(prev);
+        next.has(name) ? next.delete(name) : next.add(name);
+        return next;
+      });
+    };
+
+    return (
+      <div style={{ display: 'flex', minHeight: '100vh' }}>
+        {sidebarNav('certifications')}
+        <div style={{ flex: 1, overflow: 'auto' }}>
+          <div className="app">
+            <div className="grain" aria-hidden="true" />
+            <main className="main-content">
+              <div className="exp-page">
+                <div className="exp-header">
+                  <h2 className="exp-title">Certifications</h2>
+                  <span className="exp-count">{filteredCerts.length} of {certifications.length}</span>
+                  <button
+                    className="exp-pill"
+                    style={{ marginLeft: 'auto' }}
+                    onClick={handleRefreshCertifications}
+                    disabled={certRefreshing}
+                  >
+                    {certRefreshing ? 'Refreshing…' : 'Refresh from resume + web'}
+                  </button>
+                </div>
+
+                <input
+                  type="text"
+                  className="exp-search"
+                  placeholder="Search certifications…"
+                  value={certSearchQuery}
+                  onChange={(e) => setCertSearchQuery(e.target.value)}
+                  autoFocus
+                />
+
+                <div className="exp-pills">
+                  <button
+                    className={`exp-pill${certStatusFilter === 'All' ? ' active' : ''}`}
+                    onClick={() => setCertStatusFilter('All')}
+                  >
+                    All
+                  </button>
+                  {certStatuses.map(status => (
+                    <button
+                      key={status}
+                      className={`exp-pill${certStatusFilter === status ? ' active' : ''}`}
+                      onClick={() => setCertStatusFilter(status === certStatusFilter ? 'All' : status)}
+                    >
+                      {status}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="exp-table-wrap">
+                  <table className="exp-table">
+                    <thead>
+                      <tr>
+                        <th className="exp-th-toggle"></th>
+                        <th>Certification</th>
+                        <th>Issuer</th>
+                        <th>Category</th>
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredCerts.map(item => {
+                        const isOpen = certExpanded.has(item.name);
+                        return (
+                        <React.Fragment key={item.name}>
+                          <tr
+                            className={`exp-row${isOpen ? ' exp-row-open' : ''}`}
+                            onClick={() => toggleCertExpanded(item.name)}
+                          >
+                            <td className="exp-toggle-cell">
+                              <span className={`exp-chevron${isOpen ? ' open' : ''}`}>▸</span>
+                            </td>
+                            <td className="exp-name">{item.name}</td>
+                            <td>{item.issuer}</td>
+                            <td><span className="exp-cat-tag">{item.category}</span></td>
+                            <td>
+                              <span className={`cert-status-pill${item.status === 'Active' ? ' active' : ' pending'}`}>
+                                {item.status}
+                              </span>
+                            </td>
+                          </tr>
+                          {isOpen && (
+                            <tr className="exp-detail-row">
+                              <td colSpan={5}>
+                                <div className="exp-detail">
+                                  <div className="exp-detail-block">
+                                    <span className="exp-detail-label">What it validates</span>
+                                    <p className="exp-detail-text">{item.description}</p>
+                                  </div>
+                                  {item.skills_validated && item.skills_validated.length > 0 && (
+                                    <div className="exp-detail-block">
+                                      <span className="exp-detail-label">Skills covered</span>
+                                      <p className="exp-detail-text">{item.skills_validated.join(' • ')}</p>
+                                    </div>
+                                  )}
+                                  <div className="exp-detail-block">
+                                    <span className="exp-detail-label">Validity</span>
+                                    <p className="exp-detail-text">
+                                      {item.validity}{item.exam_code ? ` — Exam: ${item.exam_code}` : ''}
+                                    </p>
+                                  </div>
+                                  {item.official_url && (
+                                    <div className="exp-detail-block">
+                                      <span className="exp-detail-label">Source</span>
+                                      <p className="exp-detail-text">
+                                        <a href={item.official_url} target="_blank" rel="noreferrer noopener">
+                                          {item.official_url}
+                                        </a>
+                                      </p>
+                                    </div>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  {!certificationsLoaded && <p className="empty-log">Loading…</p>}
+                  {certificationsLoaded && filteredCerts.length === 0 && <p className="empty-log">No certifications match your search.</p>}
                 </div>
               </div>
             </main>
