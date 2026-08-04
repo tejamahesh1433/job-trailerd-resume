@@ -1893,7 +1893,7 @@ async def patch_user_notes(request: Request, record_id: int, body: NotesUpdate):
     try:
         if record_id <= 0:
             raise HTTPException(status_code=400, detail="Invalid record ID")
-        if len(body.notes) > 2000:
+        if len(body.notes) > 20000:
             raise HTTPException(status_code=400, detail="Notes too long")
         update_user_notes(record_id, body.notes.strip())
         return {"status": "ok"}

@@ -1099,6 +1099,18 @@ body {
 .status-offer    { color: var(--success); }
 .status-rejected { color: var(--danger); }
 
+.job-status-badge {
+  display: inline-block;
+  border: 1px solid var(--border);
+  border-radius: 1px;
+  padding: 0.2rem 0.45rem;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 /* ── Diff viewer ────────────────────────────────────── */
 .diff-section {
   border: 1px solid var(--border);
@@ -4346,6 +4358,27 @@ body {
   flex-wrap: wrap;
   gap: 0.5rem;
   margin-top: 0.5rem;
+}
+
+.notes-mail-quote {
+  background: var(--surface-alt);
+  border-left: 2px solid var(--border);
+  border-radius: 4px;
+  padding: 0.6rem 0.75rem;
+  margin: 0.6rem 0;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.notes-answer-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0.3rem 0 0.35rem;
 }
 
 .jdw-tracker-chips {

@@ -5,6 +5,7 @@ import SearchPage from './SearchPage';
 import CommandCenter from './CommandCenter';
 import JobMatches from './JobMatches';
 import InboxPage from './InboxPage';
+import NotesPage from './NotesPage';
 
 function ScoreRing({ score, label, accent }) {
   const [display, setDisplay] = useState(0);
@@ -80,6 +81,25 @@ function EmptyResultsIcon() {
 }
 
 const HISTORY_PAGE_SIZE = 20;
+
+const REFERENCES = [
+  {
+    name: 'Rama krishna morakonda',
+    company: 'State of Tennessee',
+    role: 'Devops and Cloud Engineer',
+    email: 'ramakrishna.morakonda@tn.gov',
+    phone: '3526657580',
+    location: 'Nashville, Tennessee',
+  },
+  {
+    name: 'Shahin Shaik',
+    company: 'Freddie Mac',
+    role: 'Software Engineer',
+    email: 'shahin.shaik@freddiemac.com',
+    phone: '4054769257',
+    location: '',
+  },
+];
 
 export default function App() {
   // Navigation — persist in URL hash so refresh stays on the same page
@@ -1054,6 +1074,14 @@ export default function App() {
             Certifications
           </button>
         </li>
+        <li>
+          <button
+            style={activePage === 'notes' ? sidebarStyles.navItemActive : sidebarStyles.navItem}
+            onClick={() => setCurrentPage('notes')}
+          >
+            Notes
+          </button>
+        </li>
       </ul>
     </nav>
   );
@@ -1113,6 +1141,22 @@ export default function App() {
       </div>
     );
   }
+  if (currentPage === 'notes') {
+    return (
+      <div style={{ display: 'flex', minHeight: '100vh' }}>
+        {sidebarNav('notes')}
+        <div style={{ flex: 1, overflow: 'auto', background: 'var(--ink)' }}>
+          <NotesPage
+            history={history}
+            gmailConnected={gmailConnected}
+            onStatusChange={handleStatusChange}
+            onRefreshHistory={fetchHistory}
+          />
+        </div>
+      </div>
+    );
+  }
+
   // Show SearchPage
   if (currentPage === 'search') {
     return (
@@ -1533,6 +1577,27 @@ export default function App() {
                   )})}
                   {infoAddresses.length === 0 && <p className="empty-log">No addresses saved yet.</p>}
                   {infoAddresses.length > 0 && filteredAddresses.length === 0 && <p className="empty-log">No addresses match your search.</p>}
+                </div>
+              </div>
+
+              {/* References */}
+              <div className="panel panel-wide panel-enter" style={{ animationDelay: '180ms' }}>
+                <div className="panel-tag">
+                  <span className="panel-num">04</span>
+                  <span className="panel-title">References</span>
+                </div>
+                <div className="info-address-list">
+                  {REFERENCES.map((ref, index) => (
+                    <div key={index} className="info-address-card">
+                      <div className="info-address-company">Reference {String(index + 1).padStart(2, '0')} — {ref.name}</div>
+                      <div className="info-address-text">{ref.role} · {ref.company}</div>
+                      <div className="info-address-contact">
+                        <div className="info-address-field"><span className="info-address-label">Email</span>{ref.email}</div>
+                        <div className="info-address-field"><span className="info-address-label">Phone</span>{ref.phone}</div>
+                        {ref.location && <div className="info-address-field"><span className="info-address-label">Location</span>{ref.location}</div>}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               </div>
             </main>
