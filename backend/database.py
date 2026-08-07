@@ -43,6 +43,10 @@ def init_db():
         'ALTER TABLE resumes ADD COLUMN cover_letter_generated INTEGER DEFAULT 0',
         'ALTER TABLE resumes ADD COLUMN drafts_json TEXT',
         'ALTER TABLE resumes ADD COLUMN contact_json TEXT',
+        'ALTER TABLE resumes ADD COLUMN vendor_company_name TEXT',
+        'ALTER TABLE resumes ADD COLUMN vendor_contact_name TEXT',
+        'ALTER TABLE resumes ADD COLUMN vendor_contact_email TEXT',
+        'ALTER TABLE resumes ADD COLUMN vendor_contact_phone TEXT',
     ]
     for sql in migrations:
         try:
@@ -52,13 +56,17 @@ def init_db():
     conn.commit()
     conn.close()
 
-def save_resume_record(company_name: str, jd_text: str, score: int, file_path: str, scan_result: str = None):
+def save_resume_record(company_name: str, jd_text: str, score: int, file_path: str, scan_result: str = None,
+                        vendor_company_name: str = '', vendor_contact_name: str = '',
+                        vendor_contact_email: str = '', vendor_contact_phone: str = ''):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''
-        INSERT INTO resumes (company_name, jd_text, score, file_path, created_at, status, scan_result)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (company_name, jd_text, score, file_path, datetime.now().isoformat(), "Scanned", scan_result))
+        INSERT INTO resumes (company_name, jd_text, score, file_path, created_at, status, scan_result,
+                            vendor_company_name, vendor_contact_name, vendor_contact_email, vendor_contact_phone)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (company_name, jd_text, score, file_path, datetime.now().isoformat(), "Scanned", scan_result,
+          vendor_company_name, vendor_contact_name, vendor_contact_email, vendor_contact_phone))
     record_id = c.lastrowid
     conn.commit()
     conn.close()
@@ -66,20 +74,35 @@ def save_resume_record(company_name: str, jd_text: str, score: int, file_path: s
 
 def save_job_matcher_record(company_name: str, jd_text: str, match_percentage: int,
                             can_apply: bool, rejection_reason: str = None,
-                            source_url: str = None, scan_result: str = None):
+                            source_url: str = None, scan_result: str = None,
+                            vendor_company_name: str = '', vendor_contact_name: str = '',
+                            vendor_contact_email: str = '', vendor_contact_phone: str = ''):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     status = "Matched" if can_apply else "Rejected"
     c.execute('''
         INSERT INTO resumes (company_name, jd_text, score, file_path, created_at, status,
-                            scan_result, source_url, rejection_reason, source, match_percentage)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            scan_result, source_url, rejection_reason, source, match_percentage,
+                            vendor_company_name, vendor_contact_name, vendor_contact_email, vendor_contact_phone)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (company_name, jd_text, 0, None, datetime.now().isoformat(),
-          status, scan_result, source_url, rejection_reason, "job-finder", match_percentage))
+          status, scan_result, source_url, rejection_reason, "job-finder", match_percentage,
+          vendor_company_name, vendor_contact_name, vendor_contact_email, vendor_contact_phone))
     record_id = c.lastrowid
     conn.commit()
     conn.close()
     return record_id
+
+
+def update_vendor_details(record_id: int, vendor_company_name: str = '', vendor_contact_name: str = '',
+                           vendor_contact_email: str = '', vendor_contact_phone: str = ''):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''UPDATE resumes SET vendor_company_name = ?, vendor_contact_name = ?,
+                 vendor_contact_email = ?, vendor_contact_phone = ? WHERE id = ?''',
+              (vendor_company_name, vendor_contact_name, vendor_contact_email, vendor_contact_phone, record_id))
+    conn.commit()
+    conn.close()
 
 def _parse_record(row):
     """Convert a database row to dict, parsing scan_result JSON if present."""
@@ -216,12 +239,21 @@ def update_job_description(record_id: int, description: str):
     conn.close()
     return get_job_detail(record_id)
 
-def update_resume_rerun(record_id: int, company_name: str, jd_text: str, score: int, scan_result: str):
+def update_resume_rerun(record_id: int, company_name: str, jd_text: str, score: int, scan_result: str,
+                         vendor_company_name: str = None, vendor_contact_name: str = None,
+                         vendor_contact_email: str = None, vendor_contact_phone: str = None):
     """Overwrite an existing record's JD/score/scan_result in place for a re-run (no new row)."""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('UPDATE resumes SET company_name = ?, jd_text = ?, score = ?, scan_result = ? WHERE id = ?',
-              (company_name, jd_text, score, scan_result, record_id))
+    if vendor_company_name is not None:
+        c.execute('''UPDATE resumes SET company_name = ?, jd_text = ?, score = ?, scan_result = ?,
+                     vendor_company_name = ?, vendor_contact_name = ?, vendor_contact_email = ?, vendor_contact_phone = ?
+                     WHERE id = ?''',
+                  (company_name, jd_text, score, scan_result,
+                   vendor_company_name, vendor_contact_name, vendor_contact_email, vendor_contact_phone, record_id))
+    else:
+        c.execute('UPDATE resumes SET company_name = ?, jd_text = ?, score = ?, scan_result = ? WHERE id = ?',
+                  (company_name, jd_text, score, scan_result, record_id))
     conn.commit()
     conn.close()
 

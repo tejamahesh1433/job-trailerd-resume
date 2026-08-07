@@ -203,6 +203,8 @@ export default function App() {
   const [historySortBy, setHistorySortBy] = useState('date');
   const [historySortDir, setHistorySortDir] = useState('desc');
   const [expandedJdId, setExpandedJdId] = useState(null);
+  const [vendorEdit, setVendorEdit] = useState({ vendor_company_name: '', vendor_contact_name: '', vendor_contact_email: '', vendor_contact_phone: '' });
+  const [savingVendorId, setSavingVendorId] = useState(null);
   // Mail draft — results panel
   const [mailDraft, setMailDraft] = useState(null);
   const [generatingMail, setGeneratingMail] = useState(false);
@@ -367,12 +369,13 @@ export default function App() {
 
   // Derived history values — historyPage resets are computed, not effectful
   const filteredHistory = history
-    .filter(item => !historySearch || (item.company_name || '').toLowerCase().includes(historySearch.toLowerCase()))
+    .filter(item => !historySearch || (item.company_name || '').toLowerCase().includes(historySearch.toLowerCase()) || (item.vendor_company_name || '').toLowerCase().includes(historySearch.toLowerCase()))
     .filter(item => !historyStatusFilter || item.status === historyStatusFilter)
     .sort((a, b) => {
       const dir = historySortDir === 'asc' ? 1 : -1;
       if (historySortBy === 'score') return (a.score - b.score) * dir;
       if (historySortBy === 'company') return (a.company_name || '').localeCompare(b.company_name || '') * dir;
+      if (historySortBy === 'vendor') return (a.vendor_company_name || '').localeCompare(b.vendor_company_name || '') * dir;
       if (historySortBy === 'status') return (a.status || '').localeCompare(b.status || '') * dir;
       return ((a.created_at || '') < (b.created_at || '') ? -1 : 1) * dir;
     });
@@ -770,7 +773,37 @@ export default function App() {
     reader.readAsText(file);
   };
 
-  const toggleJdExpand = (id) => setExpandedJdId(prev => prev === id ? null : id);
+  const toggleJdExpand = (id) => {
+    setExpandedJdId(prev => {
+      const next = prev === id ? null : id;
+      if (next) {
+        const item = history.find(h => h.id === next) || {};
+        setVendorEdit({
+          vendor_company_name: item.vendor_company_name || '',
+          vendor_contact_name: item.vendor_contact_name || '',
+          vendor_contact_email: item.vendor_contact_email || '',
+          vendor_contact_phone: item.vendor_contact_phone || '',
+        });
+      }
+      return next;
+    });
+  };
+
+  const handleSaveVendorDetails = async (id) => {
+    setSavingVendorId(id);
+    try {
+      const res = await fetch(`http://localhost:8000/api/history/${id}/vendor`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(vendorEdit),
+      });
+      if (res.ok) fetchHistory();
+    } catch (err) {
+      console.error('Failed to update vendor details:', err);
+    } finally {
+      setSavingVendorId(null);
+    }
+  };
 
   const handleGenerateMail = async () => {
     if (!activeRecordId) { setError('Select a company first.'); return; }
@@ -2406,7 +2439,7 @@ export default function App() {
               <input
                 type="text"
                 className="history-search"
-                placeholder="Search company…"
+                placeholder="Search client or vendor…"
                 value={historySearch}
                 onChange={e => setHistorySearch(e.target.value)}
               />
@@ -2436,7 +2469,8 @@ export default function App() {
                 <thead>
                   <tr>
                     <th>#</th>
-                    <th className="sortable-th" onClick={() => toggleSort('company')}>Company {historySortBy === 'company' ? (historySortDir === 'asc' ? '↑' : '↓') : ''}</th>
+                    <th className="sortable-th" onClick={() => toggleSort('company')}>Client {historySortBy === 'company' ? (historySortDir === 'asc' ? '↑' : '↓') : ''}</th>
+                    <th className="sortable-th" onClick={() => toggleSort('vendor')}>Vendor Company {historySortBy === 'vendor' ? (historySortDir === 'asc' ? '↑' : '↓') : ''}</th>
                     <th className="sortable-th" onClick={() => toggleSort('date')}>Date {historySortBy === 'date' ? (historySortDir === 'asc' ? '↑' : '↓') : ''}</th>
                     <th className="sortable-th" onClick={() => toggleSort('score')}>Score {historySortBy === 'score' ? (historySortDir === 'asc' ? '↑' : '↓') : ''}</th>
                     <th className="sortable-th" onClick={() => toggleSort('status')}>Status {historySortBy === 'status' ? (historySortDir === 'asc' ? '↑' : '↓') : ''}</th>
@@ -2462,6 +2496,7 @@ export default function App() {
                           {item.source === 'job-finder' && <span className="source-tag">finder</span>}
                           {item.rejection_reason && <span className="reject-reason" title={item.rejection_reason}>{item.rejection_reason}</span>}
                         </td>
+                        <td className="vendor-col">{item.vendor_company_name || '—'}</td>
                         <td className="date-col">
                           {item.created_at ? new Date(item.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}
                         </td>
@@ -2512,8 +2547,38 @@ export default function App() {
                       </tr>
                       {expandedJdId === item.id && (
                         <tr className="jd-preview-row">
-                          <td colSpan="6">
+                          <td colSpan="7">
                             <div className="jd-preview-content">
+                              <div className="jd-preview-label">Vendor Details</div>
+                              <div className="vendor-edit-grid">
+                                <input
+                                  type="text"
+                                  placeholder="Vendor company name"
+                                  value={vendorEdit.vendor_company_name}
+                                  onChange={e => setVendorEdit(v => ({ ...v, vendor_company_name: e.target.value }))}
+                                />
+                                <input
+                                  type="text"
+                                  placeholder="Vendor contact name"
+                                  value={vendorEdit.vendor_contact_name}
+                                  onChange={e => setVendorEdit(v => ({ ...v, vendor_contact_name: e.target.value }))}
+                                />
+                                <input
+                                  type="email"
+                                  placeholder="Vendor contact email"
+                                  value={vendorEdit.vendor_contact_email}
+                                  onChange={e => setVendorEdit(v => ({ ...v, vendor_contact_email: e.target.value }))}
+                                />
+                                <input
+                                  type="text"
+                                  placeholder="Vendor contact phone"
+                                  value={vendorEdit.vendor_contact_phone}
+                                  onChange={e => setVendorEdit(v => ({ ...v, vendor_contact_phone: e.target.value }))}
+                                />
+                                <button className="vendor-save-btn" onClick={() => handleSaveVendorDetails(item.id)} disabled={savingVendorId === item.id}>
+                                  {savingVendorId === item.id ? 'Saving…' : 'Save'}
+                                </button>
+                              </div>
                               <div className="jd-preview-label">Job Description</div>
                               <div className="jd-preview-text">{item.jd_text}</div>
                             </div>

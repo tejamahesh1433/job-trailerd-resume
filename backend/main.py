@@ -39,7 +39,7 @@ from services.profile_service import process_uploaded_doc
 from services.usage_tracker import get_usage_stats
 from services import tech_experience_service
 from services import certifications_service
-from database import init_db, save_resume_record, save_job_matcher_record, get_all_resumes, delete_resume_record, update_resume_status, get_resume_by_id, find_existing_company, sanitize_csv_field, search_records, update_user_address, save_follow_up_draft, get_follow_up_draft, update_resume_after_edit, update_user_notes, update_resume_rerun
+from database import init_db, save_resume_record, save_job_matcher_record, get_all_resumes, delete_resume_record, update_resume_status, get_resume_by_id, find_existing_company, sanitize_csv_field, search_records, update_user_address, save_follow_up_draft, get_follow_up_draft, update_resume_after_edit, update_user_notes, update_resume_rerun, update_vendor_details
 
 DATA_DIR = os.getenv("DATA_DIR", "data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -324,6 +324,24 @@ def _extract_company_name(jd_text: str) -> str:
                         return candidate
 
     return "Unknown_Company"
+
+
+def _derive_vendor_details(jd_text: str, vendor_email: str, contact_info: dict = None) -> dict:
+    """Best-effort vendor/staffing-agency details for the Production Log, distinct from
+    the end Client extracted by _extract_company_name. vendor_email is the JD's
+    non-generic-domain contact address (the recruiter/vendor, not the end client);
+    contact_info is the AI-extracted recruiter name/email/phone when available."""
+    contact_info = contact_info or {}
+    vendor_company_name = ''
+    if vendor_email and '@' in vendor_email:
+        domain_root = vendor_email.split('@')[1].split('.')[0]
+        vendor_company_name = domain_root.replace('-', ' ').replace('_', ' ').title()
+    return {
+        "vendor_company_name": vendor_company_name,
+        "vendor_contact_name": (contact_info.get('name') or '').strip(),
+        "vendor_contact_email": (contact_info.get('email') or vendor_email or '').strip(),
+        "vendor_contact_phone": (contact_info.get('phone') or '').strip(),
+    }
 
 
 def _guess_title_from_job_text(jt: str) -> str:
@@ -981,11 +999,15 @@ def calculate_match_score(years_required: int, keywords: dict, employment_type: 
     return max(0, min(100, score))  # Clamp to 0-100
 
 def _csv_header():
-    return ["Timestamp", "Company Name", "Before Score", "After Score", "Status", "Skip Reason", "Original Resume", "Tailored Resume", "JD Info", "Cover Letter", "Mail Draft", "Job Description", "Source", "Source URL", "Job Fit %", "Rejection Reason"]
+    return ["Timestamp", "Client", "Vendor Company Name", "Vendor Contact Name", "Vendor Contact Email",
+             "Vendor Contact Phone", "Before Score", "After Score", "Status", "Skip Reason", "Original Resume",
+             "Tailored Resume", "JD Info", "Cover Letter", "Mail Draft", "Job Description", "Source",
+             "Source URL", "Job Fit %", "Rejection Reason"]
 
-def append_to_csv(company_name, jd_text, before_score, after_score, original_path, tailored_path):
+def append_to_csv(company_name, jd_text, before_score, after_score, original_path, tailored_path, vendor_details=None):
     csv_file = os.path.join(DATA_DIR, "history.csv")
     file_exists = os.path.exists(csv_file)
+    vendor_details = vendor_details or {}
 
     with open(csv_file, mode='a', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
@@ -1012,6 +1034,10 @@ def append_to_csv(company_name, jd_text, before_score, after_score, original_pat
         writer.writerow([
             sanitize_csv_field(datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
             sanitize_csv_field(company_name),
+            sanitize_csv_field(vendor_details.get('vendor_company_name', '')),
+            sanitize_csv_field(vendor_details.get('vendor_contact_name', '')),
+            sanitize_csv_field(vendor_details.get('vendor_contact_email', '')),
+            sanitize_csv_field(vendor_details.get('vendor_contact_phone', '')),
             sanitize_csv_field(f"{before_score}%"),
             sanitize_csv_field(f"{after_score}%"),
             "Processed",
@@ -1043,6 +1069,10 @@ def append_skipped_to_csv(jd_text, skip_reason):
             sanitize_csv_field(company_name),
             "N/A",
             "N/A",
+            "N/A",
+            "N/A",
+            "N/A",
+            "N/A",
             "Skipped",
             sanitize_csv_field(skip_reason),
             "N/A",
@@ -1057,9 +1087,10 @@ def append_skipped_to_csv(jd_text, skip_reason):
             ""
         ])
 
-def append_job_matcher_to_csv(company_name, jd_text, match_pct, status, rejection_reason="", source_url=""):
+def append_job_matcher_to_csv(company_name, jd_text, match_pct, status, rejection_reason="", source_url="", vendor_details=None):
     csv_file = os.path.join(DATA_DIR, "history.csv")
     file_exists = os.path.exists(csv_file)
+    vendor_details = vendor_details or {}
 
     with open(csv_file, mode='a', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
@@ -1069,6 +1100,10 @@ def append_job_matcher_to_csv(company_name, jd_text, match_pct, status, rejectio
         writer.writerow([
             sanitize_csv_field(datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
             sanitize_csv_field(company_name),
+            sanitize_csv_field(vendor_details.get('vendor_company_name', '')),
+            sanitize_csv_field(vendor_details.get('vendor_contact_name', '')),
+            sanitize_csv_field(vendor_details.get('vendor_contact_email', '')),
+            sanitize_csv_field(vendor_details.get('vendor_contact_phone', '')),
             "N/A",
             "N/A",
             sanitize_csv_field(status),
@@ -1085,11 +1120,36 @@ def append_job_matcher_to_csv(company_name, jd_text, match_pct, status, rejectio
             sanitize_csv_field(rejection_reason),
         ])
 
+def _migrate_history_csv():
+    """One-time migration: rewrite history.csv if it still has the old header (before
+    the Client/Vendor Details columns existed), so old and new rows stay aligned."""
+    csv_file = os.path.join(DATA_DIR, "history.csv")
+    if not os.path.exists(csv_file):
+        return
+    with open(csv_file, newline='', encoding='utf-8') as f:
+        rows = list(csv.reader(f))
+    if not rows:
+        return
+    old_header = rows[0]
+    new_header = _csv_header()
+    if old_header == new_header:
+        return
+    rename_map = {"Company Name": "Client"}
+    old_header_mapped = [rename_map.get(h, h) for h in old_header]
+    migrated = [new_header]
+    for row in rows[1:]:
+        row_dict = dict(zip(old_header_mapped, row))
+        migrated.append([row_dict.get(col, "") for col in new_header])
+    with open(csv_file, mode='w', newline='', encoding='utf-8') as f:
+        csv.writer(f).writerows(migrated)
+    logger.info(f"Migrated history.csv to the new column layout ({len(migrated) - 1} rows)")
+
 # Ensure output directories exist
 os.makedirs("trailerd", exist_ok=True)
 os.makedirs("online-platform", exist_ok=True)
 os.makedirs("original", exist_ok=True)
 init_db()
+_migrate_history_csv()
 
 from prometheus_fastapi_instrumentator import Instrumentator
 
@@ -1369,6 +1429,7 @@ async def _scan_resume_core(
         contact_info = result.get('contact_info', {})
         jd_emails = re.findall(r'[\w.+-]+@[\w-]+\.[\w.-]+', jd_text)
         vendor_email = next((e for e in jd_emails if e.split('@')[1].split('.')[0].lower() not in _GENERIC_EMAIL), '')
+        vendor_details = _derive_vendor_details(jd_text, vendor_email, contact_info)
 
         if rerun_record and rerun_record.get('file_path'):
             # Re-run: reuse the SAME company directory/file — never create a new entry
@@ -1452,14 +1513,16 @@ async def _scan_resume_core(
         }
 
         if rerun_record:
-            update_resume_rerun(rerun_record['id'], company_name, jd_text, after_score, json.dumps(scan_data))
+            update_resume_rerun(rerun_record['id'], company_name, jd_text, after_score, json.dumps(scan_data),
+                                 vendor_details['vendor_company_name'], vendor_details['vendor_contact_name'],
+                                 vendor_details['vendor_contact_email'], vendor_details['vendor_contact_phone'])
             record_id = rerun_record['id']
             existing = None
             logger.info(f"Re-ran scan for record {record_id} ({company_name}) — updated in place")
         else:
             existing = find_existing_company(company_name)
-            record_id = save_resume_record(company_name, jd_text, after_score, file_path, json.dumps(scan_data))
-        append_to_csv(company_name, jd_text, score, after_score, original_filename, file_path)
+            record_id = save_resume_record(company_name, jd_text, after_score, file_path, json.dumps(scan_data), **vendor_details)
+        append_to_csv(company_name, jd_text, score, after_score, original_filename, file_path, vendor_details)
 
         # Best-effort: pick up any new named technology from this JD/resume and add it
         # to the Exp page with AI-generated years/rating/info — never blocks the scan.
@@ -1536,6 +1599,7 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
     contact_info = result.get('contact_info', {})
     jd_emails = re.findall(r'[\w.+-]+@[\w-]+\.[\w.-]+', jd_text)
     vendor_email = next((e for e in jd_emails if e.split('@')[1].split('.')[0].lower() not in _GENERIC_EMAIL), '')
+    vendor_details = _derive_vendor_details(jd_text, vendor_email, contact_info)
 
     if ai_company and ai_company not in ('Unknown_Company', 'Unknown', ''):
         company_name = ai_company
@@ -1607,8 +1671,8 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
         "section_scores": result.get('section_scores', {}),
         "contact_info": contact_info, "replacements": replacements,
     }
-    record_id = save_resume_record(company_name, jd_text, after_score, file_path, json.dumps(scan_data))
-    append_to_csv(company_name, jd_text, score, after_score, original_filename, file_path)
+    record_id = save_resume_record(company_name, jd_text, after_score, file_path, json.dumps(scan_data), **vendor_details)
+    append_to_csv(company_name, jd_text, score, after_score, original_filename, file_path, vendor_details)
     return {
         "id": record_id, "company_name": company_name, "file_path": file_path,
         "pdf_path": pdf_path,
@@ -1902,6 +1966,30 @@ async def patch_user_notes(request: Request, record_id: int, body: NotesUpdate):
     except Exception as e:
         logger.error(f"Update notes error: {e}")
         raise HTTPException(status_code=500, detail="Failed to update notes")
+
+class VendorUpdate(BaseModel):
+    vendor_company_name: str = ""
+    vendor_contact_name: str = ""
+    vendor_contact_email: str = ""
+    vendor_contact_phone: str = ""
+
+@app.patch("/api/history/{record_id}/vendor")
+@limiter.limit("30/minute")
+async def patch_vendor_details(request: Request, record_id: int, body: VendorUpdate):
+    try:
+        if record_id <= 0:
+            raise HTTPException(status_code=400, detail="Invalid record ID")
+        for field_name, value in body.dict().items():
+            if len(value) > 200:
+                raise HTTPException(status_code=400, detail=f"{field_name} too long")
+        update_vendor_details(record_id, body.vendor_company_name.strip(), body.vendor_contact_name.strip(),
+                               body.vendor_contact_email.strip(), body.vendor_contact_phone.strip())
+        return {"status": "ok"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Update vendor details error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update vendor details")
 
 @app.delete("/api/history/{record_id}")
 @limiter.limit("20/minute")
@@ -3062,36 +3150,39 @@ async def analyze_job(request: Request, jd_text: str = Form(...), source_url: Op
                 )
 
         company_name = _extract_company_name(jd_text)
+        jd_emails = re.findall(r'[\w.+-]+@[\w-]+\.[\w.-]+', jd_text)
+        vendor_email = next((e for e in jd_emails if e.split('@')[1].split('.')[0].lower() not in _GENERIC_EMAIL), '')
+        vendor_details = _derive_vendor_details(jd_text, vendor_email)
 
         # Rule 1: Check lead role (HARD REJECT)
         lead_reason = _check_lead_role(jd_text)
         if lead_reason:
             reason = f"Rejected: {lead_reason}"
-            record_id = save_job_matcher_record(company_name, jd_text, 0, False, reason, source_url)
-            append_job_matcher_to_csv(company_name, jd_text, 0, "Rejected", reason, source_url or "")
+            record_id = save_job_matcher_record(company_name, jd_text, 0, False, reason, source_url, **vendor_details)
+            append_job_matcher_to_csv(company_name, jd_text, 0, "Rejected", reason, source_url or "", vendor_details)
             return {"id": record_id, "error": reason, "can_apply": False, "hard_reject": True, "company_name": company_name}
 
         # Rule 2: Check visa eligibility (HARD REJECT if excludes GC)
         gc_reason = _check_visa_eligibility(jd_text)
         if gc_reason:
-            record_id = save_job_matcher_record(company_name, jd_text, 0, False, gc_reason, source_url)
-            append_job_matcher_to_csv(company_name, jd_text, 0, "Rejected", gc_reason, source_url or "")
+            record_id = save_job_matcher_record(company_name, jd_text, 0, False, gc_reason, source_url, **vendor_details)
+            append_job_matcher_to_csv(company_name, jd_text, 0, "Rejected", gc_reason, source_url or "", vendor_details)
             return {"id": record_id, "error": gc_reason, "can_apply": False, "hard_reject": True, "company_name": company_name}
 
         # Rule 3: Check foreign language requirement (HARD REJECT)
         lang_reason = _check_foreign_language(jd_text)
         if lang_reason:
             reason = f"Rejected: {lang_reason}"
-            record_id = save_job_matcher_record(company_name, jd_text, 0, False, reason, source_url)
-            append_job_matcher_to_csv(company_name, jd_text, 0, "Rejected", reason, source_url or "")
+            record_id = save_job_matcher_record(company_name, jd_text, 0, False, reason, source_url, **vendor_details)
+            append_job_matcher_to_csv(company_name, jd_text, 0, "Rejected", reason, source_url or "", vendor_details)
             return {"id": record_id, "error": reason, "can_apply": False, "hard_reject": True, "company_name": company_name}
 
         # Rule 4: Check employment type (HARD REJECT for W2 only)
         employment_type, emp_warning = _check_employment_type(jd_text)
         if emp_warning:
             reason = f"Rejected: {emp_warning}"
-            record_id = save_job_matcher_record(company_name, jd_text, 0, False, reason, source_url)
-            append_job_matcher_to_csv(company_name, jd_text, 0, "Rejected", reason, source_url or "")
+            record_id = save_job_matcher_record(company_name, jd_text, 0, False, reason, source_url, **vendor_details)
+            append_job_matcher_to_csv(company_name, jd_text, 0, "Rejected", reason, source_url or "", vendor_details)
             return {"id": record_id, "error": reason, "can_apply": False, "hard_reject": True, "company_name": company_name}
 
         # Extract experience
@@ -3120,8 +3211,8 @@ async def analyze_job(request: Request, jd_text: str = Form(...), source_url: Op
             "sub_categories": metadata.get("sub_categories", []),
             "extracted_keywords": extracted_keywords,
         })
-        record_id = save_job_matcher_record(company_name, jd_text, match_score, True, None, source_url, scan_data)
-        append_job_matcher_to_csv(company_name, jd_text, match_score, "Matched", "", source_url or "")
+        record_id = save_job_matcher_record(company_name, jd_text, match_score, True, None, source_url, scan_data, **vendor_details)
+        append_job_matcher_to_csv(company_name, jd_text, match_score, "Matched", "", source_url or "", vendor_details)
 
         return {
             "id": record_id,

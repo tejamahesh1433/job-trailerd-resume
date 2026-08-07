@@ -1324,6 +1324,11 @@ body {
   color: var(--cream);
 }
 
+.vendor-col {
+  font-size: 0.82rem;
+  color: var(--cream-dim);
+}
+
 .source-tag {
   font-family: var(--font-mono);
   font-size: 0.5rem;
@@ -2286,6 +2291,51 @@ body {
 .jd-preview-text::-webkit-scrollbar { width: 3px; }
 .jd-preview-text::-webkit-scrollbar-track { background: var(--surface); }
 .jd-preview-text::-webkit-scrollbar-thumb { background: var(--faint); border-radius: 2px; }
+
+.vendor-edit-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr) auto;
+  gap: 0.6rem;
+  align-items: center;
+  margin-bottom: 1.1rem;
+}
+
+.vendor-edit-grid input {
+  background: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 1px;
+  padding: 0.45rem 0.65rem;
+  color: var(--cream);
+  font-family: var(--font-body);
+  font-size: 0.8rem;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.vendor-edit-grid input:focus {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 3px var(--gold-dim);
+}
+
+.vendor-edit-grid input::placeholder { color: var(--faint); }
+
+.vendor-save-btn {
+  background: transparent;
+  border: 1px solid var(--gold);
+  color: var(--gold);
+  border-radius: 1px;
+  padding: 0.45rem 0.9rem;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+  white-space: nowrap;
+}
+
+.vendor-save-btn:hover:not(:disabled) { background: var(--gold); color: var(--ink); }
+.vendor-save-btn:disabled { opacity: 0.6; cursor: default; }
 
 /* ── History pagination ─────────────────────────────── */
 .history-pagination {
