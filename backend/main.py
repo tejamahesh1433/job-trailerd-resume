@@ -4,12 +4,13 @@ from duckduckgo_search import DDGS
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 import asyncio
 import uvicorn
 import os
 import re
+import io
 import difflib
 import csv
 import shutil
@@ -258,6 +259,27 @@ Scraped text (first 8000 chars):
 def _extract_company_name(jd_text: str) -> str:
     """Best-effort local extraction of company name — no API call.
     Searches the ENTIRE JD text including signatures at the bottom."""
+
+    # Priority 0: many JDs are submitted by a vendor/staffing agency but explicitly name
+    # the actual end-client ("Client: Acme Corp", "our client, Acme Corp,", "requirement
+    # is for our client Acme"). That's who the resume is really being tailored for, so it
+    # must win even when the vendor's own name appears earlier in the text — the generic
+    # "Company/Employer/..." pattern below just takes the first keyword match by position,
+    # which would otherwise return the vendor's letterhead name instead of the client's.
+    client_patterns = [
+        r'(?:end[\s-]?client|client\s*name)[:\s]+([^\n]{2,60})',
+        r'(?:our|the)\s+client[,:]?\s+(?:is\s+)?([A-Z][A-Za-z0-9\s&.,\-]{2,60}?)(?:\s*[,.\n]|\s+is\b|\s+has\b|\s+requires\b|\s+located\b)',
+        r'(?:on\s+behalf\s+of|behalf\s+of)\s+(?:our\s+|the\s+)?client[,:]?\s+([A-Z][A-Za-z0-9\s&.,\-]{2,60}?)(?:\s*[,.\n]|\s+is\b)',
+        r'client\s+is\s+([A-Z][A-Za-z0-9\s&.,\-]{2,60}?)(?:\s*[,.\n]|\s+and\b|\s+located\b)',
+        r'requirement\s+(?:is\s+)?(?:for|from)\s+(?:our\s+)?client[,:]?\s+([A-Z][A-Za-z0-9\s&.,\-]{2,60}?)(?:\s*[,.\n])',
+        r'\bclient[:\s]+([^\n]{2,60})',
+    ]
+    for pattern in client_patterns:
+        m = re.search(pattern, jd_text, re.IGNORECASE)
+        if m:
+            name = m.group(1).strip().strip('.,')
+            if _is_valid_company_name(name):
+                return name
 
     # Priority 1: Look for explicit company name lines (often near signatures)
     company_patterns = [
@@ -1771,7 +1793,7 @@ async def batch_scan(request: Request, body: BatchScanRequest):
 async def get_history(request: Request, limit: int = 50, offset: int = 0):
     try:
         # Validate input parameters
-        limit = min(max(limit, 1), 200)  # Clamp between 1 and 200
+        limit = min(max(limit, 1), 1000)  # Clamp between 1 and 1000
         offset = max(offset, 0)
         records = get_all_resumes(limit, offset)
         for r in records:
@@ -1972,6 +1994,49 @@ class VendorUpdate(BaseModel):
     vendor_contact_name: str = ""
     vendor_contact_email: str = ""
     vendor_contact_phone: str = ""
+
+@app.post("/api/history/{record_id}/vendor/research")
+@limiter.limit("15/minute")
+async def research_vendor_details(request: Request, record_id: int):
+    """Re-reads the record's own JD text to fill in vendor/recruiter details — a regex
+    baseline (contact email domain) overlaid with an AI pass for anything regex can't
+    reliably get (contact name/phone, a vendor company name not in the email domain).
+    Returns the researched fields WITHOUT saving; the History page fills the edit form
+    so the user can review/adjust before clicking Save Vendor."""
+    try:
+        if record_id <= 0:
+            raise HTTPException(status_code=400, detail="Invalid record ID")
+        record = get_resume_by_id(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+        jd_text = record.get('jd_text') or ''
+        if len(jd_text) < 20:
+            raise HTTPException(status_code=400, detail="No job description text available to research")
+
+        jd_emails = re.findall(r'[\w.+-]+@[\w-]+\.[\w.-]+', jd_text)
+        vendor_email = next((e for e in jd_emails if e.split('@')[1].split('.')[0].lower() not in _GENERIC_EMAIL), '')
+        result = _derive_vendor_details(jd_text, vendor_email)
+
+        try:
+            from services.ai_service import extract_vendor_contact_from_jd
+            ai_result = extract_vendor_contact_from_jd(jd_text)
+            if ai_result.get('vendor_company_name'):
+                result['vendor_company_name'] = ai_result['vendor_company_name'].strip()
+            if ai_result.get('contact_name'):
+                result['vendor_contact_name'] = ai_result['contact_name'].strip()
+            if ai_result.get('contact_email'):
+                result['vendor_contact_email'] = ai_result['contact_email'].strip()
+            if ai_result.get('contact_phone'):
+                result['vendor_contact_phone'] = ai_result['contact_phone'].strip()
+        except Exception as e:
+            logger.warning(f"AI vendor research failed for record {record_id}, using regex baseline only: {e}")
+
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Vendor research error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to research vendor details")
 
 @app.patch("/api/history/{record_id}/vendor")
 @limiter.limit("30/minute")
@@ -2361,11 +2426,69 @@ async def get_record_content(request: Request, record_id: int):
 @limiter.limit("10/minute")
 async def download_history_csv(request: Request):
     try:
-        csv_file = os.path.join(DATA_DIR, "history.csv")
-        if not os.path.exists(csv_file):
-            raise HTTPException(status_code=404, detail="No history CSV found yet.")
-        logger.info("History CSV downloaded")
-        return FileResponse(csv_file, filename="resume_history.csv", media_type="text/csv")
+        records = get_all_resumes(limit=100000, offset=0)
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(_csv_header())
+
+        for r in records:
+            scan_result = r.get("scan_result") or {}
+            before_score = r.get("score")
+            after_score = scan_result.get("after_score")
+            match_pct = r.get("match_percentage") or scan_result.get("match_percentage") or ""
+            status = r.get("status") or ""
+            rejection_reason = r.get("rejection_reason") or ""
+
+            record_dir = os.path.dirname(r.get("file_path") or "")
+            tailored_resume = r.get("file_path") or ""
+            cover_letter = ""
+            mail_draft = ""
+            jd_info = ""
+            if record_dir and os.path.isdir(record_dir):
+                for f in os.listdir(record_dir):
+                    fl = f.lower()
+                    if fl.startswith("cover_letter") or fl.startswith("cover letter"):
+                        cover_letter = os.path.join(record_dir, f)
+                    elif fl.startswith("mail_draft") or fl.startswith("mail draft"):
+                        mail_draft = os.path.join(record_dir, f)
+                    elif fl.startswith("jd_info") or fl.startswith("jd info") or fl == "jd.txt":
+                        jd_info = os.path.join(record_dir, f)
+
+            writer.writerow([
+                sanitize_csv_field(r.get("created_at") or ""),
+                sanitize_csv_field(r.get("company_name") or ""),
+                sanitize_csv_field(r.get("vendor_company_name") or ""),
+                sanitize_csv_field(r.get("vendor_contact_name") or ""),
+                sanitize_csv_field(r.get("vendor_contact_email") or ""),
+                sanitize_csv_field(r.get("vendor_contact_phone") or ""),
+                sanitize_csv_field(before_score if before_score is not None else ""),
+                sanitize_csv_field(after_score if after_score is not None else ""),
+                sanitize_csv_field(status),
+                sanitize_csv_field(rejection_reason),
+                sanitize_csv_field("N/A"),
+                sanitize_csv_field(tailored_resume),
+                sanitize_csv_field(jd_info),
+                sanitize_csv_field(cover_letter),
+                sanitize_csv_field(mail_draft),
+                sanitize_csv_field(r.get("jd_text") or ""),
+                sanitize_csv_field(r.get("source") or ""),
+                sanitize_csv_field(r.get("source_url") or ""),
+                sanitize_csv_field(match_pct),
+                sanitize_csv_field(rejection_reason),
+            ])
+
+        output.seek(0)
+        logger.info(f"History CSV downloaded ({len(records)} records, live from DB)")
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": "attachment; filename=resume_history.csv",
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+            },
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -3269,57 +3392,106 @@ async def apply_to_job(request: Request, jd_text: str = Form(...), resume: Optio
 
 # ─── Telegram Integration ───
 
-def _telegram_process_jd(jd_text: str, chat_id: int):
-    """Background task: process a JD received via Telegram and reply with the result."""
-    from services.telegram_service import send_message_sync
+_telegram_pending_overrides: dict[int, str] = {}
+_TELEGRAM_URL_ONLY_RE = re.compile(r'^\s*(https?://\S+)\s*$')
+
+
+def _telegram_process_jd(jd_text: str, chat_id: int, bypass_checks: bool = False):
+    """Background task: process a JD received via Telegram and reply with the result.
+    Sends one status message and edits it through stages instead of spamming the chat,
+    so the user sees live progress rather than a long silence followed by one reply.
+    bypass_checks=True skips the hard-reject filters — used by the 'Process Anyway'
+    button after a user overrides a skip."""
+    from services.telegram_service import send_message_sync, edit_message_text_sync, get_settings, get_selected_resume
+
+    status = send_message_sync(chat_id, "Working on it...")
+    status_id = status.get("message_id") if status else None
+
+    def update_status(text, reply_markup=None):
+        if status_id:
+            edit_message_text_sync(chat_id, status_id, text, reply_markup=reply_markup)
+        else:
+            send_message_sync(chat_id, text, reply_markup=reply_markup)
+
+    def offer_override(reason: str):
+        """Hard-reject filters are heuristics and occasionally wrong — let the user force
+        the JD through instead of having to re-paste it from scratch."""
+        _telegram_pending_overrides[chat_id] = jd_text
+        buttons = {"inline_keyboard": [[{"text": "Process Anyway", "callback_data": f"process_anyway:{chat_id}"}]]}
+        update_status(f"Skipped — {reason}\n\nProcess it anyway?", reply_markup=buttons)
 
     try:
-        resumes = []
-        if os.path.exists("original"):
-            for f in os.listdir("original"):
-                if f.endswith(".docx"):
-                    path = os.path.join("original", f)
-                    resumes.append((path, os.path.getmtime(path)))
-        if not resumes:
-            send_message_sync(chat_id, "No resume found. Please upload a resume via the web dashboard first.")
-            return
+        url_match = _TELEGRAM_URL_ONLY_RE.match(jd_text)
+        if url_match:
+            update_status("Fetching job posting from URL...")
+            try:
+                jd_text = _scrape_jd_from_url(url_match.group(1))
+            except Exception as e:
+                update_status(f"Could not fetch that URL: {str(e)[:200]}")
+                return
 
-        resumes.sort(key=lambda x: x[1], reverse=True)
-        resume_path = resumes[0][0]
+        update_status("[1/3] Reading JD...")
+
+        selected = get_selected_resume(chat_id)
+        resume_path = None
+        if selected and os.path.exists(os.path.join("original", selected)):
+            resume_path = os.path.join("original", selected)
+        else:
+            resumes = []
+            if os.path.exists("original"):
+                for f in os.listdir("original"):
+                    if f.endswith(".docx"):
+                        path = os.path.join("original", f)
+                        resumes.append((path, os.path.getmtime(path)))
+            if not resumes:
+                update_status("No resume found. Please upload a resume via the web dashboard first.")
+                return
+            resumes.sort(key=lambda x: x[1], reverse=True)
+            resume_path = resumes[0][0]
+
         resume_filename = os.path.basename(resume_path)
 
         with open(resume_path, "rb") as f:
             file_bytes = f.read()
 
         if len(jd_text) < 50:
-            send_message_sync(chat_id, "JD too short (minimum 50 characters). Please send the full job description.")
+            update_status("JD too short (minimum 50 characters). Please send the full job description.")
             return
 
-        years = _extract_experience_years(jd_text)
-        if years > 10:
-            send_message_sync(chat_id, f"Skipped — requires {years}+ years experience (max: 10)")
-            return
+        if not bypass_checks:
+            settings = get_settings()
 
-        gc_reason = _check_visa_eligibility(jd_text)
-        if gc_reason:
-            send_message_sync(chat_id, f"Skipped — {gc_reason}")
-            return
+            years = _extract_experience_years(jd_text)
+            if years > settings["max_years_experience"]:
+                offer_override(f"requires {years}+ years experience (max: {settings['max_years_experience']})")
+                return
 
-        lang_reason = _check_foreign_language(jd_text)
-        if lang_reason:
-            send_message_sync(chat_id, f"Skipped — {lang_reason}")
-            return
+            if settings["hard_reject_visa"]:
+                gc_reason = _check_visa_eligibility(jd_text)
+                if gc_reason:
+                    offer_override(gc_reason)
+                    return
 
-        lead_reason = _check_lead_role(jd_text)
-        if lead_reason:
-            send_message_sync(chat_id, f"Skipped — {lead_reason}")
-            return
+            if settings["hard_reject_language"]:
+                lang_reason = _check_foreign_language(jd_text)
+                if lang_reason:
+                    offer_override(lang_reason)
+                    return
 
+            if settings["hard_reject_lead_role"]:
+                lead_reason = _check_lead_role(jd_text)
+                if lead_reason:
+                    offer_override(lead_reason)
+                    return
+
+        update_status("[2/3] Tailoring resume against JD...")
         result = _process_single_jd(jd_text, file_bytes, resume_path)
 
         if result.get("skipped"):
-            send_message_sync(chat_id, f"Skipped — {result.get('reason', 'Unknown reason')}")
+            update_status(f"Skipped — {result.get('reason', 'Unknown reason')}")
             return
+
+        update_status("[3/3] Finalizing...")
 
         company = result.get("company_name", "Unknown")
         score = result.get("score", 0)
@@ -3349,22 +3521,29 @@ def _telegram_process_jd(jd_text: str, chat_id: int):
         buttons = {
             "inline_keyboard": [
                 [
+                    {"text": "Get Resume (.docx)", "callback_data": f"send_resume:{record_id}"},
+                ],
+                [
                     {"text": "Generate Cover Letter", "callback_data": f"cover_letter:{record_id}"},
                     {"text": "Generate Mail Draft", "callback_data": f"mail_draft:{record_id}"},
                 ],
                 [
                     {"text": "Save Draft to Gmail", "callback_data": f"gmail_draft:{record_id}"},
                 ],
+                [
+                    {"text": "Mark Applied", "callback_data": f"mark_applied:{record_id}"},
+                    {"text": "Reject Job", "callback_data": f"reject_job:{record_id}"},
+                ],
             ]
         }
 
-        send_message_sync(chat_id, "\n".join(lines), reply_markup=buttons)
+        update_status("\n".join(lines), reply_markup=buttons)
         logger.info(f"Telegram JD processed: {company} (score={after_score}%) chat={chat_id}")
 
     except Exception as e:
         logger.error(f"Telegram processing error: {e}", exc_info=True)
         try:
-            send_message_sync(chat_id, f"Processing failed: {str(e)[:300]}")
+            update_status(f"Processing failed: {str(e)[:300]}")
         except Exception:
             logger.error("Failed to send Telegram error reply")
 
@@ -3400,6 +3579,9 @@ def _telegram_generate_cover_letter(record_id: int, chat_id: int):
         msg = f"Cover letter generated for {company}!\n\n{cover_letter[:3500]}"
         buttons = {
             "inline_keyboard": [
+                [
+                    {"text": "Get Cover Letter (.docx)", "callback_data": f"send_cl:{record_id}"},
+                ],
                 [
                     {"text": "Generate Mail Draft", "callback_data": f"mail_draft:{record_id}"},
                     {"text": "Save Draft to Gmail", "callback_data": f"gmail_draft:{record_id}"},
@@ -3479,6 +3661,7 @@ def _telegram_generate_mail_draft(record_id: int, chat_id: int):
         msg = f"Mail draft for {company}:\n\n{to_line}\nSubject: {subject}\n\n{body[:3000]}"
         buttons = {
             "inline_keyboard": [
+                [{"text": "Get Mail Draft (.txt)", "callback_data": f"send_draft:{record_id}"}],
                 [{"text": "Save Draft to Gmail", "callback_data": f"gmail_draft:{record_id}"}],
             ]
         }
@@ -3584,6 +3767,186 @@ def _telegram_save_gmail_draft(record_id: int, chat_id: int):
             pass
 
 
+def _telegram_send_resume(record_id: int, chat_id: int):
+    """Background task: upload the tailored resume file directly into the chat."""
+    from services.telegram_service import send_message_sync, send_document_sync
+    try:
+        record = get_resume_by_id(record_id)
+        if not record:
+            send_message_sync(chat_id, "Record not found.")
+            return
+        file_path = _resolve_resume_path(record) or record.get('file_path')
+        if not file_path or not os.path.exists(file_path):
+            send_message_sync(chat_id, "Resume file not found for this record.")
+            return
+        ok = send_document_sync(chat_id, file_path, caption=f"Tailored resume for {record.get('company_name', 'Unknown')}")
+        if not ok:
+            send_message_sync(chat_id, "Failed to send resume file.")
+    except Exception as e:
+        logger.error(f"Telegram send resume error: {e}", exc_info=True)
+        try:
+            send_message_sync(chat_id, f"Failed to send resume: {str(e)[:300]}")
+        except Exception:
+            pass
+
+
+def _telegram_send_company_file(record_id: int, chat_id: int, name_filter, missing_msg: str, caption_prefix: str):
+    """Shared lookup: find a file in the record's company_dir matching name_filter and upload it —
+    used for both cover letters and mail drafts, which are looked up by filename pattern rather
+    than a stored path since neither is tracked as its own DB column."""
+    from services.telegram_service import send_message_sync, send_document_sync
+    try:
+        record = get_resume_by_id(record_id)
+        if not record:
+            send_message_sync(chat_id, "Record not found.")
+            return
+        file_path = _resolve_resume_path(record) or record.get('file_path')
+        if not file_path:
+            send_message_sync(chat_id, "No file path for this record.")
+            return
+        company_dir = os.path.dirname(file_path)
+        found = None
+        if os.path.isdir(company_dir):
+            for filename in os.listdir(company_dir):
+                if name_filter(filename):
+                    found = os.path.join(company_dir, filename)
+                    break
+        if not found:
+            send_message_sync(chat_id, missing_msg)
+            return
+        ok = send_document_sync(chat_id, found, caption=f"{caption_prefix} for {record.get('company_name', 'Unknown')}")
+        if not ok:
+            send_message_sync(chat_id, "Failed to send file.")
+    except Exception as e:
+        logger.error(f"Telegram send file error: {e}", exc_info=True)
+        try:
+            send_message_sync(chat_id, f"Failed to send file: {str(e)[:300]}")
+        except Exception:
+            pass
+
+
+def _telegram_send_cover_letter_file(record_id: int, chat_id: int):
+    _telegram_send_company_file(
+        record_id, chat_id,
+        lambda f: ("cover" in f.lower() or f.startswith("cover_letter_")) and f.endswith(".docx"),
+        "No cover letter found — generate one first.",
+        "Cover letter",
+    )
+
+
+def _telegram_send_mail_draft_file(record_id: int, chat_id: int):
+    _telegram_send_company_file(
+        record_id, chat_id,
+        lambda f: f.startswith("mail_draft_") and f.endswith(".txt"),
+        "No mail draft found — generate one first.",
+        "Mail draft",
+    )
+
+
+def _telegram_mark_applied(record_id: int, chat_id: int):
+    """Background task: set a record's status to Applied from an inline button."""
+    from services.telegram_service import send_message_sync
+    try:
+        record = get_resume_by_id(record_id)
+        if not record:
+            send_message_sync(chat_id, "Record not found.")
+            return
+        update_resume_status(record_id, "Applied")
+        send_message_sync(chat_id, f"Marked '{record.get('company_name', 'Unknown')}' as Applied.")
+    except Exception as e:
+        logger.error(f"Telegram mark applied error: {e}", exc_info=True)
+        try:
+            send_message_sync(chat_id, f"Failed to update status: {str(e)[:300]}")
+        except Exception:
+            pass
+
+
+def _telegram_reject_job(record_id: int, chat_id: int):
+    """Background task: set a record's status to Rejected from an inline button."""
+    from services.telegram_service import send_message_sync
+    try:
+        record = get_resume_by_id(record_id)
+        if not record:
+            send_message_sync(chat_id, "Record not found.")
+            return
+        update_resume_status(record_id, "Rejected", rejection_reason="Rejected via Telegram")
+        send_message_sync(chat_id, f"Marked '{record.get('company_name', 'Unknown')}' as Rejected.")
+    except Exception as e:
+        logger.error(f"Telegram reject job error: {e}", exc_info=True)
+        try:
+            send_message_sync(chat_id, f"Failed to update status: {str(e)[:300]}")
+        except Exception:
+            pass
+
+
+def _telegram_record_followup(record_id: int, chat_id: int):
+    """Background task: re-stamp status_updated_at so the record drops off the
+    follow-ups-due list until it goes stale again — reuses update_resume_status
+    with the record's current status rather than introducing a separate 'touch' column."""
+    from services.telegram_service import send_message_sync
+    try:
+        record = get_resume_by_id(record_id)
+        if not record:
+            send_message_sync(chat_id, "Record not found.")
+            return
+        update_resume_status(record_id, record.get('status') or 'Applied')
+        send_message_sync(chat_id, f"Follow-up recorded for '{record.get('company_name', 'Unknown')}' — timer reset.")
+    except Exception as e:
+        logger.error(f"Telegram record followup error: {e}", exc_info=True)
+        try:
+            send_message_sync(chat_id, f"Failed to record follow-up: {str(e)[:300]}")
+        except Exception:
+            pass
+
+
+def _telegram_settings_text_and_buttons():
+    from services.telegram_service import get_settings
+    s = get_settings()
+    text = (
+        "Bot Settings:\n\n"
+        f"Max years experience allowed: {s['max_years_experience']}\n"
+        f"Hard-reject GC/Visa-required JDs: {'ON' if s['hard_reject_visa'] else 'OFF'}\n"
+        f"Hard-reject foreign-language-required JDs: {'ON' if s['hard_reject_language'] else 'OFF'}\n"
+        f"Hard-reject Lead/Manager roles: {'ON' if s['hard_reject_lead_role'] else 'OFF'}\n"
+    )
+    buttons = {
+        "inline_keyboard": [
+            [
+                {"text": "Years -5", "callback_data": "settings_years:-5"},
+                {"text": "Years -1", "callback_data": "settings_years:-1"},
+                {"text": "Years +1", "callback_data": "settings_years:+1"},
+                {"text": "Years +5", "callback_data": "settings_years:+5"},
+            ],
+            [{"text": f"Visa/GC reject: {'ON' if s['hard_reject_visa'] else 'OFF'} (tap to toggle)", "callback_data": "settings_toggle:visa"}],
+            [{"text": f"Language reject: {'ON' if s['hard_reject_language'] else 'OFF'} (tap to toggle)", "callback_data": "settings_toggle:language"}],
+            [{"text": f"Lead-role reject: {'ON' if s['hard_reject_lead_role'] else 'OFF'} (tap to toggle)", "callback_data": "settings_toggle:lead"}],
+        ]
+    }
+    return text, buttons
+
+
+def _telegram_resumes_text_and_buttons(chat_id: int):
+    from services.telegram_service import get_selected_resume
+    resumes = []
+    if os.path.exists("original"):
+        for f in os.listdir("original"):
+            if f.endswith(".docx"):
+                resumes.append((f, os.path.getmtime(os.path.join("original", f))))
+    if not resumes:
+        return "No resumes uploaded yet. Upload one via the web dashboard first.", None
+
+    selected = get_selected_resume(chat_id)
+    most_recent = max(resumes, key=lambda r: r[1])[0]
+    resumes.sort(key=lambda r: r[0])
+    lines = ["Available resumes:"]
+    rows = []
+    for f, _mtime in resumes:
+        active = f == selected if selected else f == most_recent
+        lines.append(f"- {f}" + (" (active)" if active else ""))
+        rows.append([{"text": f"Use: {f}", "callback_data": f"use_resume:{f}"}])
+    return "\n".join(lines), {"inline_keyboard": rows}
+
+
 def _telegram_truncate(text: str, max_len: int = 50) -> str:
     """Some legacy records store the FULL scraped job text in the 'title' field
     (jd_text), not a short title — without this, a single item can turn into a
@@ -3614,6 +3977,21 @@ def _telegram_followups_text() -> str:
         days = item.get('days_since')
         lines.append(f"- {item.get('company', '')} - {_telegram_truncate(item.get('title', ''))}" + (f" ({days}d)" if days is not None else ""))
     return "\n".join(lines)
+
+
+def _telegram_followups_buttons() -> dict | None:
+    """One 'Followed Up' button per due item, so the user can reset the timer straight
+    from the /followups reply instead of switching to the dashboard."""
+    from database import get_action_queue
+    queue = get_action_queue(item_limit=10)
+    items = queue.get('follow_ups_due', {}).get('items', [])
+    if not items:
+        return None
+    rows = [
+        [{"text": f"Followed Up: {_telegram_truncate(item.get('company', ''), 30)}", "callback_data": f"record_followup:{item.get('id')}"}]
+        for item in items if item.get('id')
+    ]
+    return {"inline_keyboard": rows} if rows else None
 
 
 def _telegram_queue_text() -> str:
@@ -3657,7 +4035,7 @@ async def _telegram_flush_buffer(chat_id: int):
 
     loop = asyncio.get_event_loop()
     if len(jds) == 1:
-        await telegram_service.send_message(chat_id, "Processing your JD... You'll get a reply shortly.")
+        await telegram_service.send_chat_action(chat_id, "typing")
         loop.run_in_executor(None, _telegram_process_jd, jds[0], chat_id)
     else:
         await telegram_service.send_message(chat_id, f"Found {len(jds)} JDs (separated by ---). Processing each one...")
@@ -3703,10 +4081,48 @@ async def _telegram_poll_loop():
                     cb_id = callback.get("id")
                     cb_data = callback.get("data", "")
                     cb_chat_id = callback.get("message", {}).get("chat", {}).get("id")
+                    cb_message_id = callback.get("message", {}).get("message_id")
                     if cb_chat_id and ":" in cb_data:
-                        action, rec_id_str = cb_data.split(":", 1)
+                        action, payload_str = cb_data.split(":", 1)
+
+                        if action == "process_anyway":
+                            loop = asyncio.get_event_loop()
+                            pending = _telegram_pending_overrides.pop(cb_chat_id, None)
+                            if not pending:
+                                await telegram_service.answer_callback_query(cb_id, "Nothing pending to process.")
+                            else:
+                                await telegram_service.answer_callback_query(cb_id, "Processing anyway...")
+                                await telegram_service.send_chat_action(cb_chat_id, "typing")
+                                loop.run_in_executor(None, _telegram_process_jd, pending, cb_chat_id, True)
+                            continue
+
+                        if action == "use_resume":
+                            telegram_service.set_selected_resume(cb_chat_id, payload_str)
+                            await telegram_service.answer_callback_query(cb_id, f"Now using: {payload_str}")
+                            if cb_message_id:
+                                await telegram_service.edit_message_text(cb_chat_id, cb_message_id, f"Active resume set to: {payload_str}")
+                            continue
+
+                        if action in ("settings_toggle", "settings_years"):
+                            settings = telegram_service.get_settings()
+                            if action == "settings_toggle":
+                                key = {"visa": "hard_reject_visa", "language": "hard_reject_language", "lead": "hard_reject_lead_role"}.get(payload_str)
+                                if key:
+                                    settings[key] = not settings[key]
+                            else:
+                                try:
+                                    settings["max_years_experience"] = max(0, settings["max_years_experience"] + int(payload_str))
+                                except ValueError:
+                                    pass
+                            telegram_service.save_settings(settings)
+                            await telegram_service.answer_callback_query(cb_id)
+                            if cb_message_id:
+                                text, buttons = _telegram_settings_text_and_buttons()
+                                await telegram_service.edit_message_text(cb_chat_id, cb_message_id, text, reply_markup=buttons)
+                            continue
+
                         try:
-                            rec_id = int(rec_id_str)
+                            rec_id = int(payload_str)
                         except ValueError:
                             await telegram_service.answer_callback_query(cb_id, "Invalid record.")
                             continue
@@ -3714,16 +4130,37 @@ async def _telegram_poll_loop():
                         loop = asyncio.get_event_loop()
                         if action == "cover_letter":
                             await telegram_service.answer_callback_query(cb_id, "Generating cover letter...")
-                            await telegram_service.send_message(cb_chat_id, "Generating cover letter... please wait.")
+                            await telegram_service.send_chat_action(cb_chat_id, "typing")
                             loop.run_in_executor(None, _telegram_generate_cover_letter, rec_id, cb_chat_id)
                         elif action == "mail_draft":
                             await telegram_service.answer_callback_query(cb_id, "Generating mail draft...")
-                            await telegram_service.send_message(cb_chat_id, "Generating mail draft... please wait.")
+                            await telegram_service.send_chat_action(cb_chat_id, "typing")
                             loop.run_in_executor(None, _telegram_generate_mail_draft, rec_id, cb_chat_id)
                         elif action == "gmail_draft":
                             await telegram_service.answer_callback_query(cb_id, "Saving draft to Gmail...")
-                            await telegram_service.send_message(cb_chat_id, "Generating mail and saving to Gmail drafts... please wait.")
+                            await telegram_service.send_chat_action(cb_chat_id, "typing")
                             loop.run_in_executor(None, _telegram_save_gmail_draft, rec_id, cb_chat_id)
+                        elif action == "send_resume":
+                            await telegram_service.answer_callback_query(cb_id, "Sending resume...")
+                            await telegram_service.send_chat_action(cb_chat_id, "upload_document")
+                            loop.run_in_executor(None, _telegram_send_resume, rec_id, cb_chat_id)
+                        elif action == "send_cl":
+                            await telegram_service.answer_callback_query(cb_id, "Sending cover letter...")
+                            await telegram_service.send_chat_action(cb_chat_id, "upload_document")
+                            loop.run_in_executor(None, _telegram_send_cover_letter_file, rec_id, cb_chat_id)
+                        elif action == "send_draft":
+                            await telegram_service.answer_callback_query(cb_id, "Sending mail draft...")
+                            await telegram_service.send_chat_action(cb_chat_id, "upload_document")
+                            loop.run_in_executor(None, _telegram_send_mail_draft_file, rec_id, cb_chat_id)
+                        elif action == "mark_applied":
+                            await telegram_service.answer_callback_query(cb_id, "Marking as Applied...")
+                            loop.run_in_executor(None, _telegram_mark_applied, rec_id, cb_chat_id)
+                        elif action == "reject_job":
+                            await telegram_service.answer_callback_query(cb_id, "Marking as Rejected...")
+                            loop.run_in_executor(None, _telegram_reject_job, rec_id, cb_chat_id)
+                        elif action == "record_followup":
+                            await telegram_service.answer_callback_query(cb_id, "Follow-up recorded")
+                            loop.run_in_executor(None, _telegram_record_followup, rec_id, cb_chat_id)
                         else:
                             await telegram_service.answer_callback_query(cb_id, "Unknown action.")
                     else:
@@ -3747,15 +4184,25 @@ async def _telegram_poll_loop():
                     continue
 
                 if text.startswith("/followups"):
-                    await telegram_service.send_message(chat_id, _telegram_followups_text())
+                    await telegram_service.send_message(chat_id, _telegram_followups_text(), reply_markup=_telegram_followups_buttons())
                     continue
 
                 if text.startswith("/queue"):
                     await telegram_service.send_message(chat_id, _telegram_queue_text())
                     continue
 
+                if text.startswith("/resumes"):
+                    r_text, r_buttons = _telegram_resumes_text_and_buttons(chat_id)
+                    await telegram_service.send_message(chat_id, r_text, reply_markup=r_buttons)
+                    continue
+
+                if text.startswith("/settings"):
+                    s_text, s_buttons = _telegram_settings_text_and_buttons()
+                    await telegram_service.send_message(chat_id, s_text, reply_markup=s_buttons)
+                    continue
+
                 if text.startswith("/start"):
-                    await telegram_service.send_message(chat_id, "Welcome to Job Tailored Resume Bot!\n\nSend me a Job Description and I'll:\n- Analyze it against your resume\n- Tailor your resume automatically\n- Save everything to your dashboard\n\nJust paste a JD and hit send.\n\nCommand Center:\n- /matches - recent auto-search matches\n- /followups - applications due for a follow-up\n- /queue - Action Queue summary\nYou'll also get pushed here automatically when new matches or action items show up.\n\nTips:\n- Long JDs split across messages are auto-combined\n- Use --- between JDs to send multiple at once\n- Use /scan to start a new JD (flushes any pending text)")
+                    await telegram_service.send_message(chat_id, "Welcome to Job Tailored Resume Bot!\n\nSend me a Job Description (or paste a job posting URL) and I'll:\n- Analyze it against your resume\n- Tailor your resume automatically\n- Save everything to your dashboard\n\nJust paste a JD/URL and hit send.\n\nCommand Center:\n- /matches - recent auto-search matches\n- /followups - applications due for a follow-up\n- /queue - Action Queue summary\n- /resumes - pick which resume to use\n- /settings - adjust hard-reject filters\nYou'll also get pushed here automatically when new matches or action items show up.\n\nTips:\n- Long JDs split across messages are auto-combined\n- Use --- between JDs to send multiple at once\n- Paste a job posting URL directly and I'll fetch and read it\n- If a JD gets hard-rejected, you'll get a 'Process Anyway' button to override it\n- Use /scan to start a new JD (flushes any pending text)")
                     continue
 
                 if text.startswith("/status"):
@@ -3771,7 +4218,7 @@ async def _telegram_poll_loop():
                     if buffered:
                         combined = "\n".join(buffered)
                         logger.info(f"Telegram /scan flushed previous buffer for chat {chat_id}: {len(combined)} chars")
-                        await telegram_service.send_message(chat_id, "Processing previous JD before starting new one...")
+                        await telegram_service.send_chat_action(chat_id, "typing")
                         loop = asyncio.get_event_loop()
                         loop.run_in_executor(None, _telegram_process_jd, combined, chat_id)
                     jd_after_command = text[len("/scan"):].strip()
@@ -3783,7 +4230,7 @@ async def _telegram_poll_loop():
                     continue
 
                 if text.startswith("/"):
-                    await telegram_service.send_message(chat_id, "Commands:\n/start - Welcome message\n/status - Check bot status\n/scan - Start a new JD (flushes pending text)\n/matches - Recent Command Center matches\n/followups - Applications due for a follow-up\n/queue - Action Queue summary\n\nOr just send a Job Description to process it.\nUse --- between JDs to send multiple at once.")
+                    await telegram_service.send_message(chat_id, "Commands:\n/start - Welcome message\n/status - Check bot status\n/scan - Start a new JD (flushes pending text)\n/matches - Recent Command Center matches\n/followups - Applications due for a follow-up\n/queue - Action Queue summary\n/resumes - Pick which resume to use\n/settings - Adjust hard-reject filters\n\nOr just send a Job Description (or a URL) to process it.\nUse --- between JDs to send multiple at once.")
                     continue
 
                 logger.info(f"Telegram message from chat {chat_id}: {len(text)} chars")

@@ -6,6 +6,7 @@ import CommandCenter from './CommandCenter';
 import JobMatches from './JobMatches';
 import InboxPage from './InboxPage';
 import NotesPage from './NotesPage';
+import HistoryPage from './HistoryPage';
 
 function ScoreRing({ score, label, accent }) {
   const [display, setDisplay] = useState(0);
@@ -1115,6 +1116,14 @@ export default function App() {
             Notes
           </button>
         </li>
+        <li>
+          <button
+            style={activePage === 'history' ? sidebarStyles.navItemActive : sidebarStyles.navItem}
+            onClick={() => setCurrentPage('history')}
+          >
+            History
+          </button>
+        </li>
       </ul>
     </nav>
   );
@@ -1182,6 +1191,20 @@ export default function App() {
           <NotesPage
             history={history}
             gmailConnected={gmailConnected}
+            onStatusChange={handleStatusChange}
+            onRefreshHistory={fetchHistory}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  if (currentPage === 'history') {
+    return (
+      <div style={{ display: 'flex', minHeight: '100vh' }}>
+        {sidebarNav('history')}
+        <div style={{ flex: 1, overflow: 'auto' }}>
+          <HistoryPage
             onStatusChange={handleStatusChange}
             onRefreshHistory={fetchHistory}
           />

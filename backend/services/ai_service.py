@@ -114,6 +114,48 @@ def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "") -> dict:
             raise RuntimeError(f"API Error: {str(e)}")
     raise RuntimeError(f"All models unavailable: {str(last_error)}")
 
+def extract_vendor_contact_from_jd(jd_text: str) -> dict:
+    """Lightweight JD-only AI pass for the History page's 'Verify Vendor Details' action —
+    pulls the VENDOR/staffing-agency/recruiter contact (not the end-client the role is for),
+    which the regex baseline in main.py's _derive_vendor_details can miss (e.g. a contact
+    name/phone in a signature block, or a vendor company name not present in the email
+    domain). No resume needed, unlike analyze_resume's full scan-and-tailor call."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY not set")
+    client = genai.Client(api_key=api_key)
+
+    prompt = f"""Read this job description/posting and extract the VENDOR / STAFFING AGENCY / RECRUITER contact
+details for whoever submitted or is administering this requirement — NOT the end-client company the role is
+actually for.
+
+Job Description:
+{jd_text[:8000]}
+
+Look for:
+- A recruiter/vendor contact's name, email, and phone in a signature block, header, or body of the JD.
+- The vendor/staffing company's own name — often visible in an email domain (e.g. recruiter@net2source.com implies
+  "Net2Source"), or near words like "submitted by", "vendor", "staffing", "agency".
+- If the JD appears to be posted directly by the end-client with no separate vendor/agency involved, return an
+  empty string for vendor_company_name but still return any contact name/email/phone actually present.
+- Never invent a value that isn't literally present in the text — return an empty string instead.
+
+Return ONLY valid JSON (no markdown, no code blocks):
+{{"vendor_company_name": "<string or empty>", "contact_name": "<string or empty>", "contact_email": "<string or empty>", "contact_phone": "<string or empty>"}}
+"""
+    response = client.models.generate_content(
+        model=GEMINI_FAST_MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1),
+    )
+    usage = response.usage_metadata
+    if usage:
+        log_api_call(GEMINI_FAST_MODEL, "vendor_research",
+                     input_tokens=usage.prompt_token_count or 0,
+                     output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
+    return json.loads(response.text)
+
+
 def generate_additional_points(resume_text: str, jd_text: str, points_text: str, target_hint: str = "") -> dict:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
