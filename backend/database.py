@@ -1,16 +1,57 @@
 import sqlite3
 from datetime import datetime, timedelta
 import os
+import re
 
 DATA_DIR = os.getenv("DATA_DIR", "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_FILE = os.path.join(DATA_DIR, "resumes.db")
+
+MIGRATIONS_DIR = os.path.join(os.path.dirname(__file__), "migrations")
 
 def sanitize_csv_field(field: str) -> str:
     """Prevent CSV injection attacks by prefixing dangerous characters with single quote."""
     if isinstance(field, str) and field and field[0] in '=+-@':
         return "'" + field  # Prefix with single quote to prevent formula execution
     return field
+
+def _pending_migrations(current_version: int):
+    """Numbered .sql files in MIGRATIONS_DIR (e.g. 0001_add_status.sql) newer than
+    current_version, sorted in order. The leading number is each migration's version."""
+    if not os.path.isdir(MIGRATIONS_DIR):
+        return []
+    files = []
+    for name in os.listdir(MIGRATIONS_DIR):
+        m = re.match(r'^(\d+)_.*\.sql$', name)
+        if m and int(m.group(1)) > current_version:
+            files.append((int(m.group(1)), name))
+    return sorted(files)
+
+def _run_migrations(conn):
+    """Applies pending numbered SQL migrations from MIGRATIONS_DIR and records
+    progress in schema_version, so each file runs at most once per database.
+    Existing databases that already have these columns (added by the old ad-hoc
+    ALTER-TABLE loop before this system existed) are handled gracefully: a
+    'duplicate column' error just means that migration's effect is already in
+    place, so it's recorded as applied rather than re-raised."""
+    c = conn.cursor()
+    c.execute('CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)')
+    c.execute('SELECT version FROM schema_version LIMIT 1')
+    row = c.fetchone()
+    current_version = row[0] if row else 0
+    if row is None:
+        c.execute('INSERT INTO schema_version (version) VALUES (?)', (current_version,))
+
+    for version, filename in _pending_migrations(current_version):
+        with open(os.path.join(MIGRATIONS_DIR, filename), 'r', encoding='utf-8') as f:
+            sql = f.read()
+        try:
+            c.executescript(sql)
+        except sqlite3.OperationalError as e:
+            if 'duplicate column' not in str(e).lower():
+                raise
+        c.execute('UPDATE schema_version SET version = ?', (version,))
+        conn.commit()
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -25,35 +66,8 @@ def init_db():
             created_at TEXT
         )
     ''')
-    migrations = [
-        'ALTER TABLE resumes ADD COLUMN status TEXT DEFAULT "Scanned"',
-        'ALTER TABLE resumes ADD COLUMN status_updated_at TEXT',
-        'ALTER TABLE resumes ADD COLUMN scan_result TEXT',
-        'ALTER TABLE resumes ADD COLUMN employment_type TEXT',
-        'ALTER TABLE resumes ADD COLUMN job_category TEXT',
-        'ALTER TABLE resumes ADD COLUMN extracted_keywords TEXT',
-        'ALTER TABLE resumes ADD COLUMN warning_flags TEXT',
-        'ALTER TABLE resumes ADD COLUMN match_percentage INTEGER',
-        'ALTER TABLE resumes ADD COLUMN source_url TEXT',
-        'ALTER TABLE resumes ADD COLUMN rejection_reason TEXT',
-        'ALTER TABLE resumes ADD COLUMN source TEXT DEFAULT "dashboard"',
-        'ALTER TABLE resumes ADD COLUMN user_address TEXT',
-        'ALTER TABLE resumes ADD COLUMN follow_up_draft TEXT',
-        'ALTER TABLE resumes ADD COLUMN user_notes TEXT',
-        'ALTER TABLE resumes ADD COLUMN cover_letter_generated INTEGER DEFAULT 0',
-        'ALTER TABLE resumes ADD COLUMN drafts_json TEXT',
-        'ALTER TABLE resumes ADD COLUMN contact_json TEXT',
-        'ALTER TABLE resumes ADD COLUMN vendor_company_name TEXT',
-        'ALTER TABLE resumes ADD COLUMN vendor_contact_name TEXT',
-        'ALTER TABLE resumes ADD COLUMN vendor_contact_email TEXT',
-        'ALTER TABLE resumes ADD COLUMN vendor_contact_phone TEXT',
-    ]
-    for sql in migrations:
-        try:
-            c.execute(sql)
-        except sqlite3.OperationalError:
-            pass
     conn.commit()
+    _run_migrations(conn)
     conn.close()
 
 def save_resume_record(company_name: str, jd_text: str, score: int, file_path: str, scan_result: str = None,

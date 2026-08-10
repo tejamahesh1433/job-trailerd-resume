@@ -1,10 +1,10 @@
 from bs4 import BeautifulSoup
 import requests
 from duckduckgo_search import DDGS
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 import asyncio
 import uvicorn
@@ -16,6 +16,7 @@ import csv
 import shutil
 import subprocess
 import tempfile
+import threading
 import uuid
 import docx
 import json
@@ -107,6 +108,40 @@ def _is_valid_company_name(name: str) -> bool:
         return False
     return True
 
+def _assert_public_http_url(url: str):
+    """Reject URLs that would make _scrape_jd_from_url fetch a non-public address
+    (localhost, private/link-local ranges, cloud metadata IPs, etc.) — this endpoint
+    takes a user-supplied URL and fetches it server-side, which is an SSRF vector
+    without this check."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("URL must use http or https")
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("URL is missing a hostname")
+
+    try:
+        addrinfo = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        raise ValueError(f"Could not resolve hostname: {hostname}")
+
+    for family, _, _, _, sockaddr in addrinfo:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            raise ValueError(f"URL resolves to a non-public address: {sockaddr[0]}")
+
+
 def _scrape_jd_from_url(url: str) -> str:
     """Fetch a URL and extract the job description using structured data + AI cleanup."""
     import requests
@@ -157,7 +192,26 @@ def _scrape_jd_from_url(url: str) -> str:
         'Accept-Language': 'en-US,en;q=0.9',
     }
     MAX_CONTENT_BYTES = 3 * 1024 * 1024  # 3 MB cap to prevent memory spike
-    resp = requests.get(url, headers=headers, timeout=15, stream=True)
+
+    # Validate the URL itself, then follow redirects manually (up to 5 hops),
+    # re-validating each hop — a redirect to a private/internal address would
+    # otherwise bypass the initial check.
+    _assert_public_http_url(url)
+    current_url = url
+    for _ in range(5):
+        resp = requests.get(current_url, headers=headers, timeout=15, stream=True, allow_redirects=False)
+        if resp.status_code in (301, 302, 303, 307, 308):
+            redirect_url = resp.headers.get("Location")
+            resp.close()
+            if not redirect_url:
+                raise ValueError("Redirect response missing Location header")
+            from urllib.parse import urljoin
+            current_url = urljoin(current_url, redirect_url)
+            _assert_public_http_url(current_url)
+            continue
+        break
+    else:
+        raise ValueError("Too many redirects")
     resp.raise_for_status()
     content_chunks = []
     total = 0
@@ -223,7 +277,6 @@ def _scrape_jd_from_url(url: str) -> str:
 
     # Use AI to clean up the scraped text
     try:
-        from services.ai_service import client as ai_client
         from services.model_config import GEMINI_QUALITY_MODEL
         import google.genai as genai
         from google.genai import types
@@ -1880,8 +1933,6 @@ async def search_history(request: Request, q: str = "", limit: int = 50):
         results = []
         for rec in records:
             jd = rec.get("jd_text") or ""
-            sr = rec.get("scan_result") or {}
-            contact = sr.get("contact_info") or {}
 
             emails_found = set()
             for m in re.finditer(r'[\w.+-]+@[\w-]+\.[\w.-]+', jd):
@@ -3395,8 +3446,28 @@ async def apply_to_job(request: Request, jd_text: str = Form(...), resume: Optio
 _telegram_pending_overrides: dict[int, str] = {}
 _TELEGRAM_URL_ONLY_RE = re.compile(r'^\s*(https?://\S+)\s*$')
 
+# Each JD tailoring run makes several Gemini calls and writes to the shared SQLite
+# db/history.csv — nothing stops two Telegram messages arriving close together from
+# running _telegram_process_jd_impl concurrently on the executor's thread pool
+# otherwise. Cap it to one at a time; extra requests wait their turn instead of
+# racing each other for db writes and API quota.
+_TELEGRAM_TAILOR_SEMAPHORE = threading.Semaphore(1)
+
 
 def _telegram_process_jd(jd_text: str, chat_id: int, bypass_checks: bool = False):
+    """Queueing wrapper around _telegram_process_jd_impl — see _TELEGRAM_TAILOR_SEMAPHORE."""
+    from services.telegram_service import send_message_sync
+
+    if not _TELEGRAM_TAILOR_SEMAPHORE.acquire(blocking=False):
+        send_message_sync(chat_id, "Queued — another tailoring job is running, this will start shortly...")
+        _TELEGRAM_TAILOR_SEMAPHORE.acquire()
+    try:
+        _telegram_process_jd_impl(jd_text, chat_id, bypass_checks)
+    finally:
+        _TELEGRAM_TAILOR_SEMAPHORE.release()
+
+
+def _telegram_process_jd_impl(jd_text: str, chat_id: int, bypass_checks: bool = False):
     """Background task: process a JD received via Telegram and reply with the result.
     Sends one status message and edits it through stages instead of spamming the chat,
     so the user sees live progress rather than a long silence followed by one reply.
@@ -4254,6 +4325,16 @@ async def _telegram_poll_loop():
             await asyncio.sleep(5)
 
 
+# NOTE — single-worker/single-process assumption: the four startup hooks below each
+# spawn a long-running asyncio background loop (Telegram polling, Telegram
+# notifications, the daily search scheduler, and inbox reply matching) inside this
+# FastAPI process, with no cross-process locking. Running this app with more than one
+# worker/replica (e.g. `uvicorn main:app --workers 4`, or multiple container replicas)
+# will start all four loops once per worker, causing duplicate Telegram polls,
+# duplicate scheduled searches, and racing writes to resumes.db. Always run exactly one
+# process of this app (--workers 1 / a single replica). Scaling this out safely would
+# require moving these loops to a dedicated worker process (e.g. Celery/RQ) or adding a
+# distributed lock so only one worker's copy of each loop is ever active.
 @app.on_event("startup")
 async def start_telegram_polling():
     from services import telegram_service
@@ -4914,7 +4995,7 @@ async def find_job_contact_endpoint(request: Request, job_id: int):
     deterministic LinkedIn search links and a plausible email guess as a fallback.
     Every result is labeled with where it came from so nothing looks more verified
     than it is."""
-    from database import get_resume_by_id, save_job_contact, get_job_detail
+    from database import save_job_contact, get_job_detail
     job = get_job_detail(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")

@@ -203,6 +203,10 @@ erDiagram
         integer cover_letter_generated "0|1 flag"
         text drafts_json "Command Center draft artifacts (recruiter_email, follow_up_email, linkedin_message)"
         text contact_json "Command Center contact-discovery result"
+        text vendor_company_name "Staffing agency/vendor name (Client vs Vendor split on Production Log)"
+        text vendor_contact_name "Vendor recruiter/contact name"
+        text vendor_contact_email "Vendor recruiter/contact email"
+        text vendor_contact_phone "Vendor recruiter/contact phone"
     }
 ```
 
@@ -212,6 +216,12 @@ erDiagram
 - **`source`**: `dashboard` (Resume Tailor), `job-finder` (standalone pre-screen), `command-center` (auto-discovered), `manual` (user-added). Determines which status enum and which UI reads the record.
 - **`status`**: Two different valid-value sets depending on `source` — see the ER diagram note above. This is intentional (see `JOB_STATUS_VALUES` comment, `main.py` ~line 3905), not a bug, but don't assume one enum covers both.
 - **`file_path`**: Points into either `trailerd/<company>/` (Dashboard/Job Finder) or `online-platform/<company>_<job_id>/` (Command Center — see `_job_artifact_dir`). Can go stale (see "Resume File Resolution" below) — always prefer `_resolve_resume_path()` over reading this column directly when you need to actually open the file.
+
+## History CSV Export
+
+`GET /api/history/csv` builds the CSV **live from `get_all_resumes()`** on every request — it does not read `data/history.csv` from disk. This matters because `data/history.csv` is a legacy append-only write log (populated once per JD event by `append_to_csv()`/`append_skipped_to_csv()`/`append_job_matcher_to_csv()`, still called for logging purposes) that is never updated again after the initial write; a status change, a vendor-details edit, or a Telegram "Mark Applied" tap all update `resumes.db` but never touch the CSV file. Serving that stale file caused vendor/status/rejection-reason columns to look permanently empty for any record touched after its first scan.
+
+The live-generation endpoint reconstructs every column (`_csv_header()`) from the current DB row on each download — `Status` and `Rejection Reason` both read `resumes.rejection_reason`; `Vendor Company/Contact Name/Email/Phone` read the four `vendor_*` columns directly; file-link columns (Tailored Resume, JD Info, Cover Letter, Mail Draft) are reconstructed by re-scanning `file_path`'s directory the same way `append_to_csv()` does. The response also sets `Cache-Control: no-store` / `Pragma: no-cache` so browsers can't silently serve a previously-cached download instead of hitting the endpoint again.
 
 ## AI Service Pipeline — Three Providers, Three Distinct Jobs
 
@@ -313,6 +323,24 @@ flowchart TD
     style AI fill:#2ebd73,color:#fff
 ```
 
+## Telegram Bot — Interactive Features
+
+### Interactive Hard-Reject Overrides
+
+Every hard-reject check in the Telegram JD handler (`_telegram_process_jd`) that would normally just skip the JD instead calls `offer_override(reason)`, which stashes the JD text in the module-level `_telegram_pending_overrides` dict (keyed by `chat_id`) and edits the status message to add a "Process Anyway" button (`callback_data="process_anyway:<chat_id>"`). Tapping it re-invokes `_telegram_process_jd(pending_jd, chat_id, bypass_checks=True)`, which skips every hard-reject check entirely. This override path is Telegram-only — `/api/scan`, `/api/batch-scan`, and the Command Center auto-search pipeline have no equivalent bypass.
+
+### Multi-Resume Selection
+
+`/resumes` lists every `.docx` in `original/`, marking whichever one is active for that chat with "(active)", and offers a "Use: `<file>`" button per resume. Tapping one calls `set_selected_resume(chat_id, filename)`, which persists `{chat_id: filename}` to `data/telegram_resume_selection.json`. `_telegram_process_jd` checks `get_selected_resume(chat_id)` first; if unset or the file no longer exists, it falls back to the most-recently-modified `.docx` in `original/` (the original single-resume behavior).
+
+### Interactive Settings Panel
+
+`/settings` shows the current values from `get_settings()` (merged over `DEFAULT_SETTINGS` in `telegram_service.py`: `max_years_experience=10`, `hard_reject_visa=True`, `hard_reject_language=True`, `hard_reject_lead_role=True`) with buttons to step the years cap (`±1`/`±5`) or toggle each hard-reject rule. Every button tap calls `save_settings()` to persist to `data/telegram_settings.json`, then edits the settings message in place with the refreshed state. These settings only affect the Telegram JD handler — other call sites (`/api/scan`, `/api/batch-scan`, Command Center auto-search) keep their own hardcoded defaults (e.g. `_check_experience_years(jd_text, max_years=10)`).
+
+### URL Scraping in Chat
+
+If a Telegram message is nothing but a bare URL (matched via `_TELEGRAM_URL_ONLY_RE`), `_telegram_process_jd` calls the existing `_scrape_jd_from_url(url)` (the same scraper `/api/job-matcher/fetch-url` uses) to pull the JD text before running the rest of the pipeline, so users can paste a job-posting link directly instead of copying the description text.
+
 ## Resume File Resolution (`_resolve_resume_path`)
 
 `resumes.file_path` is not always safe to open directly — it can go stale relative to what's actually on disk:
@@ -365,7 +393,10 @@ backend/
 │   └── search_cache.py        # Dead code — never wired into auto-search
 ├── data/                      # Runtime data directory
 │   ├── resumes.db             # SQLite database
-│   ├── history.csv            # Append-only history log
+│   ├── history.csv            # Legacy append-only log — written by `append_*_to_csv()` but no longer read by `/api/history/csv`, which now generates the CSV live from `resumes.db` on every request (see below)
+│   ├── telegram_chats.json    # Chat IDs that have messaged the bot at least once (for proactive pushes)
+│   ├── telegram_resume_selection.json  # Per-chat active resume, set via /resumes
+│   ├── telegram_settings.json # Bot-wide hard-reject toggles + max-years cap, set via /settings
 │   ├── api_usage.json         # API usage/cost tracking
 │   ├── profile.txt            # User profile facts
 │   ├── gmail_tokens.json      # Gmail OAuth tokens

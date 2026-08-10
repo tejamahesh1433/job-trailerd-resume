@@ -48,5 +48,9 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD wget --quiet --tries=1 --spider http://127.0.0.1:8000/ || exit 1
 
-# Run application (never use reload=True in production)
+# Run application (never use reload=True in production).
+# --workers must stay at 1: main.py starts several in-process background asyncio
+# loops (Telegram polling, scheduler, inbox matcher) on startup with no cross-process
+# locking, so >1 worker/replica would duplicate them. See the NOTE above
+# start_telegram_polling() in main.py for details.
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

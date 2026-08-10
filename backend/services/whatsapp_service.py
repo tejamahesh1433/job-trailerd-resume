@@ -1,8 +1,5 @@
 import os
 import logging
-import hmac
-import hashlib
-from urllib.parse import quote
 from twilio.rest import Client
 from twilio.request_validator import RequestValidator
 

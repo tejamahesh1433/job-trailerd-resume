@@ -243,7 +243,7 @@ Retrieve saved cover letter and mail draft for a record.
 ```
 
 ### GET /api/history/csv
-Download full history as CSV file.
+Download the full production log as a CSV file, generated live from the `resumes` table on every request (not a static file — see [Backend Architecture](Backend_Architecture.md#history-csv-export)). Response includes `Cache-Control: no-store, no-cache, must-revalidate, max-age=0` and `Pragma: no-cache` so the browser never serves a stale download from cache; the frontend also appends a `?t=<timestamp>` cache-busting query param to the link.
 
 **Rate Limit:** 10/minute
 
@@ -587,12 +587,15 @@ Check Telegram bot configuration and polling status.
 The Telegram bot uses long-polling (not webhooks) — there is no other HTTP surface for it; all interaction happens through the background poll loop (see [System Architecture](System_Architecture.md#background-jobs)).
 
 **Bot commands:**
-- `/start` — Welcome message
+- `/start` — Welcome message and feature summary
 - `/status` — Bot status and resume count
 - `/matches`, `/followups`, `/queue` — Command Center summaries
-- `/scan` — (see bot help text)
-- Any other text — Treated as a JD and processed through the full scan pipeline
-- Inline buttons on bot replies — generate cover letter / mail draft / save Gmail draft
+- `/scan` — Start a new JD, flushing any buffered text first
+- `/resumes` — List every `.docx` in `original/`, showing which one is currently active for this chat, with a "Use: `<file>`" button per resume to switch (see [Backend Architecture](Backend_Architecture.md#multi-resume-selection))
+- `/settings` — Show and edit hard-reject toggles (GC/visa, foreign-language, lead-role) and the max-years-experience cap via inline buttons (see [Backend Architecture](Backend_Architecture.md#interactive-settings-panel))
+- Any other text — Treated as a JD (or a bare job-posting URL, which is scraped first) and processed through the full scan pipeline. Long messages sent across multiple Telegram messages are buffered for 3 seconds and combined; use `---` on its own line to separate multiple JDs in one paste.
+- Inline buttons on bot replies — generate cover letter / mail draft / save Gmail draft / mark applied / reject job / record follow-up
+- "Process Anyway" button — when a JD trips a hard-reject rule, the bot offers this instead of silently skipping it, re-running the same JD with checks bypassed (see [Backend Architecture](Backend_Architecture.md#interactive-hard-reject-overrides))
 
 ---
 

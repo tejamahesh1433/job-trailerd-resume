@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 const API_BASE = 'http://localhost:8000';
 const DEFAULT_FILTERS = [
@@ -25,7 +25,7 @@ const PIPELINE_ACTIONS = [
 // corresponding Gmail label to apply.
 const LABELABLE_CATEGORIES = new Set(['interview', 'assessment', 'rejection', 'offer', 'applied']);
 
-export default function InboxPage({ gmailConnected, gmailEmail, gmailCanOrganize, onRefreshStatus, onDisconnect, onOpenJob }) {
+export default function InboxPage({ gmailConnected, gmailEmail, gmailCanOrganize, onDisconnect, onOpenJob }) {
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [activeFilter, setActiveFilter] = useState('all');
   const [query, setQuery] = useState('');

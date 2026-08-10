@@ -20,7 +20,7 @@ TRAILERD automates the job-application workflow end to end, across four connecte
 1. **Resume Tailor (Dashboard)** — Paste a job description, select a base resume, and the system uses Gemini to analyze ATS compatibility, rewrite bullet points to close keyword gaps, and produce a tailored resume — as a friendly-named `.docx` **and** a matching PDF.
 2. **Command Center** — The app's home screen. Runs a scheduled or on-demand auto-search across job boards (JSearch/RapidAPI, with a DuckDuckGo scrape fallback), scores every posting with **Claude**, and tracks each one through a 7-stage pipeline (Discovered → Matched → Saved → Applied → Interview → Offer → Rejected). Includes an Action Queue, automation scheduling, and an AI-monitored Gmail inbox that auto-matches recruiter replies to tracked applications.
 3. **Job Finder (Job Matcher)** — The original, simpler pre-screening flow: paste one JD or a URL, get an instant pass/reject + match score against your profile before committing to tailoring.
-4. **Search / History / Info** — Full-text search across every processed JD, a production log with status tracking, a Telegram bot for on-the-go scanning, and an AI cost dashboard.
+4. **Search / History / Notes / Info** — Full-text search across every processed JD, a production log with status tracking and inline vendor-contact editing, a per-job notes/progress/mail tracker, an interactive Telegram bot (URL scraping, resume selection, hard-reject overrides, a settings panel) for on-the-go scanning, and an AI cost dashboard.
 
 Cover letters, recruiter emails, and follow-up replies can be generated for any tracked job and saved directly as Gmail drafts.
 

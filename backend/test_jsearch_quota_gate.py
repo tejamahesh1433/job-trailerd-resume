@@ -76,7 +76,8 @@ def run_case(label: str, seeded_count: int):
     return jsearch_calls["count"]
 
 
-def main_test():
+def check_quota_gate():
+    """Runs all three quota-gate cases and returns a list of failure messages (empty = pass)."""
     limit = usage_tracker.JSEARCH_FREE_MONTHLY_LIMIT
     failures = []
 
@@ -97,15 +98,22 @@ def main_test():
         failures.append(f"Case C: expected at most {remaining} JSearch calls once only "
                          f"{remaining} remained, got {calls_c}")
 
+    return failures
+
+
+def test_jsearch_quota_gate():
+    """pytest entry point for check_quota_gate()."""
+    failures = check_quota_gate()
+    assert not failures, "\n".join(failures)
+
+
+if __name__ == "__main__":
+    _failures = check_quota_gate()
     print()
-    if failures:
+    if _failures:
         print("FAILED:")
-        for f in failures:
+        for f in _failures:
             print(f"  - {f}")
         sys.exit(1)
     else:
         print("PASSED: JSearch quota gate behaves correctly in all cases.")
-
-
-if __name__ == "__main__":
-    main_test()

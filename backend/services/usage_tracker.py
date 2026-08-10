@@ -1,12 +1,19 @@
+import logging
 import os
 import json
 from datetime import datetime, timedelta
 from threading import Lock
 
+logger = logging.getLogger("main")
+
 DATA_DIR = os.getenv("DATA_DIR", "data")
 USAGE_FILE = os.path.join(DATA_DIR, "api_usage.json")
+QUOTA_ALERT_FILE = os.path.join(DATA_DIR, "quota_alerts_sent.json")
 
 JSEARCH_FREE_MONTHLY_LIMIT = 200
+# Fire a one-time Telegram warning per threshold per calendar month, so a quota
+# nearing exhaustion doesn't silently break the next auto-search run.
+JSEARCH_ALERT_THRESHOLDS = (80, 95)
 
 _lock = Lock()
 
@@ -70,6 +77,9 @@ def log_api_call(model: str, operation: str, input_tokens: int = 0, output_token
         data["calls"].append(entry)
         data["total_cost"] = round(data["total_cost"] + cost, 6)
         _save_usage(data)
+
+    if model == "jsearch-api":
+        _maybe_send_jsearch_quota_alert()
 
     return cost
 
@@ -149,3 +159,64 @@ def get_usage_stats() -> dict:
             "remaining": max(0, JSEARCH_FREE_MONTHLY_LIMIT - jsearch_used),
         },
     }
+
+
+def _load_quota_alerts() -> dict:
+    if os.path.exists(QUOTA_ALERT_FILE):
+        try:
+            with open(QUOTA_ALERT_FILE, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def _save_quota_alerts(data: dict):
+    os.makedirs(os.path.dirname(QUOTA_ALERT_FILE), exist_ok=True)
+    with open(QUOTA_ALERT_FILE, "w") as f:
+        json.dump(data, f)
+
+
+def _maybe_send_jsearch_quota_alert():
+    """Best-effort, one-time-per-threshold-per-month Telegram warning as JSearch's
+    free-tier monthly cap gets close, so it doesn't just silently start failing
+    auto-search runs. Never raises — a Telegram/state-file hiccup here must not
+    break the JSearch call that triggered it."""
+    try:
+        month = datetime.now().strftime("%Y-%m")
+        with _lock:
+            data = _load_usage()
+        used = _jsearch_used_this_month(data.get("calls", []))
+        pct = int((used / JSEARCH_FREE_MONTHLY_LIMIT) * 100)
+
+        crossed = [t for t in JSEARCH_ALERT_THRESHOLDS if pct >= t]
+        if not crossed:
+            return
+
+        alerts = _load_quota_alerts()
+        jsearch_alerts = alerts.get("jsearch", {})
+        if jsearch_alerts.get("month") != month:
+            jsearch_alerts = {"month": month, "thresholds_sent": []}
+        already_sent = set(jsearch_alerts.get("thresholds_sent", []))
+
+        new_thresholds = [t for t in crossed if t not in already_sent]
+        if not new_thresholds:
+            return
+
+        highest = max(new_thresholds)
+        from services import telegram_service
+        if telegram_service.is_configured():
+            chat_ids = telegram_service.get_known_chat_ids()
+            remaining = max(0, JSEARCH_FREE_MONTHLY_LIMIT - used)
+            message = (
+                f"JSearch quota warning: {used}/{JSEARCH_FREE_MONTHLY_LIMIT} free searches "
+                f"used this month ({highest}%+, {remaining} remaining)."
+            )
+            for chat_id in chat_ids:
+                telegram_service.send_message_sync(chat_id, message)
+
+        jsearch_alerts["thresholds_sent"] = sorted(already_sent | set(new_thresholds))
+        alerts["jsearch"] = jsearch_alerts
+        _save_quota_alerts(alerts)
+    except Exception as e:
+        logger.warning(f"Failed to send JSearch quota alert: {e}")

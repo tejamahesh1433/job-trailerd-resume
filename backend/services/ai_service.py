@@ -5,13 +5,17 @@ import json
 from services.usage_tracker import log_api_call
 from services.model_config import GEMINI_QUALITY_MODEL, GEMINI_FAST_MODEL, GEMINI_PRO_FALLBACK_MODEL
 
-def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "") -> dict:
+
+def _get_gemini_client() -> genai.Client:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("GEMINI_API_KEY is not set")
-        
-    client = genai.Client(api_key=api_key)
-    
+    return genai.Client(api_key=api_key)
+
+
+def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "") -> dict:
+    client = _get_gemini_client()
+
     notes_section = ""
     if ai_notes and ai_notes.strip():
         notes_section = f"""
@@ -120,10 +124,7 @@ def extract_vendor_contact_from_jd(jd_text: str) -> dict:
     which the regex baseline in main.py's _derive_vendor_details can miss (e.g. a contact
     name/phone in a signature block, or a vendor company name not present in the email
     domain). No resume needed, unlike analyze_resume's full scan-and-tailor call."""
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY not set")
-    client = genai.Client(api_key=api_key)
+    client = _get_gemini_client()
 
     prompt = f"""Read this job description/posting and extract the VENDOR / STAFFING AGENCY / RECRUITER contact
 details for whoever submitted or is administering this requirement — NOT the end-client company the role is
@@ -157,11 +158,7 @@ Return ONLY valid JSON (no markdown, no code blocks):
 
 
 def generate_additional_points(resume_text: str, jd_text: str, points_text: str, target_hint: str = "") -> dict:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY is not set")
-
-    client = genai.Client(api_key=api_key)
+    client = _get_gemini_client()
 
     hint_section = ""
     if target_hint and target_hint.strip():
@@ -236,10 +233,7 @@ def generate_additional_points(resume_text: str, jd_text: str, points_text: str,
     raise RuntimeError(f"All models unavailable: {str(last_error)}")
 
 def generate_cover_letter(resume_text: str, jd_text: str, company_name: str) -> str:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY is not set")
-    client = genai.Client(api_key=api_key)
+    client = _get_gemini_client()
 
     prompt = f"""
     You are an expert career coach writing a cover letter for a DevOps engineer.
@@ -291,10 +285,7 @@ def generate_cover_letter(resume_text: str, jd_text: str, company_name: str) -> 
     raise RuntimeError(f"All models unavailable: {str(last_error)}")
 
 def analyze_job_metadata(jd_text: str, extracted_keywords: dict) -> dict:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY is not set")
-    client = genai.Client(api_key=api_key)
+    client = _get_gemini_client()
 
     keyword_summary = ", ".join(
         [kw for keywords in extracted_keywords.values() for kw in keywords]
@@ -363,10 +354,7 @@ def generate_recruiter_outreach_email(job_title: str, company_name: str, jd_text
     """Cold outreach email to a recruiter/hiring contact for a job the candidate hasn't
     necessarily tailored a resume for yet — distinct from the existing mail-draft flow,
     which requires an already-tailored resume file to attach."""
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY is not set")
-    client = genai.Client(api_key=api_key)
+    client = _get_gemini_client()
 
     profile_block = f"\nMy background:\n{candidate_profile.strip()}\n" if candidate_profile.strip() else ""
     prompt = f"""Write a short, professional cold outreach email FROM ME, in first person ("I have...", "I'm reaching
@@ -406,10 +394,7 @@ Return ONLY valid JSON: {{"subject": "...", "body": "..."}}"""
 def generate_checkin_followup_email(job_title: str, company_name: str, days_since_applied: int, candidate_profile: str = "") -> dict:
     """Check-in follow-up for an application with no response yet — distinct from the
     existing /follow-up endpoint, which replies to an already-received recruiter email."""
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY is not set")
-    client = genai.Client(api_key=api_key)
+    client = _get_gemini_client()
 
     profile_block = f"\nMy background:\n{candidate_profile.strip()}\n" if candidate_profile.strip() else ""
     prompt = f"""Write a brief, polite check-in email FROM ME, in first person, about a job application I submitted
@@ -446,10 +431,7 @@ Return ONLY valid JSON: {{"subject": "...", "body": "..."}}"""
 
 def generate_linkedin_message(job_title: str, company_name: str, candidate_profile: str = "") -> dict:
     """Short LinkedIn connection/InMail message for reaching out about a specific role."""
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY is not set")
-    client = genai.Client(api_key=api_key)
+    client = _get_gemini_client()
 
     profile_block = f"\nMy background:\n{candidate_profile.strip()}\n" if candidate_profile.strip() else ""
     prompt = f"""Write a short LinkedIn message (connection request note or InMail, under 300 characters) FROM ME,
@@ -486,10 +468,7 @@ def extract_contacts_from_text(company: str, title: str, scraped_text: str) -> d
     (search results + company page snippets) — this does NOT search the web itself,
     it only reads text handed to it and pulls out what's literally present. Never
     invents a person; returns an empty list if nothing concrete is found."""
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY is not set")
-    client = genai.Client(api_key=api_key)
+    client = _get_gemini_client()
 
     prompt = f"""I scraped some web pages (search results and a company's own site) while looking for a RECRUITER or
 HIRING/TALENT-ACQUISITION contact at {company} for a "{title}" role. Read the text below and extract ONLY people
@@ -606,10 +585,7 @@ def summarize_inbox_message(subject: str, sender: str, body: str, thread_context
     same conversation) and application_context (the matched tracked application's
     company/title) are optional extra grounding — passing them produces a much more
     specific reply_suggestion than the single message alone would allow."""
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY is not set")
-    client = genai.Client(api_key=api_key)
+    client = _get_gemini_client()
 
     context_block = ""
     if application_context:

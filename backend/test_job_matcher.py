@@ -1,15 +1,21 @@
 """
-Test cases for Job Matcher endpoints
+Manual integration script for Job Matcher endpoints — requires a live backend
+server (python main.py) and makes real HTTP requests, so it is NOT run by
+pytest/CI. See test_job_matcher_failures.py for the pytest-based, in-process
+equivalent used in CI.
 Run: python test_job_matcher.py
 """
 
 import requests
-import json
 
 BASE_URL = "http://localhost:8000"
 
-def test_endpoint(name, jd_text, should_fail=False):
-    """Test /api/job-matcher/analyze endpoint"""
+def run_case(name, jd_text, should_fail=False):
+    """Exercise /api/job-matcher/analyze endpoint against a live server.
+
+    Named without a `test_` prefix on purpose: it takes required positional args, so
+    pytest would try (and fail) to collect it as a fixture-injected test otherwise.
+    """
     print(f"\n{'='*70}")
     print(f"TEST: {name}")
     print(f"{'='*70}")
@@ -30,7 +36,7 @@ def test_endpoint(name, jd_text, should_fail=False):
             print(f"✓ Employment Type: {data.get('employment_type')}")
 
             if data.get('warnings'):
-                print(f"⚠ Warnings:")
+                print("⚠ Warnings:")
                 for w in data['warnings']:
                     print(f"   - {w}")
 
@@ -38,7 +44,7 @@ def test_endpoint(name, jd_text, should_fail=False):
                 print(f"✓ Primary Role: {data['job_category'].get('primary_role')}")
 
                 if data['job_category'].get('sub_categories'):
-                    print(f"✓ Skills:")
+                    print("✓ Skills:")
                     for skill in data['job_category']['sub_categories'][:3]:
                         print(f"   - {skill['name']} ({skill.get('confidence', 0)*100:.0f}%)")
         else:
@@ -184,15 +190,15 @@ def main():
     failed = 0
 
     for test in test_cases:
-        success = test_endpoint(test['name'], test['jd'])
+        success = run_case(test['name'], test['jd'])
         if success:
             passed += 1
             print(f"\n✓ {test['reason']}")
         else:
             failed += 1
-            print(f"\n✗ Failed to test")
+            print("\n✗ Failed to test")
 
-    print(f"\n" + "="*70)
+    print("\n" + "="*70)
     print(f"RESULTS: {passed} passed, {failed} failed")
     print("="*70)
 

@@ -360,6 +360,7 @@ sequenceDiagram
     participant TG as Telegram User
     participant Bot as Telegram Bot API
     participant BE as Backend (poll loop)
+    participant Scrape as _scrape_jd_from_url
     participant AI as Gemini API
     participant FS as File System
 
@@ -369,19 +370,39 @@ sequenceDiagram
         BE->>Bot: getUpdates(offset, timeout=30)
         Bot-->>BE: Updates list
 
-        alt /start command
-            BE->>Bot: sendMessage("Welcome to Job Tailored Resume Bot!")
-        else /status command
-            BE->>BE: Count resumes in original/
-            BE->>Bot: sendMessage("Bot running, N resumes available")
-        else JD text received
-            BE->>Bot: sendMessage("Processing your JD...")
-            BE->>BE: Run in thread executor:
-            Note over BE: Pre-screening checks
-            BE->>FS: Load most recent resume
+        alt /start, /status, /matches, /followups, /queue
+            BE->>Bot: sendMessage(command-specific reply)
+        else /resumes command
+            BE->>FS: list original/*.docx, get_selected_resume(chat_id)
+            BE->>Bot: sendMessage(list + "Use: <file>" buttons)
+        else /settings command
+            BE->>BE: get_settings() (telegram_settings.json)
+            BE->>Bot: sendMessage(toggles/stepper buttons)
+        else text or URL received
+            Note over BE: Buffer for 3s, combine multi-part messages, split on "---"
+            BE->>Bot: sendMessage("Working on it...") -> capture status message_id
+            alt message is a bare URL
+                BE->>Scrape: _scrape_jd_from_url(url)
+                Scrape-->>BE: jd_text
+            end
+            BE->>BE: get_selected_resume(chat_id) or fall back to most-recent original/*.docx
+            alt bypass_checks is False
+                BE->>BE: Hard-reject checks using get_settings() (years cap, visa, language, lead-role)
+                opt a check fails
+                    BE->>BE: _telegram_pending_overrides[chat_id] = jd_text
+                    BE->>Bot: editMessageText("Skipped - <reason>" + "Process Anyway" button)
+                    Note over BE: Stop here unless overridden
+                end
+            end
+            BE->>Bot: editMessageText("[1/3] Reading JD...")
+            BE->>Bot: editMessageText("[2/3] Tailoring resume against JD...")
             BE->>AI: _process_single_jd(jd_text, file_bytes)
             AI-->>BE: { company, score, after_score, tailored }
-            BE->>Bot: sendMessage("Processed JD for Company!\nScore: X% -> Y%")
+            BE->>Bot: editMessageText("[3/3] Finalizing...")
+            BE->>Bot: editMessageText(result + buttons: Get Resume / Cover Letter / Mail Draft / Save to Gmail / Mark Applied / Reject Job)
+        else "Process Anyway" button tapped
+            BE->>BE: pop _telegram_pending_overrides[chat_id]
+            BE->>BE: _telegram_process_jd(pending_jd, chat_id, bypass_checks=True)
         end
     end
 ```

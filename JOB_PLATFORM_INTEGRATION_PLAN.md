@@ -1,5 +1,7 @@
 # Job Platform Integration Plan
 
+> **Status note:** This was the original proposal for job aggregation. Most of it now exists as the **Command Center** product (see [docx/System_Architecture.md](docx/System_Architecture.md) and [docx/Backend_Architecture.md](docx/Backend_Architecture.md)) — JSearch/RapidAPI + DuckDuckGo-scrape job fetching, a daily auto-search scheduler, Claude-based scoring, and a dedicated frontend page all shipped, differing in some details from what's sketched below (e.g. Claude instead of a custom matching algorithm, JSearch instead of separate per-platform scrapers). Treat this file as historical design context, not a current TODO list.
+
 ## Project Overview
 Your **Job Tailored Resume** system is a FastAPI + React app that:
 - Takes job descriptions

@@ -1,7 +1,5 @@
 import os
 import io
-import base64
-import json
 import pdfplumber
 from google import genai
 from google.genai import types

@@ -137,11 +137,11 @@ There is **no shared API client** — every component does its own `fetch()` aga
 
 | Store | Location | Contents |
 |-------|----------|----------|
-| SQLite Database | `data/resumes.db` | Single `resumes` table serving all four products (23 columns — see [Backend Architecture](Backend_Architecture.md)) |
+| SQLite Database | `data/resumes.db` | Single `resumes` table serving all four products (27 columns, including the 4 vendor-contact fields — see [Backend Architecture](Backend_Architecture.md)) |
 | File System — Originals | `original/` | Uploaded base resume DOCX files |
 | File System — Dashboard/Job Finder output | `trailerd/<company>/` | Tailored `Teja_Mahesh_Neerukonda_Resume.docx` + matching `.pdf`, `jd_info.txt`, `difference.txt`, `cover_letter_*.docx`, `mail_draft_*.txt` |
 | File System — Command Center output | `online-platform/<company>_<job_id>/` | Same artifact types, keyed deterministically by job id instead of name-dedup counters |
-| CSV History | `data/history.csv` | Append-only CSV log with hyperlinks to all generated files |
+| CSV History | `data/history.csv` | Legacy append-only write log with hyperlinks to generated files — no longer read on download; `GET /api/history/csv` now generates the CSV live from `resumes.db` instead (see [Backend Architecture](Backend_Architecture.md#history-csv-export)) |
 | API Usage | `data/api_usage.json` | Token counts and costs per API call, across Gemini/Claude/OpenAI |
 | Gmail Tokens | `data/gmail_tokens.json` | OAuth2 refresh tokens |
 | User Profile | `data/profile.txt` | Extracted personal facts (work authorization, location, availability) |

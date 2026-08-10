@@ -15,7 +15,6 @@ export default function JobMatches({ onBack, onSendToTailor, onSaveToApplication
 
   useEffect(() => {
     fetchPage(page);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page]);
 
   const fetchPage = async (p) => {

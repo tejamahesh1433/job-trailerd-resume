@@ -13,6 +13,8 @@ The frontend is a React 19 Single Page Application built with Vite 8. It uses va
 | `JobMatches.jsx` | 105 | Paginated (20/page) list of every Command Center "Found" job, reusing `JobRow`; opens `JobDetailWorkspace` on click. |
 | `InboxPage.jsx` | 541 | Gmail inbox browser: category filter chips, Smart/Cheap AI-sort toggle, message list + reader pane, matched-application banner with pipeline status buttons, AI summary/reply generation, label/archive/mark-read actions. |
 | `SearchPage.jsx` | 305 | Full-text search across all records; inline-editable address/notes per result; "Open in Dashboard" hands a record to `App`. |
+| `HistoryPage.jsx` | 357 | "History" page — paginated (20/page), searchable/filterable (status, source) table over `GET /api/history`, with inline vendor-detail editing (company/contact/email/phone), expandable rows, and the CSV export link (`GET /api/history/csv`, cache-busted with a `?t=` timestamp). |
+| `NotesPage.jsx` | 337 | "Notes" page — three subpages (Notes / Progress / Mails Received) over a per-record notes field; strips quoted-reply text from linked emails before display. |
 | `main.jsx` | 10 | Entry point — mounts `<App />` in `<StrictMode>`. |
 
 Non-component files: `App.css`, `index.css` (global theme), `test/setup.js` (vitest + testing-library setup), `assets/`.
@@ -29,6 +31,10 @@ stateDiagram-v2
     CommandCenter --> Search: sidebar "Search"
     CommandCenter --> Inbox: sidebar "Inbox"
     CommandCenter --> Info: sidebar "Info"
+    CommandCenter --> TechExperience: sidebar "Tech Experience"
+    CommandCenter --> Certifications: sidebar "Certifications"
+    CommandCenter --> Notes: sidebar "Notes"
+    CommandCenter --> History: sidebar "History"
     CommandCenter --> JobMatches: "View All Matches"
     CommandCenter --> JobDetailWorkspace: click a job card (overlay)
     JobMatches --> JobDetailWorkspace: click a job card (overlay)
@@ -39,13 +45,17 @@ stateDiagram-v2
 
 ### Sidebar Navigation
 
-All pages share a persistent left sidebar with six navigation items:
+All pages share a persistent left sidebar with ten navigation items:
 - **Command Center** — home, job discovery pipeline
 - **Resume Tailor** — the original single/batch scan dashboard
 - **Job Finder** — standalone pre-screening
 - **Search** — full-text search
 - **Inbox** — Gmail inbox browser
 - **Info** — employer details, Telegram bot status, saved addresses
+- **Tech Experience** — inline block in `App.jsx` (`currentPage === 'exp'`), backed by the tech-experience service/API, not a separate component
+- **Certifications** — inline block in `App.jsx` (`currentPage === 'certifications'`), backed by the certifications service/API, not a separate component
+- **Notes** — `NotesPage.jsx`
+- **History** — `HistoryPage.jsx`
 
 ## Dashboard Layout (App.jsx — "Resume Tailor" view)
 
@@ -175,6 +185,17 @@ The largest, most monolithic file. Handles:
 - Search input (Enter key, min 2 chars)
 - Result cards: company, score badge, status badge, position, location, local-only flag, date, emails (click-to-copy), recruiter name
 - Inline-editable "My Address" and "Notes" fields, JD preview toggle, "Open in Dashboard"
+
+### HistoryPage.jsx (~357 lines)
+
+- Paginated (20/page) table over `GET /api/history`, with search, status filter, and source filter
+- Expandable rows for JD preview; inline-editable vendor fields (company/contact name/email/phone) that PATCH back to the record
+- CSV export link — `GET /api/history/csv?t=${Date.now()}`, the timestamp query param exists purely to defeat browser caching of the download response (the endpoint also sends `Cache-Control: no-store`)
+
+### NotesPage.jsx (~337 lines)
+
+- Three subpages (Notes / Progress / Mails Received) over each record's notes field
+- Strips quoted-reply text (`On ... wrote:`, `--- Original Message ---`) out of linked emails before rendering, so only the new message content shows
 
 ### ScoreRing (inline component, in App.jsx)
 

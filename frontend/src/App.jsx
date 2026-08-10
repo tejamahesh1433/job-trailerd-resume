@@ -1175,7 +1175,6 @@ export default function App() {
             gmailConnected={gmailConnected}
             gmailEmail={gmailEmail}
             gmailCanOrganize={gmailCanOrganize}
-            onRefreshStatus={checkGmailStatus}
             onDisconnect={handleDisconnectGmail}
             onOpenJob={(jobId) => { setPendingCommandCenterJobId(jobId); setCurrentPage('command-center'); }}
           />

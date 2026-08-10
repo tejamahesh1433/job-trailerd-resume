@@ -171,7 +171,7 @@ backend/
 4. Restart the backend — the bot starts long-polling automatically, and the 30-minute Action Queue digest loop starts alongside it
 5. Search for your bot in Telegram and send `/start`
 
-The bot processes any text message as a job description and replies with the scan result; `/matches`, `/followups`, and `/queue` surface Command Center summaries.
+The bot processes pasted text (or a bare job-posting URL, which it scrapes automatically) as a job description and replies with the scan result; `/resumes` picks which base resume to tailor against, `/settings` toggles hard-reject rules (visa/years-cap/etc.) and offers a "Process Anyway" override when a JD trips one; `/matches`, `/followups`, and `/queue` surface Command Center summaries. See [Backend Architecture — Telegram Bot Interactive Features](Backend_Architecture.md#telegram-bot--interactive-features) for the full mechanics.
 
 ## Command Center Setup (job discovery)
 
