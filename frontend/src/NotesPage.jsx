@@ -4,6 +4,17 @@ const API_BASE = 'http://localhost:8000';
 
 const STATUS_OPTIONS = ['Scanned', 'Matched', 'Submitted Profile', 'Applied', 'Phone Screen', 'Interview', 'Offer', 'Rejected'];
 
+const SOURCE_LABELS = {
+  'command-center': 'Command Center',
+  'job-finder': 'Job Finder',
+  'dashboard': 'Resume Tailor',
+};
+
+function sourceLabel(source) {
+  const key = source || 'dashboard';
+  return SOURCE_LABELS[key] || key;
+}
+
 const SUBPAGES = [
   { key: 'notes', label: 'Notes' },
   { key: 'progress', label: 'Progress' },
@@ -68,6 +79,8 @@ function parseNotesSegments(text) {
 
 export default function NotesPage({ history, gmailConnected, onStatusChange, onRefreshHistory }) {
   const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState('');
+  const [sourceFilter, setSourceFilter] = useState('');
   const [selectedId, setSelectedId] = useState(null);
   const [subpage, setSubpage] = useState('notes');
 
@@ -86,9 +99,14 @@ export default function NotesPage({ history, gmailConnected, onStatusChange, onR
 
   const selectedJob = history.find(item => item.id === selectedId) || null;
 
-  const filteredJobs = history.filter(item =>
-    !search || (item.company_name || '').toLowerCase().includes(search.toLowerCase())
-  );
+  const sources = [...new Set(history.map(item => item.source || 'dashboard'))].sort();
+
+  const filteredJobs = history.filter(item => {
+    const matchesSearch = !search || (item.company_name || '').toLowerCase().includes(search.toLowerCase());
+    const matchesStatus = !statusFilter || (item.status || 'Scanned') === statusFilter;
+    const matchesSource = !sourceFilter || (item.source || 'dashboard') === sourceFilter;
+    return matchesSearch && matchesStatus && matchesSource;
+  });
 
   const handleSelectJob = (job) => {
     setSelectedId(job.id);
@@ -137,7 +155,16 @@ export default function NotesPage({ history, gmailConnected, onStatusChange, onR
     setEmailsLoading(true);
     setEmailsError(null);
     try {
-      const params = new URLSearchParams({ q: job.company_name || '', limit: '25', mode: 'cheap' });
+      const email = (job.vendor_contact_email || '').trim();
+      const company = (job.company_name || '').trim();
+      // Match on the vendor's actual email address (both sent-to and received-from,
+      // across all threads) rather than just company-name text, so correspondence with
+      // that contact shows up even when the subject/body never mentions the company.
+      const parts = [];
+      if (email) parts.push(`from:${email}`, `to:${email}`);
+      if (company) parts.push(`"${company}"`);
+      const q = parts.length ? `(${parts.join(' OR ')})` : '';
+      const params = new URLSearchParams({ q, limit: '25', mode: 'cheap' });
       const res = await fetch(`${API_BASE}/api/gmail/inbox?${params.toString()}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Failed to load mail');
@@ -184,14 +211,33 @@ export default function NotesPage({ history, gmailConnected, onStatusChange, onR
           <div className="inbox-list-head">
             <span>{filteredJobs.length} job{filteredJobs.length === 1 ? '' : 's'}</span>
           </div>
-          <div style={{ padding: '0 0.75rem 0.5rem' }}>
+          <div className="history-filters" style={{ padding: '0 0.75rem 0.5rem', margin: 0 }}>
             <input
-              className="exp-search"
-              style={{ margin: 0 }}
+              type="text"
+              className="history-search"
               placeholder="Search company…"
               value={search}
               onChange={e => setSearch(e.target.value)}
             />
+            <select
+              className="history-filter-select"
+              value={statusFilter}
+              onChange={e => setStatusFilter(e.target.value)}
+            >
+              <option value="">All Statuses</option>
+              {STATUS_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <select
+              className="history-filter-select"
+              value={sourceFilter}
+              onChange={e => setSourceFilter(e.target.value)}
+            >
+              <option value="">All Sources</option>
+              {sources.map(s => <option key={s} value={s}>{sourceLabel(s)}</option>)}
+            </select>
+            {(search || statusFilter || sourceFilter) && (
+              <button className="filter-clear-btn" onClick={() => { setSearch(''); setStatusFilter(''); setSourceFilter(''); }}>✕ Clear</button>
+            )}
           </div>
           {filteredJobs.length === 0 ? (
             <div className="inbox-empty-state">No scanned jobs yet.</div>
@@ -294,11 +340,18 @@ export default function NotesPage({ history, gmailConnected, onStatusChange, onR
                     <div className="inbox-empty-state">No mail found for {selectedJob.company_name}.</div>
                   ) : (
                     <div className="inbox-message-list">
-                      {emails.map(msg => (
+                      {emails.map(msg => {
+                        const vendorEmail = (selectedJob.vendor_contact_email || '').trim().toLowerCase();
+                        const isSent = vendorEmail && (msg.to || '').toLowerCase().includes(vendorEmail);
+                        const party = isSent
+                          ? (msg.to || '').replace(/<.*>/, '').replace(/"/g, '').trim() || 'Unknown recipient'
+                          : (msg.from || '').replace(/<.*>/, '').replace(/"/g, '').trim() || 'Unknown sender';
+                        return (
                         <React.Fragment key={msg.id}>
                           <button className="inbox-message-row" onClick={() => handleOpenEmail(msg.id)}>
                             <span className="inbox-message-topline">
-                              <span className="inbox-message-from">{(msg.from || '').replace(/<.*>/, '').replace(/"/g, '').trim() || 'Unknown sender'}</span>
+                              <span className="inbox-message-from">{isSent ? 'To: ' : ''}{party}</span>
+                              {isSent && <span className="inbox-message-meta"> (sent)</span>}
                             </span>
                             <span className="inbox-message-subject">{msg.subject || '(no subject)'}</span>
                             <span className="inbox-message-snippet">{msg.snippet}</span>
@@ -320,7 +373,8 @@ export default function NotesPage({ history, gmailConnected, onStatusChange, onR
                             </div>
                           )}
                         </React.Fragment>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
                   <button className="inbox-secondary-btn" style={{ marginTop: '0.75rem' }} onClick={() => fetchEmails(selectedJob)} disabled={emailsLoading}>

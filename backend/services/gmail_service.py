@@ -407,7 +407,7 @@ def search_inbox(query: str, max_results: int = 15, category: str = "all", page_
     for msg_stub in resp.get("messages", []):
         msg = service.users().messages().get(
             userId="me", id=msg_stub["id"], format="metadata",
-            metadataHeaders=["From", "Subject", "Date"]
+            metadataHeaders=["From", "To", "Subject", "Date"]
         ).execute()
         headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
         category_info = _message_category(headers.get("Subject", ""), msg.get("snippet", ""))
@@ -415,6 +415,7 @@ def search_inbox(query: str, max_results: int = 15, category: str = "all", page_
             "id": msg_stub["id"],
             "thread_id": msg.get("threadId", ""),
             "from": headers.get("From", ""),
+            "to": headers.get("To", ""),
             "subject": headers.get("Subject", ""),
             "date": headers.get("Date", ""),
             "snippet": msg.get("snippet", ""),

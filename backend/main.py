@@ -5352,10 +5352,16 @@ present — never invent or guess a contact.'''
     return jobs
 
 
-async def _run_command_center_search(query: str, platforms: list, work_types: list, contract_types: list) -> dict:
+def _run_command_center_search(query: str, platforms: list, work_types: list, contract_types: list) -> dict:
     """Core Command Center auto-search pipeline: scrape (JSearch or DDG fallback) ->
     hard-reject rules -> Claude scoring -> persist. Shared by the HTTP endpoint and the
-    daily scheduled search so neither duplicates this logic."""
+    daily scheduled search so neither duplicates this logic.
+
+    Synchronous on purpose: every step (requests.get, DDGS scraping, Claude scoring) is
+    blocking I/O with no async equivalent in use here. Callers MUST invoke this via
+    asyncio.to_thread(...) rather than awaiting it directly, otherwise it blocks the
+    entire event loop (including unrelated requests like /api/gmail/inbox) for the
+    several minutes this search can take."""
     query = query if query else "DevOps Engineer"
     search_terms = _broaden_devops_query(query)
     job_texts = []
@@ -5692,7 +5698,7 @@ async def _run_command_center_search(query: str, platforms: list, work_types: li
 @limiter.limit("5/minute")
 async def auto_search_jobs(request: Request, payload: AutoSearchRequest):
     try:
-        return await _run_command_center_search(payload.query, payload.platforms, payload.work_types, payload.contract_types)
+        return await asyncio.to_thread(_run_command_center_search, payload.query, payload.platforms, payload.work_types, payload.contract_types)
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

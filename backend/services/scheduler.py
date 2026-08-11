@@ -67,7 +67,9 @@ def set_schedule(enabled: bool, hour: int = DEFAULT_HOUR, minute: int = DEFAULT_
 async def daily_search_loop(run_search_fn):
     """Sleeps until the configured time (default 10:00 AM America/New_York) every day,
     then runs the default Command Center search. `run_search_fn` must match
-    _run_command_center_search's signature: (query, platforms, work_types, contract_types).
+    _run_command_center_search's signature: (query, platforms, work_types, contract_types)
+    and is synchronous/blocking — it is run via asyncio.to_thread so it doesn't stall
+    the event loop (and every other in-flight request) for the minutes it can take.
     Re-reads the config on every iteration so enabling/disabling takes effect on the
     next tick without restarting the backend."""
     global _last_run_at, _last_run_result
@@ -94,7 +96,7 @@ async def daily_search_loop(run_search_fn):
 
         try:
             logger.info("Running scheduled daily Command Center search")
-            result = await run_search_fn(DEFAULT_QUERY, DEFAULT_PLATFORMS, DEFAULT_WORK_TYPES, DEFAULT_CONTRACT_TYPES)
+            result = await asyncio.to_thread(run_search_fn, DEFAULT_QUERY, DEFAULT_PLATFORMS, DEFAULT_WORK_TYPES, DEFAULT_CONTRACT_TYPES)
             _last_run_at = datetime.now(SCHEDULE_TZ).isoformat()
             _last_run_result = {"count": result.get("count", 0), "rejected_count": result.get("rejected_count", 0)}
             logger.info(f"Scheduled search complete: {_last_run_result}")
