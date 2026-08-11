@@ -99,9 +99,14 @@ export default function NotesPage({ history, gmailConnected, onStatusChange, onR
 
   const selectedJob = history.find(item => item.id === selectedId) || null;
 
-  const sources = [...new Set(history.map(item => item.source || 'dashboard'))].sort();
+  // Command Center's pre-screen rejects (no C2C/C2H terms, W2-only, etc.) are automatic
+  // filtering noise, not real applications — keep them out of the Notes list entirely
+  // (same rule History page applies) so they don't drown out jobs actually being tracked.
+  const trackedJobs = history.filter(item => !(item.source === 'command-center' && item.status === 'Rejected'));
 
-  const filteredJobs = history.filter(item => {
+  const sources = [...new Set(trackedJobs.map(item => item.source || 'dashboard'))].sort();
+
+  const filteredJobs = trackedJobs.filter(item => {
     const matchesSearch = !search || (item.company_name || '').toLowerCase().includes(search.toLowerCase());
     const matchesStatus = !statusFilter || (item.status || 'Scanned') === statusFilter;
     const matchesSource = !sourceFilter || (item.source || 'dashboard') === sourceFilter;
