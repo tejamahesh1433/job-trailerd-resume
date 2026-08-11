@@ -25,7 +25,16 @@ const PIPELINE_ACTIONS = [
 // corresponding Gmail label to apply.
 const LABELABLE_CATEGORIES = new Set(['interview', 'assessment', 'rejection', 'offer', 'applied']);
 
-export default function InboxPage({ gmailConnected, gmailEmail, gmailCanOrganize, onDisconnect, onOpenJob }) {
+export default function InboxPage({
+  gmailConnected, gmailEmail, gmailCanOrganize, onDisconnect, onOpenJob,
+  title = 'Inbox',
+  subtitle = 'Gmail search for job replies, application updates, and recruiter messages.',
+  // When set, scopes every search to messages carrying this exact Gmail label (e.g. a
+  // label the user applies themselves in Gmail, like "Exam" or "Submitted Profile") —
+  // used to power the dedicated label pages, which are just this same reader UI with a
+  // fixed `label:"..."` clause baked into every query alongside whatever the user types.
+  fixedLabel = null,
+}) {
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [activeFilter, setActiveFilter] = useState('all');
   const [query, setQuery] = useState('');
@@ -79,7 +88,14 @@ export default function InboxPage({ gmailConnected, gmailEmail, gmailCanOrganize
   useEffect(() => {
     if (gmailConnected) fetchMessages(activeFilter, query, mode);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gmailConnected, activeFilter, mode]);
+  }, [gmailConnected, activeFilter, mode, fixedLabel]);
+
+  // Merges the fixed label clause (if this page is label-scoped) with whatever the
+  // user typed, so the search box still narrows results without ever escaping the label.
+  const buildQuery = (search) => {
+    const labelClause = fixedLabel ? `label:"${fixedLabel}"` : '';
+    return [labelClause, (search || '').trim()].filter(Boolean).join(' ');
+  };
 
   const fetchMessages = async (category = activeFilter, search = query, useMode = mode) => {
     if (!gmailConnected) return;
@@ -87,7 +103,7 @@ export default function InboxPage({ gmailConnected, gmailEmail, gmailCanOrganize
     setLoading(true);
     setError(null);
     try {
-      const params = new URLSearchParams({ category, q: search || '', limit: '25', mode: useMode });
+      const params = new URLSearchParams({ category, q: buildQuery(search), limit: '25', mode: useMode });
       const res = await fetch(`${API_BASE}/api/gmail/inbox?${params.toString()}`);
       const data = await res.json();
       if (queryGenerationRef.current !== myGen) return; // superseded by a newer filter/search
@@ -107,7 +123,7 @@ export default function InboxPage({ gmailConnected, gmailEmail, gmailCanOrganize
     const myGen = queryGenerationRef.current; // same context — must still match when the page lands
     setLoadingMore(true);
     try {
-      const params = new URLSearchParams({ category: activeFilter, q: query || '', limit: '25', mode, page_token: nextPageToken });
+      const params = new URLSearchParams({ category: activeFilter, q: buildQuery(query), limit: '25', mode, page_token: nextPageToken });
       const res = await fetch(`${API_BASE}/api/gmail/inbox?${params.toString()}`);
       const data = await res.json();
       if (queryGenerationRef.current !== myGen) return; // filter/search changed while this page was loading
@@ -295,8 +311,8 @@ export default function InboxPage({ gmailConnected, gmailEmail, gmailCanOrganize
     <div className="inbox-page">
       <div className="inbox-header">
         <div>
-          <h1 className="inbox-title">Inbox</h1>
-          <p className="inbox-subtitle">Gmail search for job replies, application updates, and recruiter messages.</p>
+          <h1 className="inbox-title">{title}</h1>
+          <p className="inbox-subtitle">{subtitle}</p>
         </div>
         <div className="inbox-account-box">
           {gmailConnected ? (

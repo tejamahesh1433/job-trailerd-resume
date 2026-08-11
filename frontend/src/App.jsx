@@ -1086,6 +1086,22 @@ export default function App() {
         </li>
         <li>
           <button
+            style={activePage === 'exam' ? sidebarStyles.navItemActive : sidebarStyles.navItem}
+            onClick={() => setCurrentPage('exam')}
+          >
+            Exam
+          </button>
+        </li>
+        <li>
+          <button
+            style={activePage === 'submitted-profile' ? sidebarStyles.navItemActive : sidebarStyles.navItem}
+            onClick={() => setCurrentPage('submitted-profile')}
+          >
+            Submitted Profile
+          </button>
+        </li>
+        <li>
+          <button
             style={activePage === 'info' ? sidebarStyles.navItemActive : sidebarStyles.navItem}
             onClick={() => setCurrentPage('info')}
           >
@@ -1177,6 +1193,49 @@ export default function App() {
             gmailCanOrganize={gmailCanOrganize}
             onDisconnect={handleDisconnectGmail}
             onOpenJob={(jobId) => { setPendingCommandCenterJobId(jobId); setCurrentPage('command-center'); }}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  // Mails carrying the Gmail label "Exam" — a label the user applies themselves in
+  // Gmail, e.g. on assessment/test invites — surfaced here as its own dedicated view.
+  if (currentPage === 'exam') {
+    return (
+      <div style={{ display: 'flex', minHeight: '100vh' }}>
+        {sidebarNav('exam')}
+        <div style={{ flex: 1, overflow: 'auto', background: 'var(--ink)' }}>
+          <InboxPage
+            gmailConnected={gmailConnected}
+            gmailEmail={gmailEmail}
+            gmailCanOrganize={gmailCanOrganize}
+            onDisconnect={handleDisconnectGmail}
+            onOpenJob={(jobId) => { setPendingCommandCenterJobId(jobId); setCurrentPage('command-center'); }}
+            fixedLabel="Exam"
+            title="Exam"
+            subtitle='Mail labeled "Exam" in Gmail.'
+          />
+        </div>
+      </div>
+    );
+  }
+
+  // Mails carrying the Gmail label "Submitted Profile".
+  if (currentPage === 'submitted-profile') {
+    return (
+      <div style={{ display: 'flex', minHeight: '100vh' }}>
+        {sidebarNav('submitted-profile')}
+        <div style={{ flex: 1, overflow: 'auto', background: 'var(--ink)' }}>
+          <InboxPage
+            gmailConnected={gmailConnected}
+            gmailEmail={gmailEmail}
+            gmailCanOrganize={gmailCanOrganize}
+            onDisconnect={handleDisconnectGmail}
+            onOpenJob={(jobId) => { setPendingCommandCenterJobId(jobId); setCurrentPage('command-center'); }}
+            fixedLabel="Submissions"
+            title="Submitted Profile"
+            subtitle='Mail labeled "Submissions" in Gmail.'
           />
         </div>
       </div>
