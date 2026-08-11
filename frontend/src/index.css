@@ -1093,6 +1093,7 @@ body {
 
 .status-scanned  { color: var(--muted); }
 .status-matched  { color: var(--success); }
+.status-submitted-profile { color: #a78bfa; }
 .status-applied  { color: var(--gold); }
 .status-phone-screen { color: var(--cream-dim); }
 .status-interview { color: #60a5fa; }

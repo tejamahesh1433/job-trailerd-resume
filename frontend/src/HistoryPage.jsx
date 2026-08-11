@@ -4,7 +4,7 @@ const API_BASE = 'http://localhost:8000';
 const PAGE_SIZE = 20;
 const FETCH_LIMIT = 1000;
 
-const STATUS_OPTIONS = ['Scanned', 'Matched', 'Applied', 'Phone Screen', 'Interview', 'Offer', 'Rejected'];
+const STATUS_OPTIONS = ['Scanned', 'Matched', 'Submitted Profile', 'Applied', 'Phone Screen', 'Interview', 'Offer', 'Rejected'];
 
 function scoreAccent(score) {
   if (score >= 85) return '#2ebd73';
@@ -42,6 +42,7 @@ export default function HistoryPage({ onStatusChange, onRefreshHistory }) {
   const [savingId, setSavingId] = useState(null);
   const [researchingId, setResearchingId] = useState(null);
   const [researchError, setResearchError] = useState('');
+  const [addOpen, setAddOpen] = useState(false);
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
@@ -176,11 +177,19 @@ export default function HistoryPage({ onStatusChange, onRefreshHistory }) {
             <h2 className="exp-title">History</h2>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
               <span className="exp-count">{filtered.length} of {history.length}</span>
+              <button className="csv-btn" onClick={() => setAddOpen(true)}>+ Add Record</button>
               {history.length > 0 && (
                 <a href={`${API_BASE}/api/history/csv?t=${Date.now()}`} className="csv-btn" download>↓ CSV Export</a>
               )}
             </div>
           </div>
+
+          {addOpen && (
+            <AddHistoryModal
+              onClose={() => setAddOpen(false)}
+              onSaved={() => { setAddOpen(false); refresh(); }}
+            />
+          )}
 
           {history.length > 0 && (
             <div className="history-filters">
@@ -352,6 +361,88 @@ export default function HistoryPage({ onStatusChange, onRefreshHistory }) {
           )}
         </div>
       </main>
+    </div>
+  );
+}
+
+function AddHistoryModal({ onClose, onSaved }) {
+  const [companyName, setCompanyName] = useState('');
+  const [status, setStatus] = useState('Scanned');
+  const [jdText, setJdText] = useState('');
+  const [vendorCompanyName, setVendorCompanyName] = useState('');
+  const [vendorContactName, setVendorContactName] = useState('');
+  const [vendorContactEmail, setVendorContactEmail] = useState('');
+  const [vendorContactPhone, setVendorContactPhone] = useState('');
+  const [notes, setNotes] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const handleSave = async () => {
+    if (!companyName.trim()) { setErr('Client / company name is required.'); return; }
+    setSaving(true);
+    setErr(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/history`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          company_name: companyName.trim(),
+          status,
+          jd_text: jdText.trim(),
+          vendor_company_name: vendorCompanyName.trim(),
+          vendor_contact_name: vendorContactName.trim(),
+          vendor_contact_email: vendorContactEmail.trim(),
+          vendor_contact_phone: vendorContactPhone.trim(),
+          user_notes: notes.trim(),
+        }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.detail || 'Failed to add record');
+      }
+      onSaved && onSaved();
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="cmd-modal-backdrop" onClick={onClose}>
+      <div className="cmd-modal" onClick={e => e.stopPropagation()}>
+        <div className="cmd-modal-header">
+          <h3>Add Record</h3>
+          <button className="cmd-modal-close" onClick={onClose}>&times;</button>
+        </div>
+        <div className="cmd-modal-body">
+          <label className="cmd-modal-label">Client / Company *</label>
+          <input className="cmd-select" style={{ width: '100%' }} value={companyName} onChange={e => setCompanyName(e.target.value)} placeholder="e.g. Acme Corp" />
+          <label className="cmd-modal-label">Status</label>
+          <select className="cmd-select" style={{ width: '100%' }} value={status} onChange={e => setStatus(e.target.value)}>
+            {STATUS_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+          <label className="cmd-modal-label">Vendor Company</label>
+          <input className="cmd-select" style={{ width: '100%' }} value={vendorCompanyName} onChange={e => setVendorCompanyName(e.target.value)} placeholder="e.g. Staffing Partners LLC" />
+          <label className="cmd-modal-label">Vendor Contact Name</label>
+          <input className="cmd-select" style={{ width: '100%' }} value={vendorContactName} onChange={e => setVendorContactName(e.target.value)} />
+          <label className="cmd-modal-label">Vendor Contact Email</label>
+          <input className="cmd-select" style={{ width: '100%' }} type="email" value={vendorContactEmail} onChange={e => setVendorContactEmail(e.target.value)} />
+          <label className="cmd-modal-label">Vendor Contact Phone</label>
+          <input className="cmd-select" style={{ width: '100%' }} value={vendorContactPhone} onChange={e => setVendorContactPhone(e.target.value)} />
+          <label className="cmd-modal-label">Job Description</label>
+          <textarea className="cmd-select" style={{ width: '100%', minHeight: '90px', resize: 'vertical' }} value={jdText} onChange={e => setJdText(e.target.value)} placeholder="Optional" />
+          <label className="cmd-modal-label">Notes</label>
+          <textarea className="cmd-select" style={{ width: '100%', minHeight: '70px', resize: 'vertical' }} value={notes} onChange={e => setNotes(e.target.value)} placeholder="Optional" />
+          {err && <div className="cmd-modal-error">{err}</div>}
+        </div>
+        <div className="cmd-modal-footer">
+          <button className="cmd-filter-pill" onClick={onClose}>Cancel</button>
+          <button className="cmd-cta cmd-cta-primary" onClick={handleSave} disabled={saving} style={{ opacity: saving ? 0.6 : 1 }}>
+            {saving ? 'Saving…' : 'Save Record'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

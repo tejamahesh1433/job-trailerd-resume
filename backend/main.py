@@ -41,7 +41,7 @@ from services.profile_service import process_uploaded_doc
 from services.usage_tracker import get_usage_stats
 from services import tech_experience_service
 from services import certifications_service
-from database import init_db, save_resume_record, save_job_matcher_record, get_all_resumes, delete_resume_record, update_resume_status, get_resume_by_id, find_existing_company, sanitize_csv_field, search_records, update_user_address, save_follow_up_draft, get_follow_up_draft, update_resume_after_edit, update_user_notes, update_resume_rerun, update_vendor_details
+from database import init_db, save_resume_record, save_job_matcher_record, get_all_resumes, delete_resume_record, update_resume_status, get_resume_by_id, find_existing_company, sanitize_csv_field, search_records, update_user_address, save_follow_up_draft, get_follow_up_draft, update_resume_after_edit, update_user_notes, update_resume_rerun, update_vendor_details, save_manual_history_record
 
 DATA_DIR = os.getenv("DATA_DIR", "data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -1857,6 +1857,58 @@ async def get_history(request: Request, limit: int = 50, offset: int = 0):
     except Exception as e:
         logger.error(f"Get history error: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve history")
+
+class ManualHistoryRequest(BaseModel):
+    company_name: str
+    jd_text: str = ""
+    status: str = "Scanned"
+    vendor_company_name: str = ""
+    vendor_contact_name: str = ""
+    vendor_contact_email: str = ""
+    vendor_contact_phone: str = ""
+    user_notes: str = ""
+
+@app.post("/api/history")
+@limiter.limit("30/minute")
+async def add_manual_history_record(request: Request, payload: ManualHistoryRequest):
+    try:
+        company_name = payload.company_name.strip()
+        if not company_name:
+            raise HTTPException(status_code=400, detail="Company name is required")
+        if len(company_name) > 200:
+            raise HTTPException(status_code=400, detail="Company name too long")
+        valid_statuses = ["Scanned", "Matched", "Submitted Profile", "Applied", "Phone Screen", "Interview", "Offer", "Rejected"]
+        if payload.status not in valid_statuses:
+            raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {', '.join(valid_statuses)}")
+        for field_name, value in (("jd_text", payload.jd_text), ("user_notes", payload.user_notes)):
+            if len(value) > 20000:
+                raise HTTPException(status_code=400, detail=f"{field_name} too long")
+        for field_name, value in (
+            ("vendor_company_name", payload.vendor_company_name),
+            ("vendor_contact_name", payload.vendor_contact_name),
+            ("vendor_contact_email", payload.vendor_contact_email),
+            ("vendor_contact_phone", payload.vendor_contact_phone),
+        ):
+            if len(value) > 200:
+                raise HTTPException(status_code=400, detail=f"{field_name} too long")
+        record_id = save_manual_history_record(
+            company_name=company_name,
+            jd_text=payload.jd_text.strip(),
+            status=payload.status,
+            vendor_company_name=payload.vendor_company_name.strip(),
+            vendor_contact_name=payload.vendor_contact_name.strip(),
+            vendor_contact_email=payload.vendor_contact_email.strip(),
+            vendor_contact_phone=payload.vendor_contact_phone.strip(),
+            user_notes=payload.user_notes.strip(),
+        )
+        logger.info(f"Manual history record added: {record_id}")
+        return {"id": record_id, "status": "ok"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Add manual history error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to add record")
+
 @app.get("/api/tech-experience")
 @limiter.limit("60/minute")
 async def get_tech_experience(request: Request):
@@ -2129,7 +2181,7 @@ async def patch_history_status(request: Request, record_id: int, status_update: 
         if record_id <= 0:
             raise HTTPException(status_code=400, detail="Invalid record ID")
         # Validate status value
-        valid_statuses = ["Scanned", "Applied", "Phone Screen", "Interview", "Offer", "Rejected"]
+        valid_statuses = ["Scanned", "Matched", "Submitted Profile", "Applied", "Phone Screen", "Interview", "Offer", "Rejected"]
         if status_update.status not in valid_statuses:
             raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {', '.join(valid_statuses)}")
         update_resume_status(record_id, status_update.status)

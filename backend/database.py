@@ -108,6 +108,26 @@ def save_job_matcher_record(company_name: str, jd_text: str, match_percentage: i
     return record_id
 
 
+def save_manual_history_record(company_name: str, jd_text: str = '', status: str = 'Scanned',
+                                vendor_company_name: str = '', vendor_contact_name: str = '',
+                                vendor_contact_email: str = '', vendor_contact_phone: str = '',
+                                user_notes: str = ''):
+    """Inserts a History record entered by hand (no scan/match pipeline involved),
+    so it's tagged source='manual' and carries no score/match_percentage."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        INSERT INTO resumes (company_name, jd_text, score, file_path, created_at, status, source,
+                            vendor_company_name, vendor_contact_name, vendor_contact_email, vendor_contact_phone,
+                            user_notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (company_name, jd_text, 0, None, datetime.now().isoformat(), status, "manual",
+          vendor_company_name, vendor_contact_name, vendor_contact_email, vendor_contact_phone, user_notes))
+    record_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return record_id
+
 def update_vendor_details(record_id: int, vendor_company_name: str = '', vendor_contact_name: str = '',
                            vendor_contact_email: str = '', vendor_contact_phone: str = ''):
     conn = sqlite3.connect(DB_FILE)

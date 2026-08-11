@@ -2472,6 +2472,8 @@ export default function App() {
               >
                 <option value="">All Statuses</option>
                 <option value="Scanned">Scanned</option>
+                <option value="Matched">Matched</option>
+                <option value="Submitted Profile">Submitted Profile</option>
                 <option value="Applied">Applied</option>
                 <option value="Phone Screen">Phone Screen</option>
                 <option value="Interview">Interview</option>
@@ -2537,6 +2539,7 @@ export default function App() {
                           >
                             <option value="Scanned">Scanned</option>
                             {item.source === 'job-finder' && <option value="Matched">Matched</option>}
+                            <option value="Submitted Profile">Submitted Profile</option>
                             <option value="Applied">Applied</option>
                             <option value="Phone Screen">Phone Screen</option>
                             <option value="Interview">Interview</option>

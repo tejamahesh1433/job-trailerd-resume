@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 
 const API_BASE = 'http://localhost:8000';
 
-const STATUS_OPTIONS = ['Scanned', 'Applied', 'Phone Screen', 'Interview', 'Offer', 'Rejected'];
+const STATUS_OPTIONS = ['Scanned', 'Matched', 'Submitted Profile', 'Applied', 'Phone Screen', 'Interview', 'Offer', 'Rejected'];
 
 const SUBPAGES = [
   { key: 'notes', label: 'Notes' },
