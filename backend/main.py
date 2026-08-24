@@ -954,6 +954,323 @@ def _check_remote_only(jd_text: str) -> str | None:
     return None
 
 
+# Full US state names mapped to their 2-letter abbreviation, plus DC — used to validate
+# "City, State" matches in _extract_location so we don't pick up junk like "Dl Also" or
+# a stray two-letter acronym (e.g. "PV") that happens to follow a comma. Maps BOTH the
+# abbreviation and the full name (as lowercase keys) to one canonical, properly-cased
+# display name — JDs that only give a 2-letter code (e.g. "CT", "TX") should still show
+# up as the full state name ("Connecticut", "Texas") everywhere location is displayed.
+_US_STATE_CANONICAL = {
+    "al": "Alabama", "alabama": "Alabama",
+    "ak": "Alaska", "alaska": "Alaska",
+    "az": "Arizona", "arizona": "Arizona",
+    "ar": "Arkansas", "arkansas": "Arkansas",
+    "ca": "California", "california": "California",
+    "co": "Colorado", "colorado": "Colorado",
+    "ct": "Connecticut", "connecticut": "Connecticut",
+    "de": "Delaware", "delaware": "Delaware",
+    "fl": "Florida", "florida": "Florida",
+    "ga": "Georgia", "georgia": "Georgia",
+    "hi": "Hawaii", "hawaii": "Hawaii",
+    "id": "Idaho", "idaho": "Idaho",
+    "il": "Illinois", "illinois": "Illinois",
+    "in": "Indiana", "indiana": "Indiana",
+    "ia": "Iowa", "iowa": "Iowa",
+    "ks": "Kansas", "kansas": "Kansas",
+    "ky": "Kentucky", "kentucky": "Kentucky",
+    "la": "Louisiana", "louisiana": "Louisiana",
+    "me": "Maine", "maine": "Maine",
+    "md": "Maryland", "maryland": "Maryland",
+    "ma": "Massachusetts", "massachusetts": "Massachusetts",
+    "mi": "Michigan", "michigan": "Michigan",
+    "mn": "Minnesota", "minnesota": "Minnesota",
+    "ms": "Mississippi", "mississippi": "Mississippi",
+    "mo": "Missouri", "missouri": "Missouri",
+    "mt": "Montana", "montana": "Montana",
+    "ne": "Nebraska", "nebraska": "Nebraska",
+    "nv": "Nevada", "nevada": "Nevada",
+    "nh": "New Hampshire", "new hampshire": "New Hampshire",
+    "nj": "New Jersey", "new jersey": "New Jersey",
+    "nm": "New Mexico", "new mexico": "New Mexico",
+    "ny": "New York", "new york": "New York",
+    "nc": "North Carolina", "north carolina": "North Carolina",
+    "nd": "North Dakota", "north dakota": "North Dakota",
+    "oh": "Ohio", "ohio": "Ohio",
+    "ok": "Oklahoma", "oklahoma": "Oklahoma",
+    "or": "Oregon", "oregon": "Oregon",
+    "pa": "Pennsylvania", "pennsylvania": "Pennsylvania",
+    "ri": "Rhode Island", "rhode island": "Rhode Island",
+    "sc": "South Carolina", "south carolina": "South Carolina",
+    "sd": "South Dakota", "south dakota": "South Dakota",
+    "tn": "Tennessee", "tennessee": "Tennessee",
+    "tx": "Texas", "texas": "Texas",
+    "ut": "Utah", "utah": "Utah",
+    "vt": "Vermont", "vermont": "Vermont",
+    "va": "Virginia", "virginia": "Virginia",
+    "wa": "Washington", "washington": "Washington",
+    "wv": "West Virginia", "west virginia": "West Virginia",
+    "wi": "Wisconsin", "wisconsin": "Wisconsin",
+    "wy": "Wyoming", "wyoming": "Wyoming",
+    "dc": "Washington, D.C.", "district of columbia": "Washington, D.C.",
+    "pr": "Puerto Rico", "puerto rico": "Puerto Rico",
+}
+_US_STATE_ABBR = {k for k in _US_STATE_CANONICAL if len(k) == 2}
+_US_STATE_NAMES = {k for k in _US_STATE_CANONICAL if len(k) > 2}
+
+
+def _expand_state_abbr_tokens(text: str) -> str:
+    """Expand any standalone 2-letter US state abbreviation in an already-narrowed
+    location string (e.g. "Local to VA/TX", "Location: NJ") to its full name, so short
+    state codes read the same as spelled-out ones everywhere location is shown.
+
+    Only matches ALL-CAPS tokens (state codes are conventionally written "NJ"/"TX")
+    since several abbreviations double as common lowercase words ("in", "or", "hi",
+    "me", "pa", "la", "ok") that would otherwise get wrongly expanded.
+    """
+    return re.sub(
+        r'\b[A-Z]{2}\b',
+        lambda m: _US_STATE_CANONICAL.get(m.group(0).lower(), m.group(0)),
+        text,
+    )
+
+
+# IANA timezone for each state's majority/capital region, keyed by the canonical full
+# state name produced above. A handful of states span more than one zone (TX, FL, MI,
+# IN, KY, TN, ND, SD, NE, KS, ID, OR) — this uses whichever zone covers the state's
+# largest population center, since we only have a state-level (not city-level) location
+# to go on. Good enough for a "what time is it there right now" indicator, not exact
+# for every county.
+_US_STATE_TIMEZONE = {
+    "Alabama": "America/Chicago",
+    "Alaska": "America/Anchorage",
+    "Arizona": "America/Phoenix",
+    "Arkansas": "America/Chicago",
+    "California": "America/Los_Angeles",
+    "Colorado": "America/Denver",
+    "Connecticut": "America/New_York",
+    "Delaware": "America/New_York",
+    "Florida": "America/New_York",
+    "Georgia": "America/New_York",
+    "Hawaii": "Pacific/Honolulu",
+    "Idaho": "America/Boise",
+    "Illinois": "America/Chicago",
+    "Indiana": "America/Indiana/Indianapolis",
+    "Iowa": "America/Chicago",
+    "Kansas": "America/Chicago",
+    "Kentucky": "America/New_York",
+    "Louisiana": "America/Chicago",
+    "Maine": "America/New_York",
+    "Maryland": "America/New_York",
+    "Massachusetts": "America/New_York",
+    "Michigan": "America/Detroit",
+    "Minnesota": "America/Chicago",
+    "Mississippi": "America/Chicago",
+    "Missouri": "America/Chicago",
+    "Montana": "America/Denver",
+    "Nebraska": "America/Chicago",
+    "Nevada": "America/Los_Angeles",
+    "New Hampshire": "America/New_York",
+    "New Jersey": "America/New_York",
+    "New Mexico": "America/Denver",
+    "New York": "America/New_York",
+    "North Carolina": "America/New_York",
+    "North Dakota": "America/Chicago",
+    "Ohio": "America/New_York",
+    "Oklahoma": "America/Chicago",
+    "Oregon": "America/Los_Angeles",
+    "Pennsylvania": "America/New_York",
+    "Rhode Island": "America/New_York",
+    "South Carolina": "America/New_York",
+    "South Dakota": "America/Chicago",
+    "Tennessee": "America/Chicago",
+    "Texas": "America/Chicago",
+    "Utah": "America/Denver",
+    "Vermont": "America/New_York",
+    "Virginia": "America/New_York",
+    "Washington": "America/Los_Angeles",
+    "West Virginia": "America/New_York",
+    "Wisconsin": "America/Chicago",
+    "Wyoming": "America/Denver",
+    "Washington, D.C.": "America/New_York",
+    "Puerto Rico": "America/Puerto_Rico",
+}
+# Sorted longest-name-first so "New York" is checked before a shorter state name that
+# could otherwise false-match inside it.
+_US_STATE_NAME_MATCH_ORDER = sorted(_US_STATE_TIMEZONE, key=len, reverse=True)
+
+
+def _get_timezone_for_location(location: str) -> Optional[str]:
+    """Look up the IANA timezone for an already-extracted location string (e.g.
+    "Jersey City, New Jersey", "Local to Texas") by finding the full state name it
+    contains. Returns None for "Remote", "Not specified", or anything with no
+    recognizable US state, since there's nothing to show a live clock for."""
+    if not location:
+        return None
+    for state_name in _US_STATE_NAME_MATCH_ORDER:
+        if re.search(r'\b' + re.escape(state_name) + r'\b', location):
+            return _US_STATE_TIMEZONE[state_name]
+    return None
+
+
+def _extract_location(jd_text: str) -> str:
+    """Best-effort location extraction from raw JD text.
+
+    Real postings come in wildly different shapes (recruiter email pipe-lists like
+    "Title | City, ST | Duration | ...", scraped listings like "... at City, State, USA",
+    labeled fields like "Location: City, ST (Hybrid)", or plain "Hybrid in City, ST").
+    The old implementation only matched an explicit "location:"/"city:" label, which
+    missed the majority of real postings (~75% in a sample of production records) since
+    most recruiter emails just embed "City, ST" inline without a label at all.
+
+    Strategy: find every "City, State" occurrence (validated against real US state
+    names/abbreviations to avoid false positives like "Dl" or "PV"), preferring one
+    that appears near a location-ish label or early in the text (postings almost always
+    lead with role + location). Falls back to a labeled-field regex, then to a bare
+    "Remote" mention, then "Not specified".
+    """
+    if not jd_text:
+        return "Not specified"
+
+    # "City Name, ST" or "City Name, State Name" — 1-4 capitalized words, a comma, then
+    # a validated state abbreviation or full state name.
+    city_state_pattern = re.compile(
+        r'\b([A-Z][A-Za-z.\'\-]+(?:\s+[A-Z][A-Za-z.\'\-]+){0,3}),\s*'
+        r'([A-Za-z]{2}\b|(?:[A-Za-z]+\s){0,2}[A-Za-z]+)'
+    )
+
+    # Recruiter-spam postings often glue a role/label prefix straight onto the real
+    # place name (e.g. "Urgent Hiring Role- SRE Engineer Location-Charlotte, NC") —
+    # trim everything up to and including the last such lead-in word so only the
+    # actual place name remains.
+    lead_in_trim = re.compile(
+        r'\b(?:urgent(?:ly)?|hiring|role|location|position|title|opening|'
+        r'requirement|need(?:ed)?|immediate|job)\b[\s\-]*',
+        re.IGNORECASE,
+    )
+
+    candidates = []
+    for m in city_state_pattern.finditer(jd_text):
+        city = m.group(1).strip()
+        trims = list(lead_in_trim.finditer(city))
+        if trims:
+            city = city[trims[-1].end():].strip()
+        state_raw = m.group(2).strip().rstrip('.,;:')
+        state_lower = state_raw.lower()
+
+        if state_lower in _US_STATE_CANONICAL:
+            state_label = _US_STATE_CANONICAL[state_lower]
+        else:
+            # Trim trailing extra words picked up by the greedy state group and retry
+            # against just the first one or two words (e.g. "New York, NY 10004" or
+            # "Escondido, California – reputed").
+            first_word = state_lower.split()[0] if state_lower.split() else ""
+            first_two = " ".join(state_lower.split()[:2])
+            if first_word in _US_STATE_ABBR:
+                state_label = _US_STATE_CANONICAL[first_word]
+            elif first_two in _US_STATE_NAMES:
+                state_label = _US_STATE_CANONICAL[first_two]
+            elif first_word in _US_STATE_NAMES:
+                # single-word state name won't collide with first_two check above
+                continue
+            else:
+                continue
+
+        if city.lower() in ("remote", "hybrid", "onsite", "on-site"):
+            continue
+        if len(city) < 2:
+            continue
+
+        candidates.append((m.start(), f"{city}, {state_label}"))
+
+    if candidates:
+        # Prefer a match near an explicit location-ish label, else the earliest one —
+        # postings almost always state the role + location up front.
+        label_pattern = re.compile(r'(?:location|based in|work location|hybrid in|onsite in|remote in)\s*[:\-]?\s*$', re.IGNORECASE)
+        for pos, loc in candidates:
+            prefix = jd_text[max(0, pos - 25):pos]
+            if label_pattern.search(prefix):
+                return loc
+        return candidates[0][1]
+
+    # "Local to <place>" with no comma at all (e.g. "local to Charlotte North Carolina",
+    # "Local to VA/TX") — stop at the first word that isn't part of a place name instead
+    # of running into the rest of the sentence.
+    stop_words = (r'open|must|who|willing|candidates?|only|available|and|preferred|'
+                  r'required|able|apply|need|submit|based|work|position|role|duration|'
+                  r'interview|hybrid|onsite|on-site|remote|contract|visa|no|for|to\b')
+    local_to_m = re.search(
+        r'\blocal\s+to\s+([A-Z][A-Za-z/&,\-]+(?:\s+[A-Z][A-Za-z/&,\-]+){0,3}?)'
+        r'(?=\s+(?:' + stop_words + r')\b|[.\n,;:()]|$)',
+        jd_text, re.IGNORECASE,
+    )
+    if local_to_m:
+        candidate = local_to_m.group(1).strip().rstrip('.,:;')
+        if len(candidate) >= 2:
+            return f"Local to {_expand_state_abbr_tokens(candidate)}"
+
+    # Fallback: explicit labeled field without a clean "City, ST" (e.g. just a city
+    # name, or "Location: Remote"), stopping at the first non-place-like word or common
+    # delimiter instead of running to end-of-line so we don't swallow unrelated fields.
+    loc_m = re.search(
+        r'(?:location|based in|work location)\s*[:\-]\s*([A-Za-z][A-Za-z0-9 .,\'/&\-]{1,45}?)'
+        r'(?=\s+(?:' + stop_words + r')\b|[\n|•]|$)',
+        jd_text, re.IGNORECASE,
+    )
+    if loc_m:
+        candidate = loc_m.group(1).strip().rstrip('.,:;')
+        if len(candidate) >= 2:
+            return _expand_state_abbr_tokens(candidate)
+
+    if re.search(r'\bremote\b', jd_text, re.IGNORECASE):
+        return "Remote"
+
+    return "Not specified"
+
+
+def _detect_interview_mode(jd_text: str) -> str:
+    """Classify how the interview is conducted, since many JDs now hard-require
+    in-person/face-to-face rounds. In-person/F2F is checked first and wins over any
+    other mode mentioned in the same posting (e.g. "Video Interview -> Onsite Panel
+    Interview" is a multi-round process that still ends in a hard in-person
+    requirement, which is the part that matters for filtering)."""
+    if not jd_text:
+        return "Not specified"
+    text_lower = jd_text.lower()
+
+    in_person_patterns = [
+        r'\bf2f\b',
+        r'\bface[\s\-]?to[\s\-]?face\b',
+        r'\bin[\s\-]?person\s+interview\b',
+        r'\binterview\s*:?\s*in[\s\-]?person\b',
+        r'\bonsite\s+interview\b',
+        r'\bon-?site\s+interview\b',
+        r'\bin-?office\s+interview\b',
+        r'\bmust\s+(?:interview|come)\s+in[\s\-]?person\b',
+        r'\bcannot\s+submit\s+anyone\s+who\s+cannot\s+interview\s+in\s+person\b',
+    ]
+    if any(re.search(p, text_lower) for p in in_person_patterns):
+        return "In-Person / Face-to-Face Required"
+
+    video_patterns = [
+        r'\bvideo\s+interview',
+        r'\bvirtual\s+interview',
+        r'\bzoom\s+interview',
+        r'\bteams\s+interview',
+        r'\bwebex\s+interview',
+        r'\binterview\s*:?\s*(?:virtual|video)\b',
+    ]
+    if any(re.search(p, text_lower) for p in video_patterns):
+        return "Video/Virtual"
+
+    if re.search(r'\bphone\s+(?:screen|screening|interview)\b', text_lower):
+        return "Phone"
+
+    if re.search(r'\bonline\s+(?:assessment|interview)\b', text_lower):
+        return "Online Assessment"
+
+    return "Not specified"
+
+
 def _check_experience_years(jd_text: str, max_years: int = 10) -> str | None:
     """Reject postings that require more experience than the candidate has — same
     max-10-years cutoff already enforced on the Dashboard/Job Matcher scan paths
@@ -1991,15 +2308,17 @@ async def search_history(request: Request, q: str = "", limit: int = 50):
                 emails_found.add(m.group().lower())
 
             jd_lower = jd.lower()
-            location = "Not specified"
-            loc_m = re.search(r'(?:location|city|office|based in|work location)[:\s]*([^\n]{3,60})', jd, re.IGNORECASE)
-            if loc_m:
-                location = loc_m.group(1).strip().rstrip('.,:;')
+            location = _extract_location(jd)
+            interview_mode = _detect_interview_mode(jd)
+            timezone = _get_timezone_for_location(location)
 
             local_required = False
-            local_keywords = ["local candidates", "locals only", "local only", "must be local",
-                              "onsite only", "on-site only", "no relocation", "local to",
-                              "must reside", "must live in", "within commuting"]
+            local_keywords = ["local candidate", "locals only", "only locals", "local only",
+                              "must be local", "onsite only", "on-site only", "no relocation",
+                              "local to", "must reside", "must live in", "within commuting",
+                              "commutable distance", "driving distance", "day 1 onsite",
+                              "day one onsite", "strictly local", "local resource",
+                              "local talent", "100% onsite", "100% on-site"]
             for kw in local_keywords:
                 if kw in jd_lower:
                     local_required = True
@@ -2037,6 +2356,8 @@ async def search_history(request: Request, q: str = "", limit: int = 50):
                 "recruiter_name": recruiter_name,
                 "location": location,
                 "local_required": local_required,
+                "interview_mode": interview_mode,
+                "timezone": timezone,
                 "user_address": rec.get("user_address") or "",
                 "user_notes": rec.get("user_notes") or "",
                 "status": rec.get("status", "Scanned"),

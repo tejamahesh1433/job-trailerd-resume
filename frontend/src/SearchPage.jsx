@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 
 export default function SearchPage({ onSelectRecord }) {
   const [query, setQuery] = useState('');
@@ -13,6 +13,28 @@ export default function SearchPage({ onSelectRecord }) {
   const [editingNotesId, setEditingNotesId] = useState(null);
   const [notesDraft, setNotesDraft] = useState('');
   const [savingNotesId, setSavingNotesId] = useState(null);
+  const [now, setNow] = useState(new Date());
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const formatLocalTime = (timezone) => {
+    if (!timezone) return null;
+    try {
+      return now.toLocaleTimeString('en-US', {
+        timeZone: timezone,
+        hour: 'numeric',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: true,
+        timeZoneName: 'short',
+      });
+    } catch {
+      return null;
+    }
+  };
 
   const handleSearch = async () => {
     if (query.trim().length < 2) return;
@@ -147,6 +169,9 @@ export default function SearchPage({ onSelectRecord }) {
                   <div className="search-card-company">{r.company_name}</div>
                   <div className="search-card-badges">
                     {r.local_required && <span className="search-badge local">LOCAL ONLY</span>}
+                    {r.interview_mode === 'In-Person / Face-to-Face Required' && (
+                      <span className="search-badge local">IN-PERSON REQUIRED</span>
+                    )}
                     <span className="search-badge" style={{ color: scoreColor(r.score || r.match_percentage || 0), borderColor: scoreColor(r.score || r.match_percentage || 0) }}>
                       {r.source === 'job-finder' ? `${r.match_percentage || 0}% fit` : `${r.score || 0}% ATS`}
                     </span>
@@ -172,9 +197,21 @@ export default function SearchPage({ onSelectRecord }) {
                     </span>
                   </div>
                   <div className="search-info-item">
+                    <span className="search-info-label">Interview Mode</span>
+                    <span className="search-info-value" style={r.interview_mode === 'In-Person / Face-to-Face Required' ? { color: 'var(--danger)', fontWeight: 600 } : {}}>
+                      {r.interview_mode || 'Not specified'}
+                    </span>
+                  </div>
+                  <div className="search-info-item">
                     <span className="search-info-label">Date</span>
                     <span className="search-info-value">
                       {r.created_at ? new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '-'}
+                    </span>
+                  </div>
+                  <div className="search-info-item">
+                    <span className="search-info-label">Local Time</span>
+                    <span className="search-info-value">
+                      {formatLocalTime(r.timezone) || 'Not specified'}
                     </span>
                   </div>
                 </div>

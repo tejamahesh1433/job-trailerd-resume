@@ -171,6 +171,10 @@ Full-text search across company names, JD text, and scan results.
 | `q` | string | Yes | Search query (min 2 chars) |
 | `limit` | int | No | Max results (1-100, default 50) |
 
+`interview_mode` is one of: `"In-Person / Face-to-Face Required"`, `"Video/Virtual"`, `"Phone"`, `"Online Assessment"`, `"Not specified"` — parsed from JD text (F2F, "onsite interview", "video interview", "phone screen", etc.).
+
+`timezone` is the IANA timezone (e.g. `"America/New_York"`) of the job's US state, derived from `location`, or `null` if no US state could be identified (e.g. remote/unspecified). The frontend uses it to show a live clock per result.
+
 **Response:**
 ```json
 {
@@ -183,6 +187,8 @@ Full-text search across company names, JD text, and scan results.
             "recruiter_name": "John Smith",
             "location": "Remote, US",
             "local_required": false,
+            "interview_mode": "In-Person / Face-to-Face Required",
+            "timezone": "America/New_York",
             "user_address": "",
             "status": "Applied",
             "score": 87,
