@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import './index.css';
 import JobDetailWorkspace from './JobDetailWorkspace';
+import LocalTime from './LocalTime';
 
 export default function CommandCenter({ onSendToTailor, onSaveToApplications, onViewAllMatches, selectedResumeName, onChangeResume, initialJobId, onConsumeInitialJobId }) {
   const [selectedJobId, setSelectedJobId] = useState(null);
@@ -892,6 +893,11 @@ export function JobRow({ index, job, onSendToTailor, onSaveToApplications, onOpe
               }
             >
               {job.employment_type_label}
+            </span>
+          )}
+          {job.timezone && (
+            <span className="jdw-badge" style={{ background: 'transparent', color: 'var(--cream-dim)', borderColor: 'var(--border)' }}>
+              ⌚ <LocalTime timezone={job.timezone} />
             </span>
           )}
         </div>

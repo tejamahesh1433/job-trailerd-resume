@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import LocalTime from './LocalTime';
 
 const API_BASE = 'http://localhost:8000';
 const DEFAULT_FILTERS = [
@@ -396,7 +397,12 @@ export default function InboxPage({
                         </span>
                         <span className="inbox-message-subject">{msg.subject || '(no subject)'}</span>
                         {msg.matched_application && (
-                          <span className="inbox-match-pill">Applied: {msg.matched_application.company}</span>
+                          <span className="inbox-match-pill" style={{ display: 'inline-flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                            <span>Applied: {msg.matched_application.company}</span>
+                            {msg.matched_application.timezone && (
+                              <span style={{ color: 'var(--cream-dim)' }}>⌚ <LocalTime timezone={msg.matched_application.timezone} /></span>
+                            )}
+                          </span>
                         )}
                         <span className="inbox-message-snippet">{msg.snippet}</span>
                         <span className="inbox-message-meta">

@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
+import LocalTime from './LocalTime';
 
 export default function SearchPage({ onSelectRecord }) {
   const [query, setQuery] = useState('');
@@ -13,28 +14,6 @@ export default function SearchPage({ onSelectRecord }) {
   const [editingNotesId, setEditingNotesId] = useState(null);
   const [notesDraft, setNotesDraft] = useState('');
   const [savingNotesId, setSavingNotesId] = useState(null);
-  const [now, setNow] = useState(new Date());
-
-  useEffect(() => {
-    const id = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(id);
-  }, []);
-
-  const formatLocalTime = (timezone) => {
-    if (!timezone) return null;
-    try {
-      return now.toLocaleTimeString('en-US', {
-        timeZone: timezone,
-        hour: 'numeric',
-        minute: '2-digit',
-        second: '2-digit',
-        hour12: true,
-        timeZoneName: 'short',
-      });
-    } catch {
-      return null;
-    }
-  };
 
   const handleSearch = async () => {
     if (query.trim().length < 2) return;
@@ -211,7 +190,7 @@ export default function SearchPage({ onSelectRecord }) {
                   <div className="search-info-item">
                     <span className="search-info-label">Local Time</span>
                     <span className="search-info-value">
-                      {formatLocalTime(r.timezone) || 'Not specified'}
+                      <LocalTime timezone={r.timezone} />
                     </span>
                   </div>
                 </div>

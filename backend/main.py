@@ -1034,6 +1034,23 @@ def _expand_state_abbr_tokens(text: str) -> str:
     )
 
 
+_FULL_STATE_NAMES_BY_LENGTH = sorted(set(_US_STATE_CANONICAL.values()), key=len, reverse=True)
+
+
+def _format_city_state_comma(text: str) -> str:
+    """Insert a comma before a trailing full state name that has none (e.g. an
+    abbreviation fallback like "Naperville IL" that's already been expanded to
+    "Naperville Illinois" by _expand_state_abbr_tokens), so all extracted locations
+    read consistently as "City, State"."""
+    m = re.match(
+        r'^(.+?)\s+(' + '|'.join(re.escape(n) for n in _FULL_STATE_NAMES_BY_LENGTH) + r')$',
+        text,
+    )
+    if m and ',' not in m.group(1):
+        return f"{m.group(1).strip()}, {m.group(2)}"
+    return text
+
+
 # IANA timezone for each state's majority/capital region, keyed by the canonical full
 # state name produced above. A handful of states span more than one zone (TX, FL, MI,
 # IN, KY, TN, ND, SD, NE, KS, ID, OR) — this uses whichever zone covers the state's
@@ -1112,6 +1129,16 @@ def _get_timezone_for_location(location: str) -> Optional[str]:
     return None
 
 
+# Recruiter postings often cram several pseudo-fields onto one "Position:" line,
+# e.g. "Position: Azure DevOps Engineer : Local near Dallas TX: Only USA" — everything
+# from the first colon-delimited eligibility/location clause onward isn't the job title.
+_POSITION_TRAILING_JUNK = re.compile(
+    r'\s*:\s*(?:local(?:ly)?\b|remote\b|on-?site\b|hybrid\b|near\b|only\s+usa\b|'
+    r'usa\s+only\b|no\s+c2c\b|w2\s+only\b|visa\b|citizens?\b|green\s*card\b).*$',
+    re.IGNORECASE,
+)
+
+
 def _extract_location(jd_text: str) -> str:
     """Best-effort location extraction from raw JD text.
 
@@ -1132,10 +1159,17 @@ def _extract_location(jd_text: str) -> str:
         return "Not specified"
 
     # "City Name, ST" or "City Name, State Name" — 1-4 capitalized words, a comma, then
-    # a validated state abbreviation or full state name.
+    # a validated state abbreviation or full state name. The gap between city words is
+    # restricted to spaces/tabs (not newlines) so a label on the previous line (e.g.
+    # "ROLE :: GCP DevOps Engineer\n\nAustin, TX") can't bleed into the city name —
+    # real multi-word city names are always on one line.
+    # The 2-letter abbreviation branch requires uppercase (real postings always write
+    # state codes as "TX"/"OR"/"IN") — allowing lowercase caused false positives like
+    # "Azure DevOps, or GitLab CI" matching "or" as the Oregon abbreviation, since many
+    # state codes (OR, IN, ME, HI, OK, PA, CO, MA, WA...) are common English words.
     city_state_pattern = re.compile(
-        r'\b([A-Z][A-Za-z.\'\-]+(?:\s+[A-Z][A-Za-z.\'\-]+){0,3}),\s*'
-        r'([A-Za-z]{2}\b|(?:[A-Za-z]+\s){0,2}[A-Za-z]+)'
+        r'\b([A-Z][A-Za-z.\'\-]+(?:[ \t]+[A-Z][A-Za-z.\'\-]+){0,3})[ \t]*,[ \t]*'
+        r'([A-Z]{2}\b|(?:[A-Za-z]+\s){0,2}[A-Za-z]+)'
     )
 
     # Recruiter-spam postings often glue a role/label prefix straight onto the real
@@ -1144,7 +1178,7 @@ def _extract_location(jd_text: str) -> str:
     # actual place name remains.
     lead_in_trim = re.compile(
         r'\b(?:urgent(?:ly)?|hiring|role|location|position|title|opening|'
-        r'requirement|need(?:ed)?|immediate|job)\b[\s\-]*',
+        r'requirement|need(?:ed)?|immediate|job)\b[\s\-:]*',
         re.IGNORECASE,
     )
 
@@ -1156,6 +1190,15 @@ def _extract_location(jd_text: str) -> str:
             city = city[trims[-1].end():].strip()
         state_raw = m.group(2).strip().rstrip('.,;:')
         state_lower = state_raw.lower()
+        words_raw = state_raw.split()
+        first_word_raw = words_raw[0] if words_raw else ""
+
+        # 2-letter codes must appear uppercase in the source text to count as a state
+        # abbreviation — a lowercase 2-letter token is almost always an ordinary word
+        # ("or", "in", "on", "hi", "pa"...) that happens to collide with a real code,
+        # e.g. "Azure DevOps, or GitLab CI" falsely reading "or" as Oregon.
+        if len(state_raw) == 2 and state_lower in _US_STATE_ABBR and not state_raw.isupper():
+            continue
 
         if state_lower in _US_STATE_CANONICAL:
             state_label = _US_STATE_CANONICAL[state_lower]
@@ -1166,6 +1209,8 @@ def _extract_location(jd_text: str) -> str:
             first_word = state_lower.split()[0] if state_lower.split() else ""
             first_two = " ".join(state_lower.split()[:2])
             if first_word in _US_STATE_ABBR:
+                if len(first_word_raw) == 2 and not first_word_raw.isupper():
+                    continue
                 state_label = _US_STATE_CANONICAL[first_word]
             elif first_two in _US_STATE_NAMES:
                 state_label = _US_STATE_CANONICAL[first_two]
@@ -1182,10 +1227,29 @@ def _extract_location(jd_text: str) -> str:
 
         candidates.append((m.start(), f"{city}, {state_label}"))
 
+    if not candidates:
+        # "City State" with no comma at all (e.g. "Dallas Texas") — only matched against
+        # a full state name, never a 2-letter code, since a bare code right after a word
+        # with no comma is far too likely to collide with ordinary text ("... team IN
+        # progress"). Full state names are distinctive enough to be safe here.
+        full_state_names = sorted(set(_US_STATE_CANONICAL.values()), key=len, reverse=True)
+        city_state_nocomma_pattern = re.compile(
+            r'\b([A-Z][A-Za-z.\'\-]+(?:[ \t]+[A-Z][A-Za-z.\'\-]+){0,2})[ \t]+'
+            r'(' + '|'.join(re.escape(n) for n in full_state_names) + r')\b'
+        )
+        for m in city_state_nocomma_pattern.finditer(jd_text):
+            city = m.group(1).strip()
+            trims = list(lead_in_trim.finditer(city))
+            if trims:
+                city = city[trims[-1].end():].strip()
+            if city.lower() in ("remote", "hybrid", "onsite", "on-site") or len(city) < 2:
+                continue
+            candidates.append((m.start(), f"{city}, {m.group(2)}"))
+
     if candidates:
         # Prefer a match near an explicit location-ish label, else the earliest one —
         # postings almost always state the role + location up front.
-        label_pattern = re.compile(r'(?:location|based in|work location|hybrid in|onsite in|remote in)\s*[:\-]?\s*$', re.IGNORECASE)
+        label_pattern = re.compile(r'(?:location|based in|work location|hybrid in|onsite in|remote in)\s*[:\-]*\s*$', re.IGNORECASE)
         for pos, loc in candidates:
             prefix = jd_text[max(0, pos - 25):pos]
             if label_pattern.search(prefix):
@@ -1206,20 +1270,22 @@ def _extract_location(jd_text: str) -> str:
     if local_to_m:
         candidate = local_to_m.group(1).strip().rstrip('.,:;')
         if len(candidate) >= 2:
-            return f"Local to {_expand_state_abbr_tokens(candidate)}"
+            return f"Local to {_format_city_state_comma(_expand_state_abbr_tokens(candidate))}"
 
     # Fallback: explicit labeled field without a clean "City, ST" (e.g. just a city
-    # name, or "Location: Remote"), stopping at the first non-place-like word or common
-    # delimiter instead of running to end-of-line so we don't swallow unrelated fields.
+    # name, or "Location: Remote"), stopping at the first non-place-like word, an
+    # opening parenthesis (postings often annotate with "(Onsite)"/"(Hybrid)" right
+    # after the place name), or common delimiter instead of running to end-of-line so
+    # we don't swallow unrelated fields.
     loc_m = re.search(
-        r'(?:location|based in|work location)\s*[:\-]\s*([A-Za-z][A-Za-z0-9 .,\'/&\-]{1,45}?)'
-        r'(?=\s+(?:' + stop_words + r')\b|[\n|•]|$)',
+        r'(?:location|based in|work location)\s*[:\-]+\s*([A-Za-z][A-Za-z0-9 .,\'/&\-]{1,45}?)'
+        r'(?=\s+(?:' + stop_words + r')\b|[\n|•(]|$)',
         jd_text, re.IGNORECASE,
     )
     if loc_m:
         candidate = loc_m.group(1).strip().rstrip('.,:;')
         if len(candidate) >= 2:
-            return _expand_state_abbr_tokens(candidate)
+            return _format_city_state_comma(_expand_state_abbr_tokens(candidate))
 
     if re.search(r'\bremote\b', jd_text, re.IGNORECASE):
         return "Remote"
@@ -1269,6 +1335,33 @@ def _detect_interview_mode(jd_text: str) -> str:
         return "Online Assessment"
 
     return "Not specified"
+
+
+def _enrich_job_record(rec: dict) -> dict:
+    jd = rec.get("jd_text") or ""
+    jd_lower = jd.lower()
+    
+    location = _extract_location(jd)
+    interview_mode = _detect_interview_mode(jd)
+    timezone = _get_timezone_for_location(location)
+    
+    local_required = False
+    local_keywords = ["local candidate", "locals only", "only locals", "local only",
+                      "must be local", "onsite only", "on-site only", "no relocation",
+                      "local to", "must reside", "must live in", "within commuting",
+                      "commutable distance", "driving distance", "day 1 onsite",
+                      "day one onsite", "strictly local", "local resource",
+                      "local talent", "100% onsite", "100% on-site"]
+    for kw in local_keywords:
+        if kw in jd_lower:
+            local_required = True
+            break
+            
+    rec["location"] = location
+    rec["interview_mode"] = interview_mode
+    rec["timezone"] = timezone
+    rec["local_required"] = local_required
+    return rec
 
 
 def _check_experience_years(jd_text: str, max_years: int = 10) -> str | None:
@@ -2170,6 +2263,7 @@ async def get_history(request: Request, limit: int = 50, offset: int = 0):
             fp = r.get('file_path')
             pdf_path = f"{os.path.splitext(fp)[0]}.pdf" if fp else None
             r['pdf_path'] = pdf_path if pdf_path and os.path.exists(pdf_path) else None
+            _enrich_job_record(r)
         return records
     except Exception as e:
         logger.error(f"Get history error: {e}")
@@ -2307,41 +2401,55 @@ async def search_history(request: Request, q: str = "", limit: int = 50):
             for m in re.finditer(r'[\w.+-]+@[\w-]+\.[\w.-]+', jd):
                 emails_found.add(m.group().lower())
 
-            jd_lower = jd.lower()
-            location = _extract_location(jd)
-            interview_mode = _detect_interview_mode(jd)
-            timezone = _get_timezone_for_location(location)
-
-            local_required = False
-            local_keywords = ["local candidate", "locals only", "only locals", "local only",
-                              "must be local", "onsite only", "on-site only", "no relocation",
-                              "local to", "must reside", "must live in", "within commuting",
-                              "commutable distance", "driving distance", "day 1 onsite",
-                              "day one onsite", "strictly local", "local resource",
-                              "local talent", "100% onsite", "100% on-site"]
-            for kw in local_keywords:
-                if kw in jd_lower:
-                    local_required = True
-                    break
+            rec = _enrich_job_record(rec)
+            location = rec["location"]
+            interview_mode = rec["interview_mode"]
+            timezone = rec["timezone"]
+            local_required = rec["local_required"]
 
             position = "Not specified"
+            # ":+" (not just ":") since some recruiter postings use "ROLE :: Title" —
+            # a single ":" would only consume one of the two colons and leave the
+            # other stuck to the front of the captured title.
             role_patterns = [
-                r'^(?:job\s+title|position\s+title|role\s+title)\s*[:\-–]\s*(.{3,80})$',
-                r'^(?:title|position|role)\s*:\s*(.{3,80})$',
-                r'^(?:job|opening|vacancy)\s*:\s*(.{3,80})$',
+                r'^(?:job\s+title|position\s+title|role\s+title)\s*[:\-–]+\s*(.{3,80})$',
+                r'^(?:title|position|role)\s*:+\s*(.{3,80})$',
+                r'^(?:job|opening|vacancy)\s*:+\s*(.{3,80})$',
+                # non-greedy fallback for recruiter postings that cram multiple
+                # "Label: value" fields onto a single physical line with no
+                # newline between them, e.g. "Position: X Location: Y Duration: Z"
+                r'^(?:job\s+title|position\s+title|role\s+title|title|position|role)\s*[:\-–]+\s*(.+?)(?=\s*(?:location|duration|department|salary|pay\s+rate|rate|client|industry|employment\s+type|work\s+type|job\s+summary|job\s+description|responsibilities|requirements|qualifications)\s*[:\-–]|$)',
                 r'(?:hiring\s+(?:for|a)|looking\s+for\s+(?:a|an))\s+([A-Z][A-Za-z /&\-,]+)',
             ]
             for pat in role_patterns:
                 role_m = re.search(pat, jd, re.IGNORECASE | re.MULTILINE)
                 if role_m:
                     candidate = role_m.group(1).strip().rstrip('.,:;')
+                    candidate = _POSITION_TRAILING_JUNK.sub('', candidate).strip().rstrip('.,:;')
                     if len(candidate) >= 3 and len(candidate) <= 80:
                         position = candidate
                         break
             if position == "Not specified":
-                first_line = jd.strip().split('\n')[0].strip() if jd.strip() else ""
-                if 5 <= len(first_line) <= 80 and not any(w in first_line.lower() for w in ['hi ', 'hello', 'dear ', 'please', 'hope ', 'i am']):
-                    position = first_line.rstrip('.,:;')
+                bare_email_re = re.compile(r'^[\w.+\-]+@[\w\-]+\.[\w.\-]+$')
+                label_re = re.compile(r'(?:job\s*)?(?:title|position|role)\s*[:\-]+\s*(.+)$', re.IGNORECASE)
+                bare_label_prefix_re = re.compile(r'^(?:job\s*title|position|role)\s+(?=[A-Z])', re.IGNORECASE)
+                non_empty_lines = [ln.strip() for ln in jd.split('\n') if ln.strip()]
+                candidate_lines = [ln for ln in non_empty_lines[:8] if not bare_email_re.match(ln)]
+                chosen = None
+                for line in candidate_lines[:4]:
+                    label_m = label_re.search(line)
+                    if label_m:
+                        val = label_m.group(1).strip().rstrip('.,:;')
+                        val = _POSITION_TRAILING_JUNK.sub('', val).strip().rstrip('.,:;')
+                        if 3 <= len(val) <= 80:
+                            chosen = val
+                            break
+                if not chosen and candidate_lines:
+                    first_line = bare_label_prefix_re.sub('', candidate_lines[0])
+                    if 5 <= len(first_line) <= 80 and not any(w in first_line.lower() for w in ['hi ', 'hello', 'dear ', 'please', 'hope ', 'i am']):
+                        chosen = first_line.rstrip('.,:;')
+                if chosen:
+                    position = chosen
 
             recruiter_name = None
             name_m = re.search(r'(?:recruiter|hiring manager|contact|regards|thanks|best|sincerely)[,:\s]*\n?\s*([A-Z][a-z]+ [A-Z][a-z]+)', jd)
@@ -4795,6 +4903,8 @@ async def get_command_center_dashboard(request: Request):
             logger.warning(f"Failed to load inbox replies for dashboard: {e}")
             action_queue['inbox_replies'] = {'count': 0, 'items': []}
         top_jobs = [_annotate_employment_type(j) for j in get_found_jobs(5)]
+        for j in top_jobs:
+            _enrich_job_record(j)
 
         try:
             from services.scan_status import get_last_scan
@@ -4892,6 +5002,8 @@ async def get_job_matches(request: Request, limit: int = 20, offset: int = 0):
     limit = max(1, min(limit, 100))
     offset = max(0, offset)
     jobs = [_annotate_employment_type(j) for j in get_found_jobs(limit=limit, offset=offset)]
+    for j in jobs:
+        _enrich_job_record(j)
     total = get_found_jobs_count()
     return {"jobs": jobs, "total": total, "limit": limit, "offset": offset}
 
@@ -4967,7 +5079,9 @@ async def get_job_detail_endpoint(request: Request, job_id: int):
     job = get_job_detail(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return _annotate_employment_type(job)
+    job = _annotate_employment_type(job)
+    _enrich_job_record(job)
+    return job
 
 
 # Pipeline statuses as used throughout Command Center (pipeline overview, action

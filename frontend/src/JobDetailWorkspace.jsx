@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import './index.css';
+import LocalTime from './LocalTime';
 
 const API = 'http://localhost:8000';
 
@@ -301,6 +302,16 @@ export default function JobDetailWorkspace({ jobId, onClose, onSendToTailor, onS
                   >
                     {job.employment_type_label}
                   </span>
+                )}
+                {job.local_required && <span className="jdw-badge" style={{ color: 'var(--danger)', borderColor: 'var(--danger)' }}>Local Only</span>}
+                {job.interview_mode === 'In-Person / Face-to-Face Required' && (
+                  <span className="jdw-badge" style={{ color: 'var(--danger)', borderColor: 'var(--danger)' }}>In-Person Req.</span>
+                )}
+                {job.interview_mode && job.interview_mode !== 'In-Person / Face-to-Face Required' && job.interview_mode !== 'Not specified' && (
+                  <span className="jdw-badge jdw-badge-muted">{job.interview_mode}</span>
+                )}
+                {job.timezone && (
+                  <span className="jdw-badge jdw-badge-muted">⌚ <LocalTime timezone={job.timezone} /></span>
                 )}
                 <span className="jdw-badge jdw-badge-muted">{STAGE_LABELS[job.status] || job.status}</span>
               </div>
