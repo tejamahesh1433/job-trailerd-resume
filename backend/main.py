@@ -664,8 +664,11 @@ def _enforce_page_target(working_bytes: bytes, jd_text: str, target_pages: int, 
             break
         if not extra_removals:
             break
-        working_bytes = remove_bullets(working_bytes, extra_removals).read()
-        all_removals.extend(extra_removals)
+        working_stream, applied_removals = remove_bullets(working_bytes, extra_removals)
+        working_bytes = working_stream.read()
+        if not applied_removals:
+            break
+        all_removals.extend(applied_removals)
         new_page_count = _count_docx_pages(working_bytes)
         if new_page_count is None or new_page_count >= page_count:
             page_count = new_page_count if new_page_count is not None else page_count
@@ -673,6 +676,28 @@ def _enforce_page_target(working_bytes: bytes, jd_text: str, target_pages: int, 
         page_count = new_page_count
 
     return working_bytes, all_removals, page_count
+
+
+def _filter_replacements_overlapping_removals(replacements: list, removals: list) -> list:
+    """Drop any replacement whose 'original' bullet text is also being deleted via
+    removals. remove_bullets() runs before create_tailored_docx(), so if the same bullet
+    (or a near-duplicate) appears in both lists, its paragraph is already gone by the
+    time create_tailored_docx looks for it — the exact-match pass fails and it falls
+    back to fuzzy-matching some OTHER paragraph, silently overwriting unrelated resume
+    content. The AI prompt asks for no overlap but nothing enforces it, so this is a
+    defensive guard against a non-compliant response."""
+    if not removals:
+        return replacements
+    norm_removals = {" ".join(r.split()) for r in removals if r and r.strip()}
+    if not norm_removals:
+        return replacements
+    kept = []
+    for rep in replacements:
+        norm_orig = " ".join((rep.get('original') or '').split())
+        if norm_orig and any(norm_orig in nr or nr in norm_orig for nr in norm_removals):
+            continue
+        kept.append(rep)
+    return kept
 
 
 def _job_artifact_dir(record_id: int, company_name: str) -> str:
@@ -2061,8 +2086,10 @@ async def _scan_resume_core(
 
         elif replacements or removals:
             working_bytes = file_bytes
+            replacements = _filter_replacements_overlapping_removals(replacements, removals)
             if removals:
-                working_bytes = remove_bullets(working_bytes, removals).read()
+                working_stream, removals = remove_bullets(working_bytes, removals)
+                working_bytes = working_stream.read()
                 logger.info(f"Removed {len(removals)} bullets for {company_name} per AI notes")
             working_bytes = create_tailored_docx(working_bytes, replacements).read()
             logger.info(f"Applied {len(replacements)} replacements for {company_name}")
@@ -2250,8 +2277,10 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
 
     elif replacements or removals:
         working_bytes = file_bytes
+        replacements = _filter_replacements_overlapping_removals(replacements, removals)
         if removals:
-            working_bytes = remove_bullets(working_bytes, removals).read()
+            working_stream, removals = remove_bullets(working_bytes, removals)
+            working_bytes = working_stream.read()
         working_bytes = create_tailored_docx(working_bytes, replacements).read()
         if target_pages:
             working_bytes, removals, final_pages = _enforce_page_target(

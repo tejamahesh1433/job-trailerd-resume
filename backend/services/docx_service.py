@@ -196,14 +196,19 @@ def create_tailored_docx(original_bytes: bytes, replacements: list) -> BytesIO:
     out_stream.seek(0)
     return out_stream
 
-def remove_bullets(original_bytes: bytes, removals: list) -> BytesIO:
+def remove_bullets(original_bytes: bytes, removals: list) -> tuple:
     """Delete whole paragraphs (not just their text) so the AI's page-length/shortening
     instructions can actually reduce the document, unlike create_tailored_docx's
     replacements which always keep one paragraph per bullet. Only removes paragraphs
     that live directly in the document body — paragraphs inside table cells are skipped
     since a cell must always keep at least one paragraph, and this resume template
-    doesn't use tables for bullets anyway."""
+    doesn't use tables for bullets anyway.
+    Returns (BytesIO, applied) where applied is the subset of `removals` that actually
+    matched and got deleted — callers must use this (not the original `removals` list)
+    for accurate "N bullets removed" reporting, since some entries may not match any
+    paragraph."""
     doc = docx.Document(BytesIO(original_bytes))
+    applied = []
 
     for text in removals:
         if not text or not text.strip():
@@ -218,11 +223,12 @@ def remove_bullets(original_bytes: bytes, removals: list) -> BytesIO:
             continue
 
         para._p.getparent().remove(para._p)
+        applied.append(text)
 
     out_stream = BytesIO()
     doc.save(out_stream)
     out_stream.seek(0)
-    return out_stream
+    return out_stream, applied
 
 def insert_bullets_after(original_bytes: bytes, insertions: list) -> BytesIO:
     """Insert new bullet paragraphs into the document, each cloned right after

@@ -193,6 +193,8 @@ Return ONLY valid JSON (no markdown, no code blocks):
         log_api_call(GEMINI_FAST_MODEL, "vendor_research",
                      input_tokens=usage.prompt_token_count or 0,
                      output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
+    else:
+        log_api_call(GEMINI_FAST_MODEL, "vendor_research", input_tokens=1500, output_tokens=200)
     return json.loads(response.text)
 
 
@@ -239,6 +241,8 @@ Return ONLY valid JSON: {{"removals": ["<exact bullet text>", ...]}}"""
         log_api_call(GEMINI_FAST_MODEL, "trim_resume_length",
                      input_tokens=usage.prompt_token_count or 0,
                      output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
+    else:
+        log_api_call(GEMINI_FAST_MODEL, "trim_resume_length", input_tokens=3000, output_tokens=300)
     return json.loads(response.text).get("removals", [])
 
 
