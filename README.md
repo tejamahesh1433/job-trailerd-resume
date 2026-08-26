@@ -6,7 +6,7 @@ An AI-assisted pipeline for tailoring resumes to job descriptions, tracking appl
 
 Job Tailored Resume automates the repetitive parts of a job search:
 
-- **Resume tailoring** — given a job description and a base `.docx` resume, an LLM (Gemini, with Claude/OpenAI/Ollama fallback options) proposes bullet replacements, removals, and insertions, which are applied directly to the Word document while preserving formatting. A page-count enforcement loop retries trimming until the tailored resume fits the target page count.
+- **Resume tailoring** — given a job description and a base `.docx` resume, an LLM (Gemini, with Claude/OpenAI fallback options) proposes bullet replacements, removals, and insertions, which are applied directly to the Word document while preserving formatting. A page-count enforcement loop retries trimming until the tailored resume fits the target page count.
 - **Job matching** — scans job postings (via RapidAPI job-search sources) and scores them against your profile/experience, surfacing the best matches in a command-center view.
 - **Inbox tracking** — connects to Gmail to detect and label recruiter replies, interview invites, rejections, and exam requests, matching them back to the application they belong to.
 - **Timezone / interview-mode awareness** — parses job location and email content to surface the job's local time and whether the interview process is remote, hybrid, or requires in-person attendance.
@@ -25,7 +25,116 @@ job-trailers-resume/
 - **Backend**: FastAPI (`backend/main.py`, app title `Job Tailored Resume API`), with feature logic split into `backend/services/` (AI tailoring, docx manipulation, Gmail, scheduler, usage tracking, notifications, etc.). Resumes are edited in-place with `python-docx`; PDF page counts are checked via `pypdfium2`/`docx2pdf` (Windows/Word required for DOCX→PDF conversion).
 - **Frontend**: React 19 + Vite, talking to the backend over a local REST API (`http://localhost:8000`). Pages include Command Center, Job Matcher, Search, Inbox, Notes/History, Exam, and Submitted Profile views.
 - **Data flow**: job postings → matching/scoring → resume tailoring (LLM + docx edits) → application tracked → Gmail inbox polled/labeled → matched back to the application → dashboard + notifications updated.
-- **AI providers**: Gemini (`google-genai`) is the primary model, with Anthropic, OpenAI, and local Ollama available as configurable fallbacks (see `model_config.py`).
+- **AI providers**: Gemini (`google-genai`) is the primary model, with Anthropic and OpenAI available as configurable fallbacks (see `model_config.py`).
+- **Storage**: a single SQLite table (`resumes`, in `backend/database.py` → `data/resumes.db`) backs every product surface (Resume Tailor, Job Finder, Command Center, manually-added jobs), distinguished by a `source` column, alongside per-company output folders on disk (`trailerd/`, `online-platform/`).
+
+### High-Level Diagram
+
+```mermaid
+graph TB
+    User((User))
+
+    subgraph Frontend["Frontend — React 19 + Vite"]
+        CC["CommandCenter.jsx"]
+        JDW["JobDetailWorkspace.jsx"]
+        JM["JobMatcher.jsx / JobMatches.jsx"]
+        IB["InboxPage.jsx"]
+        SP["SearchPage.jsx"]
+        NP["NotesPage.jsx / HistoryPage.jsx"]
+    end
+
+    subgraph Backend["Backend — FastAPI (main.py)"]
+        Router["Routes + orchestration"]
+
+        subgraph Services["services/"]
+            AIS["ai_service.py — Gemini"]
+            OLS["ollama_service.py — OpenAI client"]
+            DXS["docx_service.py — DOCX edits"]
+            GMS["gmail_service.py"]
+            SCH["scheduler.py"]
+            IM["inbox_matcher.py"]
+            UTS["usage_tracker.py"]
+            TGS["telegram_service.py / telegram_notifier.py"]
+        end
+
+        DB[("SQLite — resumes.db")]
+        FS[("File system — trailerd/, online-platform/, original/")]
+    end
+
+    subgraph External["External Services"]
+        Gemini["Google Gemini API"]
+        Claude["Anthropic Claude API"]
+        OpenAI["OpenAI API"]
+        Gmail["Gmail API"]
+        TGBot["Telegram Bot API"]
+        JSearch["Job search sources (RapidAPI)"]
+        Word["MS Word COM — docx2pdf, Windows only"]
+    end
+
+    User -->|Browser| CC
+    User -->|Telegram| TGBot
+    CC --> JDW
+    CC & JM & IB & SP & NP & JDW -->|REST API| Router
+
+    Router --> AIS & OLS & DXS & GMS & SCH & IM & UTS & TGS
+    Router --> DB
+    Router --> FS
+    Router -->|job scoring| Claude
+    Router -->|auto-search| JSearch
+
+    AIS --> Gemini
+    OLS --> OpenAI
+    GMS --> Gmail
+    TGS --> TGBot
+    DXS -.->|page-count check, best-effort| Word
+```
+
+### Resume Tailoring Flow
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant F as Frontend
+    participant B as Backend (main.py)
+    participant AI as ai_service.py (Gemini)
+    participant D as docx_service.py
+    participant DB as SQLite
+
+    U->>F: Submit resume + job description
+    F->>B: POST /api/scan
+    B->>AI: Request tailoring suggestions
+    AI-->>B: Replacements / removals / insertions
+    B->>D: Apply edits to .docx (fuzzy paragraph match)
+    D-->>B: Tailored .docx bytes
+    B->>B: Check page count (pypdfium2 / docx2pdf)
+    alt Over target page count
+        B->>AI: Request additional trims
+        AI-->>B: More removals
+        B->>D: Remove bullets, re-check
+    end
+    B->>DB: Save application record
+    B-->>F: Tailored resume + match summary
+    F-->>U: Download / review
+```
+
+### Inbox Matching Flow
+
+```mermaid
+sequenceDiagram
+    participant Loop as inbox_matcher.py (30-min loop)
+    participant Gmail as Gmail API
+    participant AI as ai_service.py
+    participant DB as SQLite
+    participant TG as Telegram
+
+    Loop->>Gmail: Fetch recent messages
+    Gmail-->>Loop: Message list
+    Loop->>Loop: Heuristic match (domain / company / title)
+    Loop->>AI: Classify ambiguous messages
+    AI-->>Loop: Category (interview / rejection / exam / other)
+    Loop->>DB: Link message to tracked application
+    Loop->>TG: Notify on new match
+```
 
 ## Getting Started
 
@@ -34,7 +143,7 @@ job-trailers-resume/
 - Python 3.13+
 - Node.js 22+
 - Docker + Docker Compose (optional, for the containerized workflow)
-- A Gemini API key (required); Anthropic/OpenAI keys and a local Ollama instance are optional fallbacks
+- A Gemini API key (required); Anthropic/OpenAI keys are optional fallbacks
 - Google OAuth credentials if you want Gmail inbox tracking
 - Windows + Microsoft Word if you run resume tailoring outside Docker (DOCX→PDF conversion uses `docx2pdf`/COM automation)
 
@@ -101,7 +210,7 @@ backend/
 │   ├── inbox_cache.py           Cached inbox state
 │   ├── inbox_matcher.py         Matches inbox messages to tracked applications
 │   ├── model_config.py          AI provider/model selection and fallback config
-│   ├── ollama_service.py        Local Ollama model support
+│   ├── ollama_service.py        OpenAI client (mail/follow-up drafts) — legacy filename, not actually Ollama
 │   ├── profile_service.py       User profile management
 │   ├── scan_status.py           Resume-scan job status tracking
 │   ├── scheduler.py             Background job scheduling
@@ -164,7 +273,7 @@ Key environment variables from `backend/.env.example` (see that file for the ful
 | `GEMINI_API_KEY` | Primary LLM provider (required) |
 | `ANTHROPIC_API_KEY` | Optional fallback LLM provider |
 | `OPENAI_API_KEY` | Optional fallback LLM provider |
-| `OLLAMA_URL` | Optional local LLM endpoint |
+| `OLLAMA_URL` | Present in `.env.example`; unused by current code (`ollama_service.py` actually calls OpenAI) |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Gmail OAuth credentials |
 | `GMAIL_REDIRECT_URI` | OAuth redirect URI for Gmail |
 | `FRONTEND_URL` | Frontend base URL used in OAuth redirects |
