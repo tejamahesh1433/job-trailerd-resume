@@ -13,7 +13,7 @@ def _get_gemini_client() -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
-def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "") -> dict:
+def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "", length_hint: dict | None = None) -> dict:
     client = _get_gemini_client()
 
     notes_section = ""
@@ -23,9 +23,31 @@ def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "") -> dict:
     {ai_notes.strip()}
 """
 
+    length_target_block = ""
+    if length_hint:
+        current_pages = length_hint.get("current_pages")
+        target_pages = length_hint.get("target_pages")
+        bullet_count = length_hint.get("bullet_count")
+        if current_pages and target_pages and current_pages > target_pages:
+            cut_fraction = min(0.6, 1 - (target_pages / current_pages))
+            min_removals = max(3, round(bullet_count * cut_fraction))
+            length_target_block = f"""
+    MEASURED LENGTH TARGET (this overrides the general guidance in Task 9 below — follow these numbers exactly):
+    - This resume, in its actual rendered Word layout, is currently {current_pages} page(s) long.
+    - The user wants it to fit in {target_pages} page(s).
+    - It has approximately {bullet_count} bullet points total.
+    - Removing only 1-3 bullets will NOT change the page count — you must remove AT LEAST {min_removals} bullet points entirely via the "removals" array to have any real chance of reaching {target_pages} page(s).
+    - Err on the side of removing MORE than {min_removals} rather than fewer — a resume that is still too long fails the user's request. It is acceptable to leave as few as 2 bullets for an older/less relevant employer if needed to hit the target.
+    - Spread the cuts across the least JD-relevant and oldest/least-relevant employers first, but you may need to cut from every employer to reach {min_removals}+ removals.
+"""
+        elif target_pages:
+            length_target_block = f"""
+    MEASURED LENGTH TARGET: the user wants the resume to fit in {target_pages} page(s). Its exact current page count could not be measured, so use your best judgment on how many bullets need to be cut in the "removals" array (see Task 9) to plausibly reach that length — a couple of bullets is very unlikely to be enough for a multi-job resume.
+"""
+
     prompt = f"""
     You are an expert ATS (Applicant Tracking System) scanner and career coach specializing in DevOps engineering roles.
-{notes_section}
+{notes_section}{length_target_block}
     Job Description:
     {jd_text}
 
@@ -51,6 +73,20 @@ def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "") -> dict:
     Task 5: Identify up to 10 keywords from the JD that are missing from the resume.
     Task 6: Break down the original score into 4 section scores (0-100): "Skills", "Experience", "Education", "Summary".
     Task 7: Extract the RECRUITER/VENDOR contact info from the Job Description (NOT the candidate's info from the resume). Look for names, email addresses, and phone numbers in the JD's signature block, header, or body. Return null for any field not found.
+    Task 8: HEADLINE & ROLE TITLE ALIGNMENT — the resume's job titles must also be tailored, not just the bullet content.
+    - Find the candidate's professional headline/title: the short title line directly beneath their name at the very top of the resume (e.g. "Senior DevOps Engineer").
+    - Determine the position title actually being hired for from the JD (e.g. "Site Reliability Engineer", "Platform Engineer", "Cloud Engineer", "DevOps Manager").
+    - If the JD's title differs from the resume's current headline, rewrite the headline to align with the JD's title. Keep it truthful and within the candidate's DevOps/Cloud/Infrastructure domain — never rebrand into an unrelated discipline (e.g. never turn it into "Software Developer" or "Data Scientist").
+    - Do the SAME for the job-title line (e.g. "Role: ...", "Title: ...", or equivalent) of ONLY the two MOST RECENT work experience entries — the first two employers listed under Professional/Work Experience in reverse-chronological order at the top of that section. Rewrite each of those two title lines to align with the JD's position title, staying consistent with what that specific job's own bullets describe. Do NOT touch the title line of any older/earlier employer.
+    - MANDATORY, DO NOT SKIP: if the resume has two or more work experience entries, you MUST produce a role-title replacement for BOTH of the two most recent employers — not just the first/most recent one. Before finalizing your answer, check that your "replacements" array contains: (1) the headline replacement, (2) a role-title replacement for employer #1 (most recent), AND (3) a role-title replacement for employer #2 (second most recent). All three are required whenever the JD's title differs from the resume's current titles.
+    - Add the headline change and each of the (up to two) role-title changes as their own entries in the "replacements" array, exactly like a bullet rewrite — "original" must be the exact existing title line text, "new" is the rewritten title line.
+    Task 9: RESUME LENGTH / PAGE COUNT — only do this if USER INSTRUCTIONS above explicitly ask for a target length (e.g. "keep it to 3 pages", "make it 4 pages max", "shorten it", "make it more concise", "trim it down"). If a MEASURED LENGTH TARGET block appears above, its numbers are mandatory minimums — do not undershoot them.
+    - Select entire bullet points to remove COMPLETELY (not reword) to reach that length — do not merely shrink wording, actually cut whole bullets. A handful of cuts is almost never enough on a multi-job resume; be aggressive.
+    - Prioritize cutting: the least JD-relevant bullets first, bullets from the oldest/least relevant employers first, and redundant/lower-impact bullets within any section.
+    - NEVER remove ALL bullets from a single job entry — always leave at least 2-3 bullets per role so the section still reads coherently.
+    - NEVER remove the candidate's name, contact line, headline, section headers, or the "Environment:" tech-stack lines.
+    - Return the EXACT, CHARACTER-FOR-CHARACTER text of every bullet to delete in a "removals" array. A bullet listed in "removals" must NOT also appear in "replacements".
+    - If no length/shortening instruction was given in USER INSTRUCTIONS, return an empty "removals" array — do not remove content unless explicitly asked.
 
     CRITICAL CONSTRAINT ON REPLACEMENTS:
     - The candidate is a DevOps/Cloud/Infrastructure engineer. ALL replacements MUST stay within DevOps, Cloud, Infrastructure, SRE, and Platform Engineering domains.
@@ -86,6 +122,9 @@ def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "") -> dict:
                 "new": "<new tailored string>",
                 "keywords_added": ["<keyword1>", "<keyword2>"]
             }}
+        ],
+        "removals": [
+            "<exact string of a bullet to delete entirely, only if a target length was requested>"
         ]
     }}
     """
@@ -155,6 +194,52 @@ Return ONLY valid JSON (no markdown, no code blocks):
                      input_tokens=usage.prompt_token_count or 0,
                      output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
     return json.loads(response.text)
+
+
+def trim_resume_length(resume_text: str, jd_text: str, target_pages: int, current_pages: int, bullet_count: int) -> list:
+    """Follow-up trim pass used only when a first analyze_resume() removals pass wasn't
+    aggressive enough to hit the user's requested page count (verified by actually
+    rendering the docx and counting pages) — a lighter, removals-only call on the
+    ALREADY-reduced resume text, so it doesn't redo scoring/replacements work that's
+    already done. Returns a plain list of exact bullet strings to delete; never raises —
+    callers should treat an exception as "no further cuts possible" and stop looping."""
+    client = _get_gemini_client()
+
+    cut_fraction = min(0.6, 1 - (target_pages / current_pages)) if current_pages > target_pages else 0.25
+    min_removals = max(2, round(bullet_count * cut_fraction))
+
+    prompt = f"""This DevOps/Cloud/Infrastructure engineer's resume has already been tailored to a job description
+once, but is STILL too long. You must select MORE bullet points to remove entirely to shorten it further.
+
+Job Description (for relevance judgment only):
+{jd_text[:6000]}
+
+Current Resume (already tailored once):
+{resume_text}
+
+Current measured length: {current_pages} page(s). Target: {target_pages} page(s). The resume has approximately
+{bullet_count} bullet points remaining. You must select AT LEAST {min_removals} more bullets to remove completely —
+be aggressive, since a resume that's still too long fails the user's request.
+
+Rules:
+- NEVER remove ALL bullets from a single job entry — leave at least 2 bullets per role.
+- NEVER remove the name, contact line, headline, section headers, or "Environment:" tech-stack lines.
+- Prioritize cutting the oldest/least relevant employers and the least JD-relevant bullets first.
+- Return the EXACT, CHARACTER-FOR-CHARACTER text of each bullet to delete.
+
+Return ONLY valid JSON: {{"removals": ["<exact bullet text>", ...]}}"""
+
+    response = client.models.generate_content(
+        model=GEMINI_FAST_MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.2),
+    )
+    usage = response.usage_metadata
+    if usage:
+        log_api_call(GEMINI_FAST_MODEL, "trim_resume_length",
+                     input_tokens=usage.prompt_token_count or 0,
+                     output_tokens=(usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0))
+    return json.loads(response.text).get("removals", [])
 
 
 def generate_additional_points(resume_text: str, jd_text: str, points_text: str, target_hint: str = "") -> dict:

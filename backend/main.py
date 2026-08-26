@@ -33,9 +33,9 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from fastapi.responses import RedirectResponse
-from services.ai_service import analyze_resume, generate_cover_letter, analyze_job_metadata, generate_additional_points, generate_recruiter_outreach_email, generate_checkin_followup_email, generate_linkedin_message, extract_contacts_from_text
+from services.ai_service import analyze_resume, generate_cover_letter, analyze_job_metadata, generate_additional_points, generate_recruiter_outreach_email, generate_checkin_followup_email, generate_linkedin_message, extract_contacts_from_text, trim_resume_length
 from services.ollama_service import generate_mail_draft, generate_follow_up, detect_w2_fulltime
-from services.docx_service import extract_text_from_docx, create_tailored_docx, insert_bullets_after
+from services.docx_service import extract_text_from_docx, create_tailored_docx, insert_bullets_after, remove_bullets
 from services import gmail_service
 from services.profile_service import process_uploaded_doc
 from services.usage_tracker import get_usage_stats
@@ -571,6 +571,108 @@ def _convert_docx_to_pdf(docx_path: str) -> Optional[str]:
         return None
     finally:
         shutil.rmtree(profile_dir, ignore_errors=True)
+
+
+def _count_docx_pages(file_bytes: bytes) -> Optional[int]:
+    """Best-effort real page count for a .docx, used only when the user's AI notes ask
+    for a specific page count — word/line counting is too unreliable a proxy for actual
+    rendered page count (fonts, margins, header spacing all vary), so this renders the
+    real document via the same docx->pdf path used for the downloadable PDF and counts
+    pages. Returns None if conversion tooling (MS Word / LibreOffice) isn't available —
+    callers must fall back to a word-count heuristic in that case."""
+    tmp_docx = os.path.join(tempfile.gettempdir(), f"pagecount_{uuid.uuid4().hex}.docx")
+    tmp_pdf = None
+    try:
+        with open(tmp_docx, "wb") as f:
+            f.write(file_bytes)
+        tmp_pdf = _convert_docx_to_pdf(tmp_docx)
+        if not tmp_pdf:
+            return None
+        import pypdfium2 as pdfium
+        pdf = pdfium.PdfDocument(tmp_pdf)
+        return len(pdf)
+    except Exception as e:
+        logger.warning(f"Page count estimation failed: {e}")
+        return None
+    finally:
+        for p in (tmp_docx, tmp_pdf):
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+
+_PAGE_TARGET_RE = re.compile(r'(\d+)\s*(?:-|\s|to)*\s*(?:page|pg)s?\b', re.IGNORECASE)
+
+
+def _parse_target_page_count(ai_notes: str) -> Optional[int]:
+    """Pull a target page count out of free-text AI notes (e.g. 'keep it to 3 pages',
+    'make it 4 pages max'). Returns the smallest mentioned number — if a user says
+    '3 or 4 pages' the tighter target is the safer one to aim for."""
+    if not ai_notes:
+        return None
+    matches = [int(m) for m in _PAGE_TARGET_RE.findall(ai_notes)]
+    matches = [m for m in matches if 1 <= m <= 10]
+    return min(matches) if matches else None
+
+
+def _estimate_bullet_count(resume_text: str) -> int:
+    """Rough count of actual bullet/description lines in extracted resume text, used
+    only to give the AI a concrete minimum-removals number when trimming for a page
+    target — excludes section headers, role/title lines, company/date lines, and
+    Environment: tech-stack lines, which should never be counted as removable bullets."""
+    count = 0
+    for line in resume_text.split("\n"):
+        line = line.strip()
+        if not line or len(line) < 40:
+            continue
+        if line.isupper():
+            continue
+        if line.lower().startswith(("role:", "title:", "environment:")):
+            continue
+        if " | " in line:
+            continue
+        count += 1
+    return count
+
+
+def _enforce_page_target(working_bytes: bytes, jd_text: str, target_pages: int, all_removals: list,
+                          max_extra_passes: int = 2) -> tuple:
+    """Bounded verify-and-retry loop for page-count enforcement. The first analyze_resume()
+    removals pass is computed from a proportional bullet estimate, which reliably
+    under-delivers because fixed-overhead content (headers, certs, contact info) doesn't
+    shrink — so this re-measures the REAL rendered page count after applying removals and,
+    if still over target, asks for more cuts from the now-shorter resume text. Bounded to
+    max_extra_passes so a stubborn document can't trigger unbounded API calls.
+    Returns (working_bytes, all_removals, final_page_count)."""
+    page_count = _count_docx_pages(working_bytes)
+    if page_count is None:
+        return working_bytes, all_removals, None
+
+    for _ in range(max_extra_passes):
+        if page_count <= target_pages:
+            break
+        resume_text = extract_text_from_docx(working_bytes)
+        bullet_count = _estimate_bullet_count(resume_text)
+        if bullet_count < 5:
+            break
+        try:
+            extra_removals = trim_resume_length(resume_text, jd_text, target_pages, page_count, bullet_count)
+        except Exception as e:
+            logger.warning(f"trim_resume_length follow-up pass failed: {e}")
+            break
+        if not extra_removals:
+            break
+        working_bytes = remove_bullets(working_bytes, extra_removals).read()
+        all_removals.extend(extra_removals)
+        new_page_count = _count_docx_pages(working_bytes)
+        if new_page_count is None or new_page_count >= page_count:
+            page_count = new_page_count if new_page_count is not None else page_count
+            break
+        page_count = new_page_count
+
+    return working_bytes, all_removals, page_count
 
 
 def _job_artifact_dir(record_id: int, company_name: str) -> str:
@@ -1903,8 +2005,16 @@ async def _scan_resume_core(
                     )
 
         # ── AI analysis ──
+        length_hint = None
+        target_pages = _parse_target_page_count(ai_notes or "")
+        if target_pages:
+            length_hint = {
+                "target_pages": target_pages,
+                "current_pages": _count_docx_pages(file_bytes),
+                "bullet_count": _estimate_bullet_count(resume_text),
+            }
         try:
-            result = analyze_resume(resume_text, jd_text, ai_notes=ai_notes or "")
+            result = analyze_resume(resume_text, jd_text, ai_notes=ai_notes or "", length_hint=length_hint)
         except RuntimeError as e:
             logger.warning(f"AI provider unavailable: {e}")
             raise HTTPException(status_code=503, detail="The AI provider is currently unavailable. Please try again in a few moments.")
@@ -1934,10 +2044,12 @@ async def _scan_resume_core(
         diff_path = f"{company_dir}/difference.txt"
 
         replacements = result.get('replacements', [])
+        removals = result.get('removals', [])
         after_score = result.get('after_score', score)
+        has_user_notes = bool(ai_notes and ai_notes.strip())
 
         # ── Decide: skip tailoring, reuse existing, or create new ──
-        if score >= 85:
+        if score >= 85 and not has_user_notes:
             # Base resume already strong — use original as-is, no tailoring
             with open(file_path, "wb") as f:
                 f.write(file_bytes)
@@ -1947,11 +2059,20 @@ async def _scan_resume_core(
             with open(diff_path, "w", encoding="utf-8") as f:
                 f.write(f"Score: {score}% — already above 85%%, no tailoring needed.\n")
 
-        elif replacements:
-            tailored_stream = create_tailored_docx(file_bytes, replacements)
-            with open(file_path, "wb") as f:
-                f.write(tailored_stream.read())
+        elif replacements or removals:
+            working_bytes = file_bytes
+            if removals:
+                working_bytes = remove_bullets(working_bytes, removals).read()
+                logger.info(f"Removed {len(removals)} bullets for {company_name} per AI notes")
+            working_bytes = create_tailored_docx(working_bytes, replacements).read()
             logger.info(f"Applied {len(replacements)} replacements for {company_name}")
+            if target_pages:
+                working_bytes, removals, final_pages = _enforce_page_target(
+                    working_bytes, jd_text, target_pages, removals)
+                logger.info(f"Page-target enforcement for {company_name}: target={target_pages}, "
+                            f"final={final_pages}, total removals={len(removals)}")
+            with open(file_path, "wb") as f:
+                f.write(working_bytes)
 
             missing_kw = result.get('missing_keywords', [])
             with open(diff_path, "w", encoding="utf-8") as f:
@@ -1959,6 +2080,8 @@ async def _scan_resume_core(
                 f.write("=" * 60 + "\n\n")
                 f.write(f"Score: {score}% → {after_score}% (Δ +{after_score - score})\n")
                 f.write(f"Total Replacements: {len(replacements)}\n")
+                if removals:
+                    f.write(f"Total Removals (page-length notes): {len(removals)}\n")
                 if missing_kw:
                     f.write(f"Missing Keywords: {', '.join(missing_kw)}\n")
                 f.write("=" * 60 + "\n\n")
@@ -1969,6 +2092,9 @@ async def _scan_resume_core(
                         f.write(f"Keywords Added: {', '.join(kw_added)}\n\n")
                     f.write(f"REMOVED:\n{rep.get('original', 'N/A')}\n\n")
                     f.write(f"ADDED:\n{rep.get('new', 'N/A')}\n")
+                    f.write("=" * 60 + "\n\n")
+                for i, rem in enumerate(removals, 1):
+                    f.write(f"--- REMOVAL #{i} (deleted entirely) ---\n{rem}\n")
                     f.write("=" * 60 + "\n\n")
         else:
             with open(file_path, "wb") as f:
@@ -1995,6 +2121,7 @@ async def _scan_resume_core(
             "section_scores": result.get('section_scores', {}),
             "contact_info": contact_info,
             "replacements": replacements,
+            "removals": removals,
         }
 
         if rerun_record:
@@ -2023,7 +2150,7 @@ async def _scan_resume_core(
             "company_name": company_name,
             "file_path": file_path,
             "pdf_path": pdf_path,
-            "tailored": len(replacements) > 0,
+            "tailored": len(replacements) > 0 or len(removals) > 0,
             "duplicate": existing is not None,
             "previous_score": existing['score'] if existing else None,
             "rerun": rerun_record is not None,
@@ -2062,10 +2189,19 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
                 "reason": f"Duplicate JD — already scanned for {company} (score: {item.get('score', 0)}%)",
             }
 
+    length_hint = None
+    target_pages = _parse_target_page_count(ai_notes or "")
+    if target_pages:
+        length_hint = {
+            "target_pages": target_pages,
+            "current_pages": _count_docx_pages(file_bytes),
+            "bullet_count": _estimate_bullet_count(resume_text),
+        }
+
     result = None
     for attempt in range(3):
         try:
-            result = analyze_resume(resume_text, jd_text, ai_notes=ai_notes)
+            result = analyze_resume(resume_text, jd_text, ai_notes=ai_notes, length_hint=length_hint)
             break
         except RuntimeError as e:
             if attempt < 2 and ("503" in str(e) or "UNAVAILABLE" in str(e) or "429" in str(e) or "All models" in str(e)):
@@ -2100,9 +2236,11 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
     diff_path = f"{company_dir}/difference.txt"
 
     replacements = result.get('replacements', [])
+    removals = result.get('removals', [])
     after_score = result.get('after_score', score)
+    has_user_notes = bool(ai_notes and ai_notes.strip())
 
-    if score >= 85:
+    if score >= 85 and not has_user_notes:
         with open(file_path, "wb") as f:
             f.write(file_bytes)
         after_score = score  # No tailoring done; keep actual score
@@ -2110,16 +2248,26 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
         with open(diff_path, "w", encoding="utf-8") as f:
             f.write(f"Score: {score}% — already above 85%, no tailoring needed.\n")
 
-    elif replacements:
-        tailored_stream = create_tailored_docx(file_bytes, replacements)
+    elif replacements or removals:
+        working_bytes = file_bytes
+        if removals:
+            working_bytes = remove_bullets(working_bytes, removals).read()
+        working_bytes = create_tailored_docx(working_bytes, replacements).read()
+        if target_pages:
+            working_bytes, removals, final_pages = _enforce_page_target(
+                working_bytes, jd_text, target_pages, removals)
+            logger.info(f"Page-target enforcement for {company_name}: target={target_pages}, "
+                        f"final={final_pages}, total removals={len(removals)}")
         with open(file_path, "wb") as f:
-            f.write(tailored_stream.read())
+            f.write(working_bytes)
         missing_kw = result.get('missing_keywords', [])
         with open(diff_path, "w", encoding="utf-8") as f:
             f.write(f"Resume Tailoring Differences for {company_name}\n")
             f.write("=" * 60 + "\n\n")
             f.write(f"Score: {score}% → {after_score}% (Δ +{after_score - score})\n")
             f.write(f"Total Replacements: {len(replacements)}\n")
+            if removals:
+                f.write(f"Total Removals (page-length notes): {len(removals)}\n")
             if missing_kw:
                 f.write(f"Missing Keywords: {', '.join(missing_kw)}\n")
             f.write("=" * 60 + "\n\n")
@@ -2130,6 +2278,9 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
                     f.write(f"Keywords Added: {', '.join(kw_added)}\n\n")
                 f.write(f"REMOVED:\n{rep.get('original', 'N/A')}\n\n")
                 f.write(f"ADDED:\n{rep.get('new', 'N/A')}\n")
+                f.write("=" * 60 + "\n\n")
+            for i, rem in enumerate(removals, 1):
+                f.write(f"--- REMOVAL #{i} (deleted entirely) ---\n{rem}\n")
                 f.write("=" * 60 + "\n\n")
     else:
         with open(file_path, "wb") as f:
@@ -2154,14 +2305,14 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
         "score": score, "after_score": after_score,
         "missing_keywords": result.get('missing_keywords', []),
         "section_scores": result.get('section_scores', {}),
-        "contact_info": contact_info, "replacements": replacements,
+        "contact_info": contact_info, "replacements": replacements, "removals": removals,
     }
     record_id = save_resume_record(company_name, jd_text, after_score, file_path, json.dumps(scan_data), **vendor_details)
     append_to_csv(company_name, jd_text, score, after_score, original_filename, file_path, vendor_details)
     return {
         "id": record_id, "company_name": company_name, "file_path": file_path,
         "pdf_path": pdf_path,
-        "tailored": len(replacements) > 0,
+        "tailored": len(replacements) > 0 or len(removals) > 0,
         "duplicate": existing is not None,
         "previous_score": existing['score'] if existing else None, **scan_data,
     }
