@@ -41,6 +41,7 @@ from services.profile_service import process_uploaded_doc
 from services.usage_tracker import get_usage_stats
 from services import tech_experience_service
 from services import certifications_service
+from services.geocode_service import geocode_timezone
 from database import init_db, save_resume_record, save_job_matcher_record, get_all_resumes, delete_resume_record, update_resume_status, get_resume_by_id, find_existing_company, sanitize_csv_field, search_records, update_user_address, save_follow_up_draft, get_follow_up_draft, update_resume_after_edit, update_user_notes, update_resume_rerun, update_vendor_details, save_manual_history_record
 
 DATA_DIR = os.getenv("DATA_DIR", "data")
@@ -1247,13 +1248,21 @@ def _get_timezone_for_location(location: str) -> Optional[str]:
     """Look up the IANA timezone for an already-extracted location string (e.g.
     "Jersey City, New Jersey", "Local to Texas") by finding the full state name it
     contains. Returns None for "Remote", "Not specified", or anything with no
-    recognizable US state, since there's nothing to show a live clock for."""
+    recognizable US state.
+
+    Falls back to a geocoding lookup (services.geocode_service) for locations that
+    name a real city but no full state (e.g. a bare "Jersey City" with no state, or
+    a multi-timezone state where the state name alone isn't enough) — this backstop
+    is a no-op unless POSITIONSTACK_API_KEY is configured, so behavior is unchanged
+    for anyone without that key set."""
     if not location:
         return None
     for state_name in _US_STATE_NAME_MATCH_ORDER:
         if re.search(r'\b' + re.escape(state_name) + r'\b', location):
             return _US_STATE_TIMEZONE[state_name]
-    return None
+    if location in ("Remote", "Not specified"):
+        return None
+    return geocode_timezone(location)
 
 
 # Recruiter postings often cram several pseudo-fields onto one "Position:" line,
