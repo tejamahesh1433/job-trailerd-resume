@@ -4,6 +4,7 @@ from google.genai import types
 import json
 from services.usage_tracker import log_api_call
 from services.model_config import GEMINI_QUALITY_MODEL, GEMINI_FAST_MODEL, GEMINI_PRO_FALLBACK_MODEL
+from services.docx_service import extract_title_lines
 
 
 def _get_gemini_client() -> genai.Client:
@@ -45,6 +46,30 @@ def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "", length_hi
     MEASURED LENGTH TARGET: the user wants the resume to fit in {target_pages} page(s). Its exact current page count could not be measured, so use your best judgment on how many bullets need to be cut in the "removals" array (see Task 9) to plausibly reach that length — a couple of bullets is very unlikely to be enough for a multi-job resume.
 """
 
+    title_lines = extract_title_lines(resume_text)
+    headline_line = title_lines.get("headline")
+    role_lines = title_lines.get("role_lines", [])
+
+    if headline_line or role_lines:
+        title_lines_lines = []
+        if headline_line:
+            title_lines_lines.append(f'    - Headline line, copy verbatim as "original" if rewritten: "{headline_line}"')
+        for i, rl in enumerate(role_lines, 1):
+            title_lines_lines.append(f'    - Employer #{i} Role line, copy verbatim as "original" if rewritten: "{rl}"')
+        title_lines_block = (
+            "    These exact lines were already located for you programmatically, in reverse-chronological order "
+            "(employer #1 is the most recent) — do not search the resume "
+            "text for them yourself, and do not substitute any other sentence (in particular, do NOT use any "
+            "sentence from the PROFESSIONAL SUMMARY section, even if it starts with similar wording — that is "
+            "a different line and must be left alone by this task):\n"
+            + "\n".join(title_lines_lines)
+        )
+    else:
+        title_lines_block = (
+            '    No headline/Role line could be located programmatically for this resume — fall back to finding '
+            'the short title line directly beneath the candidate\'s name at the very top of the resume yourself.'
+        )
+
     prompt = f"""
     You are an expert ATS (Applicant Tracking System) scanner and career coach specializing in DevOps engineering roles.
 {notes_section}{length_target_block}
@@ -74,12 +99,12 @@ def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "", length_hi
     Task 6: Break down the original score into 4 section scores (0-100): "Skills", "Experience", "Education", "Summary".
     Task 7: Extract the RECRUITER/VENDOR contact info from the Job Description (NOT the candidate's info from the resume). Look for names, email addresses, and phone numbers in the JD's signature block, header, or body. Return null for any field not found.
     Task 8: HEADLINE & ROLE TITLE ALIGNMENT — the resume's job titles must also be tailored, not just the bullet content.
-    - Find the candidate's professional headline/title: the short title line directly beneath their name at the very top of the resume (e.g. "Senior DevOps Engineer").
+{title_lines_block}
     - Determine the position title actually being hired for from the JD (e.g. "Site Reliability Engineer", "Platform Engineer", "Cloud Engineer", "DevOps Manager").
     - If the JD's title differs from the resume's current headline, rewrite the headline to align with the JD's title. Keep it truthful and within the candidate's DevOps/Cloud/Infrastructure domain — never rebrand into an unrelated discipline (e.g. never turn it into "Software Developer" or "Data Scientist").
-    - Do the SAME for the job-title line (e.g. "Role: ...", "Title: ...", or equivalent) of ONLY the two MOST RECENT work experience entries — the first two employers listed under Professional/Work Experience in reverse-chronological order at the top of that section. Rewrite each of those two title lines to align with the JD's position title, staying consistent with what that specific job's own bullets describe. Do NOT touch the title line of any older/earlier employer.
+    - Do the SAME for the Role line of ONLY the two MOST RECENT work experience entries — the first two employers listed under Professional/Work Experience in reverse-chronological order at the top of that section. Rewrite each of those two title lines to align with the JD's position title, staying consistent with what that specific job's own bullets describe. Do NOT touch the title line of any older/earlier employer.
     - MANDATORY, DO NOT SKIP: if the resume has two or more work experience entries, you MUST produce a role-title replacement for BOTH of the two most recent employers — not just the first/most recent one. Before finalizing your answer, check that your "replacements" array contains: (1) the headline replacement, (2) a role-title replacement for employer #1 (most recent), AND (3) a role-title replacement for employer #2 (second most recent). All three are required whenever the JD's title differs from the resume's current titles.
-    - Add the headline change and each of the (up to two) role-title changes as their own entries in the "replacements" array, exactly like a bullet rewrite — "original" must be the exact existing title line text, "new" is the rewritten title line.
+    - Add the headline change and each of the (up to two) role-title changes as their own entries in the "replacements" array, exactly like a bullet rewrite — "original" must be copied character-for-character from the verbatim lines given above (not paraphrased, not the Professional Summary), "new" is the rewritten title line.
     Task 9: RESUME LENGTH / PAGE COUNT — only do this if USER INSTRUCTIONS above explicitly ask for a target length (e.g. "keep it to 3 pages", "make it 4 pages max", "shorten it", "make it more concise", "trim it down"). If a MEASURED LENGTH TARGET block appears above, its numbers are mandatory minimums — do not undershoot them.
     - Select entire bullet points to remove COMPLETELY (not reword) to reach that length — do not merely shrink wording, actually cut whole bullets. A handful of cuts is almost never enough on a multi-job resume; be aggressive.
     - Prioritize cutting: the least JD-relevant bullets first, bullets from the oldest/least relevant employers first, and redundant/lower-impact bullets within any section.

@@ -2,7 +2,31 @@ import docx
 from io import BytesIO
 import difflib
 import copy
+import re
 from docx.text.paragraph import Paragraph
+
+def extract_title_lines(resume_text: str) -> dict:
+    """Deterministically locate the resume's headline line (directly beneath the
+    candidate's name) and each of the two most recent employers' 'Role:' lines,
+    from the already-extracted resume text (see extract_text_from_docx). Handing
+    these literal strings back to the AI prompt — instead of asking it to find
+    them itself — avoids it confusing the headline with the Professional
+    Summary's opening sentence, which shares similar wording."""
+    lines = [l.strip() for l in resume_text.split('\n') if l.strip()]
+
+    headline = None
+    if len(lines) > 1:
+        candidate = lines[1]
+        looks_like_contact_line = '@' in candidate or sum(c.isdigit() for c in candidate) >= 3
+        if not looks_like_contact_line and len(candidate) <= 80 and not candidate.endswith('.'):
+            headline = candidate
+
+    role_lines = [l for l in lines if re.match(r'^Role\s*:', l, re.IGNORECASE)]
+
+    return {
+        "headline": headline,
+        "role_lines": role_lines[:2],
+    }
 
 def extract_text_from_docx(file_bytes: bytes) -> str:
     doc = docx.Document(BytesIO(file_bytes))
