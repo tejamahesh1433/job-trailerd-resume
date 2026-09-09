@@ -77,3 +77,4 @@ duckduckgo-search
 beautifulsoup4
 requests
 tzdata
+firecrawl-py==4.42.0

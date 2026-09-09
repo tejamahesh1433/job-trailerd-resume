@@ -6177,6 +6177,15 @@ def _run_command_center_search(query: str, platforms: list, work_types: list, co
         # Same progressive-recency idea as the JSearch tiers above, using DDGS' own
         # timelimit filter: d=past day, w=past week, m=past month — the closest DDGS
         # equivalent to the 24h/72h/2-3-week escalation (DDGS has no 3-day bucket).
+        firecrawl_client = None
+        firecrawl_key = os.getenv("FIRECRAWL_API_KEY")
+        if firecrawl_key:
+            try:
+                from firecrawl import Firecrawl
+                firecrawl_client = Firecrawl(api_key=firecrawl_key)
+            except Exception as e:
+                logger.warning(f"Failed to initialize Firecrawl client, using requests+BeautifulSoup only: {e}")
+
         DDG_TIME_TIERS = ["d", "w", "m"]
         seen_urls_this_run = set()
         for tier in DDG_TIME_TIERS:
@@ -6190,25 +6199,35 @@ def _run_command_center_search(query: str, platforms: list, work_types: list, co
                 if not page_url or page_url in seen_urls_this_run:
                     continue
                 seen_urls_this_run.add(page_url)
-                try:
-                    headers = {"User-Agent": "Mozilla/5.0"}
-                    resp = requests.get(page_url, headers=headers, timeout=5)
-                    if resp.status_code == 200:
-                        soup = BeautifulSoup(resp.text, 'html.parser')
-                        text = soup.get_text(separator=' ', strip=True)
-                        # Same reasoning as the JSearch cap above — no more Claude
-                        # output-token pressure to weigh this against, so raw scraped
-                        # page text (nav/ads/footer included, diluting useful content)
-                        # gets a generous ceiling rather than a tight one.
-                        candidate_text = f"URL: {page_url}\nContent: {text[:20000]}"
-                        company_guess = _extract_company_name(candidate_text) or ''
-                        title_guess = _guess_title_from_job_text(candidate_text) or ''
-                        if company_guess and title_guess and command_center_job_seen(company_guess, title_guess):
-                            skipped_seen_count += 1
-                            continue
-                        job_texts.append(candidate_text)
-                except Exception as e:
-                    logger.warning(f"Error fetching {page_url}: {e}")
+                text = None
+                if firecrawl_client:
+                    try:
+                        fc_result = firecrawl_client.scrape(page_url, formats=["markdown"])
+                        text = fc_result.get("markdown") if hasattr(fc_result, "get") else getattr(fc_result, "markdown", None)
+                    except Exception as e:
+                        logger.warning(f"Firecrawl scrape failed for {page_url}, falling back to requests: {e}")
+                if not text:
+                    try:
+                        headers = {"User-Agent": "Mozilla/5.0"}
+                        resp = requests.get(page_url, headers=headers, timeout=5)
+                        if resp.status_code == 200:
+                            soup = BeautifulSoup(resp.text, 'html.parser')
+                            text = soup.get_text(separator=' ', strip=True)
+                    except Exception as e:
+                        logger.warning(f"Error fetching {page_url}: {e}")
+                if not text:
+                    continue
+                # Same reasoning as the JSearch cap above — no more Claude
+                # output-token pressure to weigh this against, so raw scraped
+                # page text (nav/ads/footer included, diluting useful content)
+                # gets a generous ceiling rather than a tight one.
+                candidate_text = f"URL: {page_url}\nContent: {text[:20000]}"
+                company_guess = _extract_company_name(candidate_text) or ''
+                title_guess = _guess_title_from_job_text(candidate_text) or ''
+                if company_guess and title_guess and command_center_job_seen(company_guess, title_guess):
+                    skipped_seen_count += 1
+                    continue
+                job_texts.append(candidate_text)
 
     if not job_texts:
         message = f'No postings found for "{query}" on the selected platforms. Try different platforms, work types, or a broader search term.'
