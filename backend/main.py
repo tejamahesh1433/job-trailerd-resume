@@ -33,7 +33,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from fastapi.responses import RedirectResponse
-from services.ai_service import analyze_resume, generate_cover_letter, analyze_job_metadata, generate_additional_points, generate_recruiter_outreach_email, generate_checkin_followup_email, generate_linkedin_message, extract_contacts_from_text, trim_resume_length
+from services.ai_service import analyze_resume, generate_cover_letter, analyze_job_metadata, generate_additional_points, generate_recruiter_outreach_email, generate_checkin_followup_email, generate_linkedin_message, extract_contacts_from_text, trim_resume_length, AIProviderNetworkError
 from services.ollama_service import generate_mail_draft, generate_follow_up, detect_w2_fulltime
 from services.docx_service import extract_text_from_docx, create_tailored_docx, insert_bullets_after, remove_bullets
 from services import gmail_service
@@ -2049,6 +2049,9 @@ async def _scan_resume_core(
             }
         try:
             result = analyze_resume(resume_text, jd_text, ai_notes=ai_notes or "", length_hint=length_hint)
+        except AIProviderNetworkError as e:
+            logger.warning(f"AI provider network error: {e}")
+            raise HTTPException(status_code=503, detail="Couldn't reach the AI provider due to a network issue. Check your internet connection and try again.")
         except RuntimeError as e:
             logger.warning(f"AI provider unavailable: {e}")
             raise HTTPException(status_code=503, detail="The AI provider is currently unavailable. Please try again in a few moments.")
@@ -2900,6 +2903,9 @@ async def api_add_points(request: Request, record_id: int, payload: AddPointsReq
 
         try:
             ai_result = generate_additional_points(resume_text, record.get('jd_text', ''), points_text, target_hint)
+        except AIProviderNetworkError as e:
+            logger.warning(f"AI provider network error: {e}")
+            raise HTTPException(status_code=503, detail="Couldn't reach the AI provider due to a network issue. Check your internet connection and try again.")
         except RuntimeError as e:
             logger.warning(f"AI provider unavailable: {e}")
             raise HTTPException(status_code=503, detail="The AI provider is currently unavailable. Please try again in a few moments.")

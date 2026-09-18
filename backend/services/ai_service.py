@@ -14,6 +14,25 @@ def _get_gemini_client() -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
+class AIProviderNetworkError(RuntimeError):
+    """Raised instead of a plain RuntimeError when the failure looks like the server
+    itself couldn't reach the AI provider (DNS/network), as opposed to the provider
+    rejecting or throttling the request — callers surface a distinct message for this."""
+    pass
+
+
+_NETWORK_ERROR_SIGNATURES = (
+    "Errno -3", "Try again", "getaddrinfo", "Name or service not known",
+    "Temporary failure in name resolution", "Failed to establish a new connection",
+    "Connection refused", "Network is unreachable", "Errno -2",
+)
+
+
+def _is_network_error(exc: Exception) -> bool:
+    text = str(exc)
+    return any(sig in text for sig in _NETWORK_ERROR_SIGNATURES)
+
+
 def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "", length_hint: dict | None = None) -> dict:
     client = _get_gemini_client()
 
@@ -176,6 +195,8 @@ def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "", length_hi
             return json.loads(response.text)
         except Exception as e:
             last_error = e
+            if _is_network_error(e):
+                raise AIProviderNetworkError(f"Network error reaching AI provider: {str(e)}")
             if "503" in str(e) or "UNAVAILABLE" in str(e) or "429" in str(e) or "404" in str(e) or "NOT_FOUND" in str(e):
                 print(f"{model_name} unavailable, trying next model...")
                 continue
@@ -340,6 +361,8 @@ def generate_additional_points(resume_text: str, jd_text: str, points_text: str,
             return json.loads(response.text)
         except Exception as e:
             last_error = e
+            if _is_network_error(e):
+                raise AIProviderNetworkError(f"Network error reaching AI provider: {str(e)}")
             if "503" in str(e) or "UNAVAILABLE" in str(e) or "429" in str(e) or "404" in str(e) or "NOT_FOUND" in str(e):
                 print(f"{model_name} unavailable, trying next model...")
                 continue
