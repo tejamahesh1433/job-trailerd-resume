@@ -238,8 +238,8 @@ export default function HistoryPage({ onStatusChange, onRefreshHistory }) {
             <h2 className="exp-title">History</h2>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
               <span className="exp-count">{filtered.length} of {history.length}</span>
-              <button className="csv-btn" onClick={() => setAddOpen(true)}>+ Add Record</button>
-              <button className="csv-btn" onClick={() => setImportOpen(true)}>↑ Import CSV</button>
+              <button className="csv-btn history-add-btn" onClick={() => setAddOpen(true)}>+ Add Record</button>
+              <button className="csv-btn history-import-btn" onClick={() => setImportOpen(true)}>↑ Import CSV</button>
               {history.length > 0 && (
                 <a href={`${API_BASE}/api/history/csv?t=${Date.now()}`} className="csv-btn" download>↓ CSV Export</a>
               )}

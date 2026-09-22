@@ -1471,6 +1471,38 @@ body {
   border-color: var(--muted);
 }
 
+.csv-btn.history-add-btn {
+  color: #101810;
+  background: #2ebd73;
+  border-color: #2ebd73;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+
+.csv-btn.history-add-btn:hover {
+  background: #50d48e;
+  border-color: #50d48e;
+}
+
+.csv-btn.history-import-btn {
+  color: #101827;
+  background: #79b5ff;
+  border-color: #79b5ff;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+
+.csv-btn.history-import-btn:hover {
+  background: #a0cbff;
+  border-color: #a0cbff;
+}
+
+.csv-btn.history-add-btn:focus-visible,
+.csv-btn.history-import-btn:focus-visible {
+  outline: 2px solid var(--cream);
+  outline-offset: 3px;
+}
+
 .empty-log {
   font-family: var(--font-mono);
   font-size: 0.65rem;
