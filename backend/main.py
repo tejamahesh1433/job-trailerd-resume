@@ -2461,6 +2461,26 @@ async def get_history(request: Request, limit: int = 50, offset: int = 0):
         logger.error(f"Get history error: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve history")
 
+@app.post("/api/history/import")
+@limiter.limit("10/minute")
+async def import_history_csv(request: Request, file: UploadFile = File(...)):
+    from services.history_import import import_applications_csv, MAX_BYTES
+    try:
+        if not (file.filename or '').lower().endswith('.csv'):
+            raise HTTPException(status_code=400, detail="Choose a .csv file")
+        content = await file.read(MAX_BYTES + 1)
+        return await asyncio.to_thread(import_applications_csv, content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("History CSV import failed")
+        raise HTTPException(status_code=500, detail="Import failed. No applications were added. Please try again.")
+    finally:
+        await file.close()
+
+
 class ManualHistoryRequest(BaseModel):
     company_name: str
     jd_text: str = ""

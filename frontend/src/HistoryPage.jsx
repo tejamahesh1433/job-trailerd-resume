@@ -6,6 +6,66 @@ const FETCH_LIMIT = 1000;
 
 const STATUS_OPTIONS = ['Scanned', 'Matched', 'Submitted Profile', 'Applied', 'Phone Screen', 'Interview', 'Offer', 'Rejected'];
 
+function ImportHistoryModal({ onClose, onImported }) {
+  const [file, setFile] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [result, setResult] = useState(null);
+
+  const handleImport = async () => {
+    if (!file || busy) return;
+    setError('');
+    setResult(null);
+    if (!file.name.toLowerCase().endsWith('.csv') || file.size > 5 * 1024 * 1024) {
+      setError('Choose a CSV file no larger than 5 MB.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const body = new FormData();
+      body.append('file', file);
+      const response = await fetch(`${API_BASE}/api/history/import`, { method: 'POST', body });
+      const data = await response.json();
+      if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Could not import this CSV.');
+      setResult(data);
+      if (data.imported) onImported();
+    } catch (err) {
+      setError(err.message || 'Could not import this CSV. Please try again.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="cmd-modal-backdrop" onClick={() => { if (!busy) onClose(); }}>
+      <div className="cmd-modal" role="dialog" aria-modal="true" aria-labelledby="csv-import-title" onClick={e => e.stopPropagation()} onKeyDown={e => { if (e.key === 'Escape' && !busy) onClose(); }}>
+        <div className="cmd-modal-header">
+          <h3 id="csv-import-title">Import applications CSV</h3>
+          <button className="cmd-modal-close" aria-label="Close import" disabled={busy} onClick={onClose}>×</button>
+        </div>
+        <div className="cmd-modal-body">
+          <p>Choose a UTF-8 CSV with a Company column. Up to 1,000 applications, 5 MB maximum.</p>
+          <p>Supported columns: Date, Time, Site, Company, Role, Job Type, Location, Job URL, JD, Vendor Details, LinkedIn Profile, Status, Notes.</p>
+          <p>Extra details are saved in Notes. Missing status defaults to Scanned. Duplicate job URLs and identical records are skipped; existing records are kept.</p>
+          <label className="cmd-modal-label" htmlFor="history-csv-file">CSV file</label>
+          <input id="history-csv-file" type="file" accept=".csv,text/csv" disabled={busy} onChange={e => { setFile(e.target.files?.[0] || null); setError(''); setResult(null); }} />
+          {error && <p className="cmd-modal-error" role="alert">{error}</p>}
+          {result && <div role="status">
+            <p>{result.imported} imported · {result.skipped} duplicates skipped · {result.failed} invalid rows</p>
+            {result.errors.length > 0 && <div style={{ maxHeight: '180px', overflowY: 'auto' }}>
+              <ul>{result.errors.map(item => <li key={item.row}>Row {item.row}: {item.message}</li>)}</ul>
+            </div>}
+          </div>}
+        </div>
+        <div className="cmd-modal-footer">
+          <button className="cmd-filter-pill" disabled={busy} onClick={onClose}>{result ? 'Done' : 'Cancel'}</button>
+          <button className="cmd-cta cmd-cta-primary" disabled={!file || busy || !!result} onClick={handleImport}>{busy ? 'Importing…' : 'Import CSV'}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function scoreAccent(score) {
   if (score >= 85) return '#2ebd73';
   if (score >= 60) return '#c89b3c';
@@ -43,6 +103,7 @@ export default function HistoryPage({ onStatusChange, onRefreshHistory }) {
   const [researchingId, setResearchingId] = useState(null);
   const [researchError, setResearchError] = useState('');
   const [addOpen, setAddOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
@@ -178,12 +239,14 @@ export default function HistoryPage({ onStatusChange, onRefreshHistory }) {
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
               <span className="exp-count">{filtered.length} of {history.length}</span>
               <button className="csv-btn" onClick={() => setAddOpen(true)}>+ Add Record</button>
+              <button className="csv-btn" onClick={() => setImportOpen(true)}>↑ Import CSV</button>
               {history.length > 0 && (
                 <a href={`${API_BASE}/api/history/csv?t=${Date.now()}`} className="csv-btn" download>↓ CSV Export</a>
               )}
             </div>
           </div>
 
+          {importOpen && <ImportHistoryModal onClose={() => setImportOpen(false)} onImported={refresh} />}
           {addOpen && (
             <AddHistoryModal
               onClose={() => setAddOpen(false)}
