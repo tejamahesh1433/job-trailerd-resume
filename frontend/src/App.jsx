@@ -871,7 +871,9 @@ export default function App() {
       section_scores: sr.section_scores || {},
       contact_info: sr.contact_info || {},
       replacements: sr.replacements || [],
-      tailored: (sr.replacements || []).length > 0,
+      skills_added: sr.skills_added || [],
+      unmatched_keywords: sr.unmatched_keywords || [],
+      tailored: (sr.replacements || []).length > 0 || (sr.skills_added || []).length > 0,
     });
 
     // Switch to Single Scan view if in batch mode
@@ -2041,6 +2043,34 @@ export default function App() {
                     <div className="keyword-gap-header">Missing Keywords</div>
                     <div className="keyword-chips">
                       {result.missing_keywords.map((kw, idx) => <span key={idx} className="keyword-chip">{kw}</span>)}
+                    </div>
+                  </div>
+                )}
+
+                {result.skills_added?.length > 0 && (
+                  <div className="keyword-gap">
+                    <div className="keyword-gap-header">Skills Added to Technical Proficiency</div>
+                    <div className="skills-added-list">
+                      {Object.entries(result.skills_added.reduce((groups, { category, skill }) => {
+                        (groups[category] = groups[category] || []).push(skill);
+                        return groups;
+                      }, {})).map(([category, skills]) => (
+                        <div key={category} className="skills-added-row">
+                          <span className="skills-added-category">{category}</span>
+                          <span className="keyword-chips skills-added-chips">
+                            {skills.map(skill => <span key={skill} className="keyword-chip keyword-chip--added">+ {skill}</span>)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {result.unmatched_keywords?.length > 0 && (
+                  <div className="keyword-gap">
+                    <div className="keyword-gap-header">JD Keywords Not in Resume — Review Manually</div>
+                    <div className="keyword-chips">
+                      {result.unmatched_keywords.map(kw => <span key={kw} className="keyword-chip">{kw}</span>)}
                     </div>
                   </div>
                 )}

@@ -35,7 +35,7 @@ from slowapi.errors import RateLimitExceeded
 from fastapi.responses import RedirectResponse
 from services.ai_service import analyze_resume, generate_cover_letter, analyze_job_metadata, generate_additional_points, generate_recruiter_outreach_email, generate_checkin_followup_email, generate_linkedin_message, extract_contacts_from_text, trim_resume_length, AIProviderNetworkError
 from services.ollama_service import generate_mail_draft, generate_follow_up, detect_w2_fulltime
-from services.docx_service import extract_text_from_docx, create_tailored_docx, insert_bullets_after, remove_bullets
+from services.docx_service import extract_text_from_docx, create_tailored_docx, insert_bullets_after, remove_bullets, extract_skills_table, add_skills_to_docx, find_absent_keywords
 from services import gmail_service
 from services.profile_service import process_uploaded_doc
 from services.usage_tracker import get_usage_stats
@@ -699,6 +699,129 @@ def _filter_replacements_overlapping_removals(replacements: list, removals: list
             continue
         kept.append(rep)
     return kept
+
+
+_NON_SKILL_PHRASE = re.compile(
+    r'\d\s*\+?\s*(years?|yrs?)\b|\b(years?|experience|domain|industry|degree|clearance|citizen|visa|preferred|required|a plus)\b',
+    re.IGNORECASE)
+
+
+def _looks_like_skill(text: str) -> bool:
+    """Backstop for the prompt's 'concrete tools only' rule: rejects JD requirement
+    phrases ('11+ years', 'financial services domain') and sentence-like fragments that
+    the model sometimes files as skills. Not exhaustive — the prompt is the main guard."""
+    return len(text) <= 40 and len(text.split()) <= 4 and not _NON_SKILL_PHRASE.search(text)
+
+
+def _clean_skills_additions(raw) -> list:
+    """The AI's skills_additions comes back as free-form JSON — keep only well-formed
+    {"category": str, "skills": [str, ...]} entries so a malformed response degrades to
+    'no skills added' instead of raising mid-tailoring."""
+    cleaned = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict) or not isinstance(item.get('category'), str):
+            continue
+        skills = [s.strip() for s in item.get('skills') or []
+                  if isinstance(s, str) and s.strip() and _looks_like_skill(s.strip())]
+        if skills:
+            cleaned.append({"category": item['category'], "skills": skills})
+    return cleaned
+
+
+def _apply_skills_additions(working_bytes: bytes, result: dict) -> tuple:
+    """Append the AI's JD skills to the resume's Technical Proficiency table (deterministic,
+    additive — see add_skills_to_docx) and then VERIFY against the final resume text that
+    the JD's missing keywords actually landed, rather than trusting the model's claim.
+    Returns (new_bytes, skills_added, unmatched_keywords): `skills_added` is
+    [{"category", "skill"}, ...] actually written; `unmatched_keywords` are missing
+    keywords still absent from the resume (e.g. non-DevOps ones the prompt forbids adding,
+    or ones the AI didn't place) — surfaced to the user, never silently dropped."""
+    additions = _clean_skills_additions(result.get('skills_additions'))
+    skills_added = []
+    if additions:
+        stream, added, unplaced = add_skills_to_docx(working_bytes, additions)
+        working_bytes = stream.read()
+        skills_added = [{"category": c, "skill": s} for c, s in added]
+        if unplaced:
+            logger.warning(f"Skills with no matching category, not added: {unplaced}")
+    unmatched = find_absent_keywords(working_bytes, result.get('missing_keywords') or [])
+    return working_bytes, skills_added, unmatched
+
+
+def _write_skills_diff(f, skills_added: list, unmatched_keywords: list):
+    if skills_added:
+        f.write(f"Skills Added to Technical Proficiency: {len(skills_added)}\n")
+        for entry in skills_added:
+            f.write(f"  + [{entry['category']}] {entry['skill']}\n")
+    if unmatched_keywords:
+        f.write(f"JD keywords NOT in final resume (review manually): {', '.join(unmatched_keywords)}\n")
+
+
+_DOMAIN_WORDS = {
+    'banking', 'bank', 'fintech', 'finance', 'financial', 'insurance', 'healthcare', 'retail',
+    'government', 'telecom', 'ecommerce', 'regulated', 'enterprise', 'senior', 'lead', 'principal',
+}
+_TOKEN_STOPWORDS = {'and', 'or', 'the', 'for', 'with', 'of', 'in', 'to', 'as', 'on', 'a', 'an', 'at', 'by'}
+
+
+def _words(text: str) -> list:
+    return [w.strip('.') for w in re.findall(r"[a-z0-9+#.]+", text.lower()) if w.strip('.')]
+
+
+def _keyword_tokens(keyword: str) -> list:
+    return [t for t in _words(keyword) if len(t) >= 2 and t not in _TOKEN_STOPWORDS]
+
+
+def _unsupported_tool_keywords(replacement: dict, jd_keywords: list, resume_text: str) -> list:
+    """JD keywords a replacement's new text claims but that the base resume never mentions.
+    Judged word by word, so a compound like 'DevOps/SRE' is fine when both words already
+    appear, while 'Puppet' (absent) or 'compliance zones' (absent 'zones') are not.
+    Years-of-experience/requirement phrases and industry-domain words are wording rather
+    than tool claims, so they're exempt (the skills filter already rejects the former)."""
+    new_text = replacement.get('new') or ''
+    resume_words = set(_words(resume_text))
+    candidates = list(dict.fromkeys(list(replacement.get('keywords_added') or []) + list(jd_keywords or [])))
+    unsupported = []
+    for kw in candidates:
+        if not isinstance(kw, str) or not kw.strip() or not _contains_kw(new_text, kw):
+            continue
+        tokens = _keyword_tokens(kw)
+        if not tokens or not _looks_like_skill(kw.strip()):
+            continue
+        if all(t in _DOMAIN_WORDS for t in tokens):
+            continue
+        if any(t not in _DOMAIN_WORDS and t not in resume_words for t in tokens):
+            unsupported.append(kw.strip())
+    return unsupported
+
+
+def _contains_kw(text: str, kw: str) -> bool:
+    return re.search(r'(?<![\w+#.])' + re.escape(kw.strip()) + r'(?![\w+#])', text, re.IGNORECASE) is not None
+
+
+def _drop_unsupported_tool_claims(replacements: list, jd_keywords: list, resume_text: str) -> tuple:
+    """Code-side enforcement of the prompt's TOOL-CLAIM RULE: discard any replacement whose
+    new text names a JD tool the base resume doesn't already mention, since that fabricates
+    hands-on experience (e.g. 'Ansible Tower, Chef, and Puppet' when Puppet was never used).
+    Such tools still reach the resume via the skills table (skills_additions), which lists
+    them without claiming a specific job used them. Returns (kept, rejected), where each
+    rejected entry is the replacement plus an 'unsupported' list, for reporting."""
+    kept, rejected = [], []
+    for rep in replacements:
+        unsupported = _unsupported_tool_keywords(rep, jd_keywords, resume_text)
+        if unsupported:
+            rejected.append({**rep, "unsupported": unsupported})
+            logger.warning(f"Discarded replacement — would claim tools absent from the resume: {unsupported}")
+        else:
+            kept.append(rep)
+    return kept, rejected
+
+
+def _write_rejected_diff(f, rejected: list):
+    if rejected:
+        f.write(f"Edits DISCARDED for claiming tools not in your resume: {len(rejected)}\n")
+        for rej in rejected:
+            f.write(f"  x {', '.join(rej['unsupported'])} — {(rej.get('new') or '')[:110]}...\n")
 
 
 def _job_artifact_dir(record_id: int, company_name: str) -> str:
@@ -2048,7 +2171,8 @@ async def _scan_resume_core(
                 "bullet_count": _estimate_bullet_count(resume_text),
             }
         try:
-            result = analyze_resume(resume_text, jd_text, ai_notes=ai_notes or "", length_hint=length_hint)
+            result = analyze_resume(resume_text, jd_text, ai_notes=ai_notes or "", length_hint=length_hint,
+                                    skills_table=extract_skills_table(file_bytes))
         except AIProviderNetworkError as e:
             logger.warning(f"AI provider network error: {e}")
             raise HTTPException(status_code=503, detail="Couldn't reach the AI provider due to a network issue. Check your internet connection and try again.")
@@ -2080,23 +2204,30 @@ async def _scan_resume_core(
         jd_path = f"{company_dir}/jd_info.txt"
         diff_path = f"{company_dir}/difference.txt"
 
-        replacements = result.get('replacements', [])
+        replacements, rejected_edits = _drop_unsupported_tool_claims(
+            result.get('replacements', []), result.get('missing_keywords', []), resume_text)
         removals = result.get('removals', [])
+        skills_added, unmatched_keywords = [], []
         after_score = result.get('after_score', score)
         has_user_notes = bool(ai_notes and ai_notes.strip())
 
         # ── Decide: skip tailoring, reuse existing, or create new ──
         if score >= 85 and not has_user_notes:
-            # Base resume already strong — use original as-is, no tailoring
+            # Base resume already strong — no bullet/summary tailoring, but still append any
+            # skills this JD requires that the base skills table is missing (additive only)
+            working_bytes, skills_added, unmatched_keywords = _apply_skills_additions(file_bytes, result)
             with open(file_path, "wb") as f:
-                f.write(file_bytes)
-            after_score = score  # No tailoring done; keep actual score
+                f.write(working_bytes)
+            after_score = score  # No bullet tailoring done; keep actual score
             replacements = []
-            logger.info(f"Score {score}% >= 85% for {company_name} — no tailoring needed")
+            logger.info(f"Score {score}% >= 85% for {company_name} — no bullet tailoring needed; "
+                        f"added {len(skills_added)} missing skills")
             with open(diff_path, "w", encoding="utf-8") as f:
-                f.write(f"Score: {score}% — already above 85%%, no tailoring needed.\n")
+                f.write(f"Score: {score}% — already above 85%%, no bullet tailoring needed.\n")
+                _write_skills_diff(f, skills_added, unmatched_keywords)
+                _write_rejected_diff(f, rejected_edits)
 
-        elif replacements or removals:
+        elif replacements or removals or result.get('skills_additions'):
             working_bytes = file_bytes
             replacements = _filter_replacements_overlapping_removals(replacements, removals)
             if removals:
@@ -2104,6 +2235,7 @@ async def _scan_resume_core(
                 working_bytes = working_stream.read()
                 logger.info(f"Removed {len(removals)} bullets for {company_name} per AI notes")
             working_bytes = create_tailored_docx(working_bytes, replacements).read()
+            working_bytes, skills_added, unmatched_keywords = _apply_skills_additions(working_bytes, result)
             logger.info(f"Applied {len(replacements)} replacements for {company_name}")
             if target_pages:
                 working_bytes, removals, final_pages = _enforce_page_target(
@@ -2123,6 +2255,8 @@ async def _scan_resume_core(
                     f.write(f"Total Removals (page-length notes): {len(removals)}\n")
                 if missing_kw:
                     f.write(f"Missing Keywords: {', '.join(missing_kw)}\n")
+                _write_skills_diff(f, skills_added, unmatched_keywords)
+                _write_rejected_diff(f, rejected_edits)
                 f.write("=" * 60 + "\n\n")
                 for i, rep in enumerate(replacements, 1):
                     kw_added = rep.get('keywords_added', [])
@@ -2161,6 +2295,9 @@ async def _scan_resume_core(
             "contact_info": contact_info,
             "replacements": replacements,
             "removals": removals,
+            "skills_added": skills_added,
+            "unmatched_keywords": unmatched_keywords,
+            "rejected_edits": [{"new": r.get("new"), "unsupported": r["unsupported"]} for r in rejected_edits],
         }
 
         if rerun_record:
@@ -2189,7 +2326,7 @@ async def _scan_resume_core(
             "company_name": company_name,
             "file_path": file_path,
             "pdf_path": pdf_path,
-            "tailored": len(replacements) > 0 or len(removals) > 0,
+            "tailored": len(replacements) > 0 or len(removals) > 0 or len(skills_added) > 0,
             "duplicate": existing is not None,
             "previous_score": existing['score'] if existing else None,
             "rerun": rerun_record is not None,
@@ -2240,7 +2377,8 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
     result = None
     for attempt in range(3):
         try:
-            result = analyze_resume(resume_text, jd_text, ai_notes=ai_notes, length_hint=length_hint)
+            result = analyze_resume(resume_text, jd_text, ai_notes=ai_notes, length_hint=length_hint,
+                                    skills_table=extract_skills_table(file_bytes))
             break
         except RuntimeError as e:
             if attempt < 2 and ("503" in str(e) or "UNAVAILABLE" in str(e) or "429" in str(e) or "All models" in str(e)):
@@ -2274,26 +2412,33 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
     jd_path = f"{company_dir}/jd_info.txt"
     diff_path = f"{company_dir}/difference.txt"
 
-    replacements = result.get('replacements', [])
+    replacements, rejected_edits = _drop_unsupported_tool_claims(
+        result.get('replacements', []), result.get('missing_keywords', []), resume_text)
     removals = result.get('removals', [])
+    skills_added, unmatched_keywords = [], []
     after_score = result.get('after_score', score)
     has_user_notes = bool(ai_notes and ai_notes.strip())
 
     if score >= 85 and not has_user_notes:
+        # Same as the interactive path: no bullet tailoring, but still add missing required skills
+        working_bytes, skills_added, unmatched_keywords = _apply_skills_additions(file_bytes, result)
         with open(file_path, "wb") as f:
-            f.write(file_bytes)
-        after_score = score  # No tailoring done; keep actual score
+            f.write(working_bytes)
+        after_score = score  # No bullet tailoring done; keep actual score
         replacements = []
         with open(diff_path, "w", encoding="utf-8") as f:
-            f.write(f"Score: {score}% — already above 85%, no tailoring needed.\n")
+            f.write(f"Score: {score}% — already above 85%, no bullet tailoring needed.\n")
+            _write_skills_diff(f, skills_added, unmatched_keywords)
+            _write_rejected_diff(f, rejected_edits)
 
-    elif replacements or removals:
+    elif replacements or removals or result.get('skills_additions'):
         working_bytes = file_bytes
         replacements = _filter_replacements_overlapping_removals(replacements, removals)
         if removals:
             working_stream, removals = remove_bullets(working_bytes, removals)
             working_bytes = working_stream.read()
         working_bytes = create_tailored_docx(working_bytes, replacements).read()
+        working_bytes, skills_added, unmatched_keywords = _apply_skills_additions(working_bytes, result)
         if target_pages:
             working_bytes, removals, final_pages = _enforce_page_target(
                 working_bytes, jd_text, target_pages, removals)
@@ -2311,6 +2456,8 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
                 f.write(f"Total Removals (page-length notes): {len(removals)}\n")
             if missing_kw:
                 f.write(f"Missing Keywords: {', '.join(missing_kw)}\n")
+            _write_skills_diff(f, skills_added, unmatched_keywords)
+            _write_rejected_diff(f, rejected_edits)
             f.write("=" * 60 + "\n\n")
             for i, rep in enumerate(replacements, 1):
                 kw_added = rep.get('keywords_added', [])
@@ -2347,13 +2494,15 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
         "missing_keywords": result.get('missing_keywords', []),
         "section_scores": result.get('section_scores', {}),
         "contact_info": contact_info, "replacements": replacements, "removals": removals,
+        "skills_added": skills_added, "unmatched_keywords": unmatched_keywords,
+        "rejected_edits": [{"new": r.get("new"), "unsupported": r["unsupported"]} for r in rejected_edits],
     }
     record_id = save_resume_record(company_name, jd_text, after_score, file_path, json.dumps(scan_data), **vendor_details)
     append_to_csv(company_name, jd_text, score, after_score, original_filename, file_path, vendor_details)
     return {
         "id": record_id, "company_name": company_name, "file_path": file_path,
         "pdf_path": pdf_path,
-        "tailored": len(replacements) > 0 or len(removals) > 0,
+        "tailored": len(replacements) > 0 or len(removals) > 0 or len(skills_added) > 0,
         "duplicate": existing is not None,
         "previous_score": existing['score'] if existing else None, **scan_data,
     }

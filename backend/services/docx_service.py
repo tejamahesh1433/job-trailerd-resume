@@ -254,6 +254,122 @@ def remove_bullets(original_bytes: bytes, removals: list) -> tuple:
     out_stream.seek(0)
     return out_stream, applied
 
+def _skills_table(doc):
+    """The resume's Technical Proficiency block is a 2-column table (category | comma-
+    separated skills). Returns that table, or None if the resume doesn't use one."""
+    for table in doc.tables:
+        if len(table.columns) == 2 and len(table.rows) >= 3:
+            return table
+    return None
+
+
+def _norm_category(name: str) -> str:
+    return re.sub(r'[^a-z0-9]+', ' ', name.lower().replace('&', ' and ')).strip()
+
+
+def extract_skills_table(file_bytes: bytes) -> list:
+    """Return [{"category": ..., "skills": <cell text>}, ...] for the resume's skills
+    table so the AI prompt can be handed the real category names + current contents
+    (instead of being told to 'rewrite the Skills line', which doesn't exist as a single
+    paragraph in this template). Empty list if the resume has no skills table."""
+    table = _skills_table(docx.Document(BytesIO(file_bytes)))
+    if table is None:
+        return []
+    return [{"category": row.cells[0].text.strip(), "skills": row.cells[1].text.strip()}
+            for row in table.rows if row.cells[0].text.strip()]
+
+
+def _contains_term(haystack: str, term: str) -> bool:
+    """Whole-term, case-insensitive containment ('Go' must not match 'Google')."""
+    return re.search(r'(?<![\w+#.])' + re.escape(term.strip()) + r'(?![\w+#])',
+                     haystack, re.IGNORECASE) is not None
+
+
+def _match_category_row(table, category: str):
+    target = _norm_category(category)
+    if not target:
+        return None
+    best_row, best_ratio = None, 0.0
+    for row in table.rows:
+        cand = _norm_category(row.cells[0].text)
+        if not cand:
+            continue
+        if cand == target:
+            return row
+        ratio = difflib.SequenceMatcher(None, target, cand).ratio()
+        if ratio > best_ratio:
+            best_row, best_ratio = row, ratio
+    return best_row if best_ratio >= 0.6 else None
+
+
+def add_skills_to_docx(original_bytes: bytes, additions: list) -> tuple:
+    """Append JD skills to the matching category row of the skills table.
+
+    `additions` is [{"category": <existing category name>, "skills": [...]}, ...].
+    Purely additive: existing skills are never rewritten or dropped, and a skill already
+    listed anywhere in that table is skipped, so repeated runs can't duplicate. The new
+    text goes into the cell's last run, so it inherits the template's font/size.
+    Returns (BytesIO, added, unplaced): `added` is [(category, skill), ...] actually
+    written, `unplaced` is the skills whose category matched no row (caller reports them
+    rather than silently losing them)."""
+    doc = docx.Document(BytesIO(original_bytes))
+    table = _skills_table(doc)
+    added, unplaced = [], []
+
+    if table is None:
+        unplaced = [s for a in additions for s in a.get('skills', [])]
+    else:
+        table_text = ' \n '.join(row.cells[1].text for row in table.rows)
+        for addition in additions:
+            skills = [s.strip() for s in addition.get('skills', []) if s and s.strip()]
+            row = _match_category_row(table, addition.get('category', ''))
+            if row is None:
+                unplaced.extend(s for s in skills if not _contains_term(table_text, s))
+                continue
+
+            new_skills = []
+            for skill in skills:
+                if _contains_term(table_text, skill) or skill.lower() in (n.lower() for n in new_skills):
+                    continue
+                new_skills.append(skill)
+            if not new_skills:
+                continue
+
+            para = next((p for p in reversed(row.cells[1].paragraphs) if p.text.strip()), None)
+            if para is None:
+                unplaced.extend(new_skills)
+                continue
+            last_run = next((r for r in reversed(para.runs) if r.text), None)
+            if last_run is None:
+                unplaced.extend(new_skills)
+                continue
+
+            last_run.text = last_run.text.rstrip().rstrip(',.;') + ', ' + ', '.join(new_skills)
+            table_text += ' \n ' + ', '.join(new_skills)
+            added.extend((row.cells[0].text.strip(), s) for s in new_skills)
+
+    out_stream = BytesIO()
+    doc.save(out_stream)
+    out_stream.seek(0)
+    return out_stream, added, unplaced
+
+
+def find_absent_keywords(file_bytes: bytes, keywords: list) -> list:
+    """Keywords (from the JD's missing list) that still don't appear anywhere in the
+    final resume text — used to verify tailoring actually landed them, instead of
+    trusting the AI's own claim that it did."""
+    text = extract_text_from_docx(file_bytes)
+    seen, absent = set(), []
+    for kw in keywords:
+        key = kw.strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        if not _contains_term(text, kw):
+            absent.append(kw.strip())
+    return absent
+
+
 def insert_bullets_after(original_bytes: bytes, insertions: list) -> BytesIO:
     """Insert new bullet paragraphs into the document, each cloned right after
     its matched anchor paragraph so it inherits the same list/formatting style."""

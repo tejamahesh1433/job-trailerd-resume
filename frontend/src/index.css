@@ -869,6 +869,36 @@ body {
   letter-spacing: 0.04em;
 }
 
+.keyword-chip--added {
+  background: var(--success-dim);
+  border-color: rgba(46, 189, 115, 0.3);
+  color: var(--success);
+}
+
+.skills-added-list {
+  padding: 0.35rem 1rem 0.6rem;
+}
+
+.skills-added-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.85rem;
+  padding: 0.35rem 0;
+}
+
+.skills-added-category {
+  flex: 0 0 11rem;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.skills-added-chips {
+  padding: 0;
+}
+
 /* ── Section breakdown ──────────────────────────────── */
 .section-breakdown {
   border: 1px solid var(--border);

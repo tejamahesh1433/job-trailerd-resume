@@ -33,8 +33,21 @@ def _is_network_error(exc: Exception) -> bool:
     return any(sig in text for sig in _NETWORK_ERROR_SIGNATURES)
 
 
-def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "", length_hint: dict | None = None) -> dict:
+def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "", length_hint: dict | None = None,
+                   skills_table: list | None = None) -> dict:
     client = _get_gemini_client()
+
+    if skills_table:
+        skills_rows = "\n".join(f'    - "{r["category"]}": {r["skills"]}' for r in skills_table)
+        skills_block = (
+            "    The resume's TECHNICAL PROFICIENCY section is a table. These are its EXACT category names and current "
+            "contents — use these category names verbatim in \"skills_additions\" (Task 10):\n" + skills_rows
+        )
+    else:
+        skills_block = (
+            '    No skills table was detected in this resume, so return an empty "skills_additions" array and '
+            'work the skills into bullet rewrites instead.'
+        )
 
     notes_section = ""
     if ai_notes and ai_notes.strip():
@@ -108,9 +121,9 @@ def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "", length_hi
     IMPORTANT: Do NOT confuse technology platforms/tools (DigitalOcean, AWS, Azure, Kubernetes, Docker, Terraform, GitHub, Datadog, etc.) with the hiring company. These are technologies mentioned in requirements, NOT the employer. If truly not found anywhere, return "Unknown_Company".
     Task 3: Identify bullet points in the resume to rewrite so the TAILORED resume scores AT LEAST 80% ATS match.
     - Provide up to 10 replacements. More replacements = better match.
-    - Include rewrites for the Skills/Summary section to incorporate key JD keywords.
+    - Include rewrites for the Professional Summary to incorporate key JD keywords. Do NOT rewrite the TECHNICAL PROFICIENCY skills table through "replacements" — skills go through "skills_additions" (Task 10), which is applied by code and can't corrupt the table.
     - "original" MUST be the EXACT, CHARACTER-FOR-CHARACTER literal text found in the resume — copy-paste it exactly, including all punctuation and spacing. Do NOT paraphrase or shorten the original.
-    - "new" should weave in the JD's specific technologies and keywords naturally into the existing bullet point.
+    - "new" should weave in the JD's keywords naturally into the existing bullet point — but ONLY technologies/tools/platforms that ALREADY appear somewhere in the resume (see the TOOL-CLAIM RULE below). A JD tool the resume doesn't mention goes in "skills_additions" only, never in a bullet, summary or headline rewrite.
     - If the original score is already 80+, still provide 3-5 replacements to push it higher.
     - For each replacement, include a "keywords_added" field listing the specific JD keywords that were incorporated in that rewrite.
     Task 4: Estimate the new ATS score (0-100) after ALL replacements are applied (after_score). The after_score MUST be at least 80. If your replacements don't achieve 80, add more replacements until they do.
@@ -131,6 +144,13 @@ def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "", length_hi
     - NEVER remove the candidate's name, contact line, headline, section headers, or the "Environment:" tech-stack lines.
     - Return the EXACT, CHARACTER-FOR-CHARACTER text of every bullet to delete in a "removals" array. A bullet listed in "removals" must NOT also appear in "replacements".
     - If no length/shortening instruction was given in USER INSTRUCTIONS, return an empty "removals" array — do not remove content unless explicitly asked.
+    Task 10: SKILLS SECTION ALIGNMENT — make the TECHNICAL PROFICIENCY table list the skills this JD asks for.
+{skills_block}
+    - Go through the JD's required AND preferred technologies/tools/practices. For each one that is DevOps/Cloud/Infrastructure/SRE/Platform related, is NOT already listed in the skills table above, and that the candidate could truthfully claim given their experience (an adjacent tool they clearly work with, a standard companion of tools they already list), add it.
+    - Return them in "skills_additions" as {{"category": <exact category name from the table above>, "skills": ["<skill>", ...]}}. Put each skill under the single most fitting existing category. Use the JD's own spelling of the skill (e.g. "GitHub Actions", "Kafka", "Prometheus") so an ATS keyword match succeeds.
+    - ONLY concrete, nameable technologies, tools, platforms, languages or standard practices (e.g. "Puppet", "Kafka", "Blue-Green Deployments"). NEVER add JD requirement phrases as skills: years of experience ("11+ years"), industry/domain ("banking", "fintech", "financial services"), location/work-arrangement, visa/clearance, degrees, soft skills, or descriptive qualifiers such as "banking-approved regions / compliance zones" — those are requirements, not skills, and belong only in missing_keywords (or woven into a bullet/summary rewrite).
+    - Purely ADDITIVE: never list existing skills again, never remove or reword existing ones — code appends your skills to the end of the category's list.
+    - Every keyword in missing_keywords that is a legitimate DevOps-domain skill MUST appear either here or in a replacement. Do not add skills outside the DevOps/Cloud domain (see CRITICAL CONSTRAINT) or ones the candidate clearly has no basis to claim; leave those in missing_keywords only.
 
     CRITICAL CONSTRAINT ON REPLACEMENTS:
     - The candidate is a DevOps/Cloud/Infrastructure engineer. ALL replacements MUST stay within DevOps, Cloud, Infrastructure, SRE, and Platform Engineering domains.
@@ -138,8 +158,9 @@ def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "", length_hi
     - Only use DevOps-relevant keywords from the JD: CI/CD, Kubernetes, Docker, Terraform, Ansible, AWS, Azure, GCP, Jenkins, monitoring, observability, infrastructure automation, IaC, Linux, scripting, networking, security hardening, etc.
     - Map the candidate's existing experience to the JD's domain. For example: if the JD asks for VMware and the resume has cloud infrastructure experience, reword to emphasize virtualization, hypervisor management, infrastructure orchestration, etc.
     - NEVER invent experiences the candidate doesn't have. Only reword existing bullet points to highlight relevant transferable skills.
-    - ALWAYS rewrite the Skills line to include the top 5-8 DevOps-relevant JD keywords that the candidate could plausibly claim.
-    - MANDATORY: Every keyword listed in missing_keywords MUST be incorporated into at least one replacement. If a missing keyword cannot fit naturally into an existing bullet point, add it to the Skills line rewrite. The tailored resume must contain ALL missing keywords.
+    - TOOL-CLAIM RULE (hard rule, checked by code — a violating replacement is DISCARDED entirely): a bullet, summary or headline rewrite may name a technology, tool, platform, language or framework ONLY if that exact name already appears somewhere in the Resume text above. Never write a JD tool the resume lacks (e.g. "Puppet", "Kafka", "Splunk" when absent) into a bullet as if the candidate used it — that fabricates hands-on experience they could be questioned on. Such tools may appear ONLY in "skills_additions". Rewording a bullet around tools it already mentions (or that the resume already lists elsewhere) is fine.
+    - ALWAYS populate "skills_additions" (Task 10) with the DevOps-relevant JD keywords the candidate could plausibly claim.
+    - MANDATORY: Every legitimate DevOps-domain keyword listed in missing_keywords MUST be incorporated into at least one replacement OR listed in "skills_additions". A missing keyword that is a TOOL/TECHNOLOGY the resume does not already mention goes ONLY in "skills_additions" (TOOL-CLAIM RULE) — never into a replacement. Non-tool keywords (seniority wording, methodologies the candidate genuinely practices) may go into replacements.
 
     Return the result strictly in the following JSON format:
     {{
@@ -169,6 +190,12 @@ def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "", length_hi
         ],
         "removals": [
             "<exact string of a bullet to delete entirely, only if a target length was requested>"
+        ],
+        "skills_additions": [
+            {{
+                "category": "<exact category name from the skills table>",
+                "skills": ["<skill to append>"]
+            }}
         ]
     }}
     """
