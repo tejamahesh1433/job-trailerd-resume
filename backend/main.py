@@ -4969,11 +4969,18 @@ async def _telegram_poll_loop():
 
     await asyncio.sleep(2)
 
-    try:
-        bot_info = await telegram_service.get_me()
-        logger.info(f"Telegram bot connected: @{bot_info.get('username', '?')}")
-    except Exception as e:
-        logger.error(f"Telegram bot connection failed: {e}")
+    bot_info = None
+    for attempt in range(10):
+        try:
+            bot_info = await telegram_service.get_me()
+            logger.info(f"Telegram bot connected: @{bot_info.get('username', '?')}")
+            break
+        except Exception as e:
+            wait = min(60, 5 * (attempt + 1))
+            logger.error(f"Telegram bot connection failed (attempt {attempt + 1}/10): {e}. Retrying in {wait}s...")
+            await asyncio.sleep(wait)
+    else:
+        logger.error("Telegram bot connection failed after 10 attempts — polling disabled")
         return
 
     try:
@@ -5218,6 +5225,19 @@ async def telegram_status():
         except Exception:
             result["bot_username"] = ""
     return result
+
+
+@app.post("/api/telegram/restart-polling")
+async def restart_telegram_polling():
+    """Restart the Telegram polling loop if it has stopped."""
+    global _telegram_polling
+    from services import telegram_service
+    if not telegram_service.is_configured():
+        return {"success": False, "reason": "not configured"}
+    if _telegram_polling:
+        return {"success": False, "reason": "already running"}
+    asyncio.create_task(_telegram_poll_loop())
+    return {"success": True, "message": "Polling restart initiated"}
 
 
 

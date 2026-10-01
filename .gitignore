@@ -21,6 +21,8 @@ backend/original/
 backend/trailerd/
 backend/online-platform/
 backend/output_resumes/
+backend/main-resumes/
+backend/main-resumes.zip
 graphify-out/
 
 # Logs
