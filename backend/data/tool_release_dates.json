@@ -17,6 +17,7 @@
     "istio": "2017-05",
     "linkerd": "2016-01",
     "aws compute optimizer": "2019-11",
+    "compute optimizer": "2019-11",
     "savings plans": "2019-11",
     "cloudwatch logs insights": "2018-11",
     "ecr image scanning": "2019-10",
@@ -89,6 +90,7 @@
     "google vertex ai": "vertex ai",
     "opa gatekeeper": "gatekeeper",
     "project velero": "velero",
-    "heptio ark": "velero"
+    "heptio ark": "velero",
+    "compute optimizer": "aws compute optimizer"
   }
 }
