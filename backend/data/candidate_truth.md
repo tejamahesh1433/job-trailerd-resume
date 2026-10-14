@@ -36,11 +36,10 @@ Skills marked "?" need the candidate's confirmation before use.
 - Ruby: yes | scripting
 - Groovy: yes | Jenkins DSL, pipeline scripting
 - Helm: yes | chart development, releases, repositories, Kustomize
-- Nginx: yes | reverse proxy, load balancing, configuration
 - Vault: yes | HashiCorp Vault, secrets management, dynamic secrets, policies
 - Istio: yes | service mesh, traffic management
 - Linkerd: yes | service mesh
-- OpenShift ROSA: yes | OpenShift, ROSA, Kubernetes platform
+- ROSA: yes | OpenShift, ROSA, Kubernetes platform
 - Kustomize: yes | Kubernetes configuration management
 - JFrog Artifactory: yes | artifact repository management
 - Nexus Repository: yes | artifact repository management
@@ -62,8 +61,8 @@ Skills marked "?" need the candidate's confirmation before use.
 - SRE: yes | SLOs, SLIs, error budgets, reliability engineering, chaos engineering
 - CI/CD: yes | pipeline design, automation, deployment strategies
 - IaC: yes | Infrastructure as Code, Terraform, Ansible, CloudFormation
-- Blue-Green Deployments: yes | zero-downtime deployment strategy
-- Canary Deployments: yes | progressive delivery, Argo Rollouts
+- Blue-Green Deployment: yes | zero-downtime deployment strategy
+- Canary Deployment: yes | progressive delivery, Argo Rollouts
 - DevSecOps: yes | security integration in pipelines, SAST, DAST, container scanning
 - CloudWatch: yes | AWS monitoring, log groups, metrics, alarms, Logs Insights
 - FinOps: yes | cost optimization, AWS Cost Explorer, Trusted Advisor, Reserved Instances, Savings Plans

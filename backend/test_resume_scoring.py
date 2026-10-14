@@ -55,6 +55,90 @@ def test_detect_anachronisms_does_not_flag_eks_in_2022_role():
     )
 
 
+# ─── New: alias deduplication, (year,month) precision, datetime.now() ────────
+
+RESUME_EKS_ALIAS_IN_2016 = """
+Acme Corp  Feb 2014 – Jun 2016
+  • Deployed applications on Amazon EKS clusters using Kubernetes (EKS).
+  Environment: Amazon EKS, Kubernetes
+"""
+
+RESUME_KUBERNETES_ENDING_DEC_2015 = """
+OldCo  Jan 2014 – Dec 2015
+  • Managed Kubernetes clusters.
+  Environment: Kubernetes
+"""
+
+RESUME_TRIVY_ENDING_JAN_2019 = """
+SecureCo  Mar 2016 – Jan 2019
+  • Ran container scanning using Trivy.
+  Environment: Trivy
+"""
+
+
+def test_detect_anachronisms_deduplicates_eks_aliases_to_one_flag():
+    """'Amazon EKS' and 'Kubernetes (EKS)' in the same role block should produce
+    exactly one flag (canonical: 'eks'), not two."""
+    flags = detect_anachronisms(RESUME_EKS_ALIAS_IN_2016)
+    eks_flags = [f for f in flags if f["tool"] == "eks"]
+    assert len(eks_flags) == 1, (
+        f"Expected exactly 1 EKS flag (alias dedup), got {len(eks_flags)}: {eks_flags}"
+    )
+
+
+def test_detect_anachronisms_kubernetes_dec_2015_not_flagged():
+    """Kubernetes released Jun 2015; a role ending Dec 2015 is AFTER the release —
+    must NOT be flagged (strict > not >=)."""
+    flags = detect_anachronisms(RESUME_KUBERNETES_ENDING_DEC_2015)
+    k8s_flags = [f for f in flags if "kubernetes" in f["tool"].lower()]
+    assert k8s_flags == [], (
+        f"Kubernetes in Dec-2015 role should NOT be flagged, got: {k8s_flags}"
+    )
+
+
+def test_detect_anachronisms_trivy_jan_2019_is_flagged():
+    """Trivy released Feb 2019; a role ending Jan 2019 is BEFORE the release — must be flagged."""
+    flags = detect_anachronisms(RESUME_TRIVY_ENDING_JAN_2019)
+    trivy_flags = [f for f in flags if f["tool"] == "trivy"]
+    assert len(trivy_flags) == 1, (
+        f"Trivy in Jan-2019 role should be flagged, got: {trivy_flags}"
+    )
+
+
+# ─── candidate_truth.md: every "yes" skill must appear in base resume ────────
+
+BASE_RESUME_PATH = "original/base_resume.docx"
+
+
+def test_every_confirmed_skill_is_in_base_resume():
+    """Every skill marked 'yes' in candidate_truth.md must be found in the base resume text."""
+    import os
+    import re
+    import services.scoring_service as ss
+
+    if not os.path.exists(BASE_RESUME_PATH):
+        pytest.skip("base_resume.docx not present")
+
+    from services.docx_service import extract_text_from_docx
+    with open(BASE_RESUME_PATH, "rb") as f:
+        resume_text = extract_text_from_docx(f.read()).lower()
+
+    # Read the truth file directly (not through load_candidate_truth) so we get skill names
+    truth_path = os.path.abspath(ss._TRUTH_PATH)
+    confirmed_skills: list[str] = []
+    if os.path.exists(truth_path):
+        with open(truth_path, encoding="utf-8") as tf:
+            for line in tf:
+                m = re.match(r"^-\s+(.+?):\s+yes\b", line.strip(), re.IGNORECASE)
+                if m:
+                    confirmed_skills.append(m.group(1).strip().split("|")[0].strip())
+
+    missing = [s for s in confirmed_skills if s.lower() not in resume_text]
+    assert missing == [], (
+        f"Skills in candidate_truth.md marked 'yes' but NOT found in base resume: {missing}"
+    )
+
+
 # ─── _unsupported_tool_keywords fixes ────────────────────────────────────────
 
 RESUME_FOR_CLAIMS = (
@@ -89,6 +173,7 @@ def test_typescript_allowed_when_in_candidate_truth(tmp_path, monkeypatch):
     import services.scoring_service as ss
     monkeypatch.setattr(ss, "_TRUTH_PATH", str(truth_file))
     ss._truth_cache = None  # reset cache so the monkeypatched path is used
+    ss._truth_mtime = None
     rep = {"new": "Built tooling in TypeScript.", "keywords_added": ["TypeScript"]}
     # With TypeScript confirmed, it should NOT be flagged
     result = main_module._unsupported_tool_keywords(rep, ["TypeScript"], RESUME_FOR_CLAIMS)
@@ -171,19 +256,61 @@ def test_scoring_failure_returns_ai_estimate_gracefully():
 
 # ─── title guard ─────────────────────────────────────────────────────────────
 
-def test_title_guard_older_role_never_more_senior_than_newer():
-    """The scoring output's interview_risks should flag title inconsistency if present."""
-    scored = {
-        "final_score": 70, "base_score": 73, "keyword_match_pct": 60,
-        "verdict": "stretch", "requirements": [],
-        "penalties": [
-            {
-                "type": "title_inconsistency", "points": -3,
-                "detail": "Employer #2 has more senior title than employer #1",
-            }
-        ],
-        "top_gaps": [], "fixes": [], "interview_risks": ["Title inconsistency detected"],
-    }
-    penalties = [p for p in scored["penalties"] if "title" in p["type"]]
-    assert len(penalties) == 1
-    assert penalties[0]["points"] == -3
+def test_analyze_resume_prompt_contains_critical_title_guard_text():
+    """The analyze_resume prompt must include the CRITICAL TITLE GUARD instruction."""
+    import json
+    from unittest.mock import MagicMock
+    from services.ai_service import analyze_resume
+
+    captured: list[str] = []
+    fake_response = MagicMock()
+    fake_response.text = json.dumps({
+        "score": 70, "after_score": 72, "company_name": "TestCo",
+        "missing_keywords": [], "section_scores": {}, "contact_info": {},
+        "replacements": [], "removals": [], "skills_additions": [],
+        "unsupported_requirements": [],
+    })
+    fake_response.usage_metadata = None
+
+    mock_models = MagicMock()
+    mock_models.generate_content.side_effect = lambda model, contents, config=None: (
+        captured.append(contents) or fake_response
+    )
+    mock_client = MagicMock()
+    mock_client.models = mock_models
+
+    import services.scoring_service as ss
+    with patch("services.ai_service.genai.Client", return_value=mock_client), \
+         patch.object(ss, "_truth_cache", set()):
+        analyze_resume("some resume text", "some JD text")
+
+    assert captured, "analyze_resume did not call the AI API"
+    assert "CRITICAL TITLE GUARD" in captured[0], (
+        "analyze_resume prompt is missing the CRITICAL TITLE GUARD instruction"
+    )
+
+
+def test_guard_title_seniority_drops_over_senior_employer2():
+    """_guard_title_seniority must drop a replacement that makes employer #2 more senior."""
+    replacements = [
+        {"original": "Role: Senior DevOps Engineer", "new": "Role: Senior SRE", "keywords_added": []},
+        {"original": "Role: DevOps Engineer", "new": "Role: Principal DevOps Engineer", "keywords_added": []},
+        {"original": "some bullet", "new": "some tailored bullet", "keywords_added": []},
+    ]
+    role_lines = ["Role: Senior DevOps Engineer", "Role: DevOps Engineer"]
+    kept, dropped = main_module._guard_title_seniority(replacements, role_lines)
+    assert len(dropped) == 1
+    assert dropped[0]["new"] == "Role: Principal DevOps Engineer"
+    assert len(kept) == 2
+
+
+def test_guard_title_seniority_allows_equal_or_lower_seniority():
+    """A replacement that keeps employer #2 at or below employer #1's seniority passes."""
+    replacements = [
+        {"original": "Role: Senior DevOps Engineer", "new": "Role: Senior SRE", "keywords_added": []},
+        {"original": "Role: DevOps Engineer", "new": "Role: Senior DevOps Engineer", "keywords_added": []},
+    ]
+    role_lines = ["Role: Senior DevOps Engineer", "Role: DevOps Engineer"]
+    kept, dropped = main_module._guard_title_seniority(replacements, role_lines)
+    assert dropped == []
+    assert len(kept) == 2

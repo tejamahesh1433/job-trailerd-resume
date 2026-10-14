@@ -36,7 +36,7 @@ from fastapi.responses import RedirectResponse
 from services.ai_service import analyze_resume, generate_cover_letter, analyze_job_metadata, generate_additional_points, generate_recruiter_outreach_email, generate_checkin_followup_email, generate_linkedin_message, extract_contacts_from_text, trim_resume_length, AIProviderNetworkError
 from services.scoring_service import score_resume, load_candidate_truth
 from services.ollama_service import generate_mail_draft, generate_follow_up, detect_w2_fulltime
-from services.docx_service import extract_text_from_docx, create_tailored_docx, insert_bullets_after, remove_bullets, extract_skills_table, add_skills_to_docx, find_absent_keywords
+from services.docx_service import extract_text_from_docx, create_tailored_docx, insert_bullets_after, remove_bullets, extract_skills_table, add_skills_to_docx, find_absent_keywords, extract_title_lines
 from services import gmail_service
 from services.profile_service import process_uploaded_doc
 from services.usage_tracker import get_usage_stats
@@ -842,14 +842,85 @@ def _write_rejected_diff(f, rejected: list):
             f.write(f"  x {', '.join(rej['unsupported'])} — {(rej.get('new') or '')[:110]}...\n")
 
 
-def _measure_scores(original_text: str, final_docx_bytes: bytes, jd_text: str) -> dict:
-    """Score the original and final (post-edit) resume against the JD. Returns
-    {"before": score_dict, "after": score_dict} where score_dict is the full
-    score_resume() output. Raises on AI failure so callers can fall back gracefully."""
+def _measure_scores(original_text: str, final_docx_bytes: bytes, jd_text: str,
+                    before: dict | None = None) -> dict:
+    """Score original and final resume. Pass a pre-computed before-score to skip
+    re-scoring the original (used when the caller already scored it for the skip check)."""
     final_text = extract_text_from_docx(final_docx_bytes)
-    before = score_resume(original_text, jd_text)
+    _before = before if before is not None else score_resume(original_text, jd_text)
     after = score_resume(final_text, jd_text)
-    return {"before": before, "after": after}
+    return {"before": _before, "after": after}
+
+
+_SENIORITY_RANK = {"principal": 4, "staff": 3, "lead": 3, "senior": 2, "mid": 1, "junior": 0}
+
+
+def _title_seniority(text: str) -> int:
+    """Return a numeric seniority rank for a title line (higher = more senior)."""
+    low = text.lower()
+    for word, rank in sorted(_SENIORITY_RANK.items(), key=lambda x: -x[1]):
+        if re.search(r"\b" + word + r"\b", low):
+            return rank
+    return 1  # unlabeled titles treated as mid-level
+
+
+def _guard_title_seniority(replacements: list, role_lines: list) -> tuple:
+    """Drop any replacement that would give employer #2's role a higher seniority
+    rank than employer #1's. role_lines[0] = most recent employer's role line."""
+    if len(role_lines) < 2:
+        return replacements, []
+
+    emp1_orig, emp2_orig = role_lines[0], role_lines[1]
+    emp1_new_text: str | None = None
+    emp2_rep_idx: int | None = None
+    emp2_new_text: str | None = None
+
+    for i, rep in enumerate(replacements):
+        if rep.get("original") == emp1_orig:
+            emp1_new_text = rep.get("new", "")
+        if rep.get("original") == emp2_orig:
+            emp2_rep_idx = i
+            emp2_new_text = rep.get("new", "")
+
+    if emp2_rep_idx is None or emp2_new_text is None:
+        return replacements, []
+
+    emp1_effective = _title_seniority(emp1_new_text if emp1_new_text is not None else emp1_orig)
+    if _title_seniority(emp2_new_text) > emp1_effective:
+        dropped = [replacements[emp2_rep_idx]]
+        kept = [rep for i, rep in enumerate(replacements) if i != emp2_rep_idx]
+        logger.warning("Title guard: dropped employer #2 role replacement — would be more senior than employer #1")
+        return kept, dropped
+
+    return replacements, []
+
+
+def _write_tailoring_diff(f, company_name: str, replacements: list, removals: list,
+                          missing_kw: list, skills_added: list,
+                          unmatched_keywords: list, rejected_edits: list):
+    """Write the body of difference.txt for a tailoring pass (no score estimate line —
+    the measured-score header is prepended separately)."""
+    f.write(f"Resume Tailoring Differences for {company_name}\n")
+    f.write("=" * 60 + "\n\n")
+    f.write(f"Total Replacements: {len(replacements)}\n")
+    if removals:
+        f.write(f"Total Removals (page-length notes): {len(removals)}\n")
+    if missing_kw:
+        f.write(f"Missing Keywords: {', '.join(missing_kw)}\n")
+    _write_skills_diff(f, skills_added, unmatched_keywords)
+    _write_rejected_diff(f, rejected_edits)
+    f.write("=" * 60 + "\n\n")
+    for i, rep in enumerate(replacements, 1):
+        kw_added = rep.get("keywords_added", [])
+        f.write(f"--- REPLACEMENT #{i} ---\n")
+        if kw_added:
+            f.write(f"Keywords Added: {', '.join(kw_added)}\n\n")
+        f.write(f"REMOVED:\n{rep.get('original', 'N/A')}\n\n")
+        f.write(f"ADDED:\n{rep.get('new', 'N/A')}\n")
+        f.write("=" * 60 + "\n\n")
+    for i, rem in enumerate(removals, 1):
+        f.write(f"--- REMOVAL #{i} (deleted entirely) ---\n{rem}\n")
+        f.write("=" * 60 + "\n\n")
 
 
 def _job_artifact_dir(record_id: int, company_name: str) -> str:
@@ -2232,12 +2303,27 @@ async def _scan_resume_core(
         jd_path = f"{company_dir}/jd_info.txt"
         diff_path = f"{company_dir}/difference.txt"
 
+        # ── Pre-score original BEFORE the skip decision so the threshold uses a
+        # measured score, not the AI's self-estimate. Fall back to AI estimate. ──
+        _before_score_result: dict | None = None
+        try:
+            _before_score_result = score_resume(resume_text, jd_text)
+            score = _before_score_result["final_score"]
+        except Exception as _pse:
+            logger.warning(f"Pre-scoring failed (using AI estimate for skip check): {_pse}")
+
         replacements, rejected_edits = _drop_unsupported_tool_claims(
             result.get('replacements', []), result.get('missing_keywords', []), resume_text)
+        _role_lines = extract_title_lines(resume_text).get("role_lines", [])
+        replacements, _title_dropped = _guard_title_seniority(replacements, _role_lines)
+        if _title_dropped:
+            rejected_edits.extend({**r, "unsupported": ["seniority-guard"]} for r in _title_dropped)
+
         removals = result.get('removals', [])
         skills_added, unmatched_keywords = [], []
         after_score = result.get('after_score', score)
         has_user_notes = bool(ai_notes and ai_notes.strip())
+        _tailoring_happened = False
 
         # ── Decide: skip tailoring, reuse existing, or create new ──
         if score >= 85 and not has_user_notes:
@@ -2251,11 +2337,12 @@ async def _scan_resume_core(
             logger.info(f"Score {score}% >= 85% for {company_name} — no bullet tailoring needed; "
                         f"added {len(skills_added)} missing skills")
             with open(diff_path, "w", encoding="utf-8") as f:
-                f.write(f"Score: {score}% — already above 85%%, no bullet tailoring needed.\n")
+                f.write(f"Score: {score}% — already above 85%, no bullet tailoring needed.\n")
                 _write_skills_diff(f, skills_added, unmatched_keywords)
                 _write_rejected_diff(f, rejected_edits)
 
         elif replacements or removals or result.get('skills_additions'):
+            _tailoring_happened = True
             working_bytes = file_bytes
             replacements = _filter_replacements_overlapping_removals(replacements, removals)
             if removals:
@@ -2275,28 +2362,8 @@ async def _scan_resume_core(
 
             missing_kw = result.get('missing_keywords', [])
             with open(diff_path, "w", encoding="utf-8") as f:
-                f.write(f"Resume Tailoring Differences for {company_name}\n")
-                f.write("=" * 60 + "\n\n")
-                f.write(f"Score: {score}% → {after_score}% (Δ +{after_score - score})\n")
-                f.write(f"Total Replacements: {len(replacements)}\n")
-                if removals:
-                    f.write(f"Total Removals (page-length notes): {len(removals)}\n")
-                if missing_kw:
-                    f.write(f"Missing Keywords: {', '.join(missing_kw)}\n")
-                _write_skills_diff(f, skills_added, unmatched_keywords)
-                _write_rejected_diff(f, rejected_edits)
-                f.write("=" * 60 + "\n\n")
-                for i, rep in enumerate(replacements, 1):
-                    kw_added = rep.get('keywords_added', [])
-                    f.write(f"--- REPLACEMENT #{i} ---\n")
-                    if kw_added:
-                        f.write(f"Keywords Added: {', '.join(kw_added)}\n\n")
-                    f.write(f"REMOVED:\n{rep.get('original', 'N/A')}\n\n")
-                    f.write(f"ADDED:\n{rep.get('new', 'N/A')}\n")
-                    f.write("=" * 60 + "\n\n")
-                for i, rem in enumerate(removals, 1):
-                    f.write(f"--- REMOVAL #{i} (deleted entirely) ---\n{rem}\n")
-                    f.write("=" * 60 + "\n\n")
+                _write_tailoring_diff(f, company_name, replacements, removals,
+                                      missing_kw, skills_added, unmatched_keywords, rejected_edits)
         else:
             with open(file_path, "wb") as f:
                 f.write(file_bytes)
@@ -2309,14 +2376,14 @@ async def _scan_resume_core(
         try:
             with open(file_path, "rb") as _mf:
                 _final_bytes = _mf.read()
-            measured = _measure_scores(resume_text, _final_bytes, jd_text)
+            measured = _measure_scores(resume_text, _final_bytes, jd_text, before=_before_score_result)
             score = measured["before"]["final_score"]
             after_score = measured["after"]["final_score"]
         except Exception as _me:
             logger.warning(f"Measured scoring failed (using AI estimates): {_me}")
 
-        # ── One-shot retry when measured after_score < 90 and safe fixes exist ──
-        if measured and after_score < 90 and measured["after"].get("fixes"):
+        # ── One-shot retry when tailoring happened, measured after_score < 90, and safe fixes exist ──
+        if _tailoring_happened and measured and after_score < 90 and measured["after"].get("fixes"):
             try:
                 _confirmed = load_candidate_truth()
                 _safe_fixes = [
@@ -2338,11 +2405,14 @@ async def _scan_resume_core(
                         length_hint=length_hint,
                         skills_table=extract_skills_table(file_bytes),
                     )
-                    _retry_reps, _ = _drop_unsupported_tool_claims(
+                    _retry_reps, _retry_rejected = _drop_unsupported_tool_claims(
                         _retry_result.get('replacements', []),
                         _retry_result.get('missing_keywords', []),
                         resume_text,
                     )
+                    _retry_reps, _retry_title_dropped = _guard_title_seniority(_retry_reps, _role_lines)
+                    if _retry_title_dropped:
+                        _retry_rejected.extend({**r, "unsupported": ["seniority-guard"]} for r in _retry_title_dropped)
                     _retry_removals = _retry_result.get('removals', [])
                     _retry_bytes = file_bytes
                     _retry_reps = _filter_replacements_overlapping_removals(_retry_reps, _retry_removals)
@@ -2350,17 +2420,30 @@ async def _scan_resume_core(
                         _rs, _retry_removals = remove_bullets(_retry_bytes, _retry_removals)
                         _retry_bytes = _rs.read()
                     _retry_bytes = create_tailored_docx(_retry_bytes, _retry_reps).read()
-                    _retry_bytes, _, _ = _apply_skills_additions(_retry_bytes, _retry_result)
-                    _retry_measured = _measure_scores(resume_text, _retry_bytes, jd_text)
+                    _retry_bytes, _retry_skills_added, _retry_unmatched = _apply_skills_additions(
+                        _retry_bytes, _retry_result)
+                    if target_pages:
+                        _retry_bytes, _retry_removals, _ = _enforce_page_target(
+                            _retry_bytes, jd_text, target_pages, _retry_removals)
+                    _retry_measured = _measure_scores(
+                        resume_text, _retry_bytes, jd_text, before=_before_score_result)
                     if _retry_measured["after"]["final_score"] > after_score:
                         with open(file_path, "wb") as _rf:
                             _rf.write(_retry_bytes)
                         measured = _retry_measured
                         score = _retry_measured["before"]["final_score"]
                         after_score = _retry_measured["after"]["final_score"]
-                        logger.info(
-                            f"Retry improved score to {after_score}% for {company_name}"
-                        )
+                        replacements = _retry_reps
+                        removals = _retry_removals
+                        skills_added = _retry_skills_added
+                        unmatched_keywords = _retry_unmatched
+                        rejected_edits = _retry_rejected
+                        _retry_missing_kw = _retry_result.get('missing_keywords', [])
+                        with open(diff_path, "w", encoding="utf-8") as _df:
+                            _write_tailoring_diff(_df, company_name, replacements, removals,
+                                                  _retry_missing_kw, skills_added,
+                                                  unmatched_keywords, rejected_edits)
+                        logger.info(f"Retry improved score to {after_score}% for {company_name}")
             except Exception as _re:
                 logger.warning(f"Retry tailoring failed: {_re}")
 
@@ -2540,12 +2623,26 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
     jd_path = f"{company_dir}/jd_info.txt"
     diff_path = f"{company_dir}/difference.txt"
 
+    # ── Pre-score original BEFORE the skip decision ──
+    _before_score_result: dict | None = None
+    try:
+        _before_score_result = score_resume(resume_text, jd_text)
+        score = _before_score_result["final_score"]
+    except Exception as _pse:
+        logger.warning(f"Pre-scoring failed (using AI estimate for skip check): {_pse}")
+
     replacements, rejected_edits = _drop_unsupported_tool_claims(
         result.get('replacements', []), result.get('missing_keywords', []), resume_text)
+    _role_lines = extract_title_lines(resume_text).get("role_lines", [])
+    replacements, _title_dropped = _guard_title_seniority(replacements, _role_lines)
+    if _title_dropped:
+        rejected_edits.extend({**r, "unsupported": ["seniority-guard"]} for r in _title_dropped)
+
     removals = result.get('removals', [])
     skills_added, unmatched_keywords = [], []
     after_score = result.get('after_score', score)
     has_user_notes = bool(ai_notes and ai_notes.strip())
+    _tailoring_happened = False
 
     if score >= 85 and not has_user_notes:
         # Same as the interactive path: no bullet tailoring, but still add missing required skills
@@ -2560,6 +2657,7 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
             _write_rejected_diff(f, rejected_edits)
 
     elif replacements or removals or result.get('skills_additions'):
+        _tailoring_happened = True
         working_bytes = file_bytes
         replacements = _filter_replacements_overlapping_removals(replacements, removals)
         if removals:
@@ -2576,28 +2674,8 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
             f.write(working_bytes)
         missing_kw = result.get('missing_keywords', [])
         with open(diff_path, "w", encoding="utf-8") as f:
-            f.write(f"Resume Tailoring Differences for {company_name}\n")
-            f.write("=" * 60 + "\n\n")
-            f.write(f"Score: {score}% → {after_score}% (Δ +{after_score - score})\n")
-            f.write(f"Total Replacements: {len(replacements)}\n")
-            if removals:
-                f.write(f"Total Removals (page-length notes): {len(removals)}\n")
-            if missing_kw:
-                f.write(f"Missing Keywords: {', '.join(missing_kw)}\n")
-            _write_skills_diff(f, skills_added, unmatched_keywords)
-            _write_rejected_diff(f, rejected_edits)
-            f.write("=" * 60 + "\n\n")
-            for i, rep in enumerate(replacements, 1):
-                kw_added = rep.get('keywords_added', [])
-                f.write(f"--- REPLACEMENT #{i} ---\n")
-                if kw_added:
-                    f.write(f"Keywords Added: {', '.join(kw_added)}\n\n")
-                f.write(f"REMOVED:\n{rep.get('original', 'N/A')}\n\n")
-                f.write(f"ADDED:\n{rep.get('new', 'N/A')}\n")
-                f.write("=" * 60 + "\n\n")
-            for i, rem in enumerate(removals, 1):
-                f.write(f"--- REMOVAL #{i} (deleted entirely) ---\n{rem}\n")
-                f.write("=" * 60 + "\n\n")
+            _write_tailoring_diff(f, company_name, replacements, removals,
+                                  missing_kw, skills_added, unmatched_keywords, rejected_edits)
     else:
         with open(file_path, "wb") as f:
             f.write(file_bytes)
@@ -2610,11 +2688,77 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
     try:
         with open(file_path, "rb") as _mf:
             _final_bytes = _mf.read()
-        measured = _measure_scores(resume_text, _final_bytes, jd_text)
+        measured = _measure_scores(resume_text, _final_bytes, jd_text, before=_before_score_result)
         score = measured["before"]["final_score"]
         after_score = measured["after"]["final_score"]
     except Exception as _me:
         logger.warning(f"Measured scoring failed (using AI estimates): {_me}")
+
+    # ── One-shot retry when tailoring happened, measured after_score < 90, and safe fixes exist ──
+    if _tailoring_happened and measured and after_score < 90 and measured["after"].get("fixes"):
+        try:
+            _confirmed = load_candidate_truth()
+            _safe_fixes = [
+                fx for fx in measured["after"]["fixes"]
+                if not fx.get("only_if_true", True)
+                or fx.get("requirement", "").lower() in _confirmed
+            ]
+            if _safe_fixes:
+                _retry_notes = (
+                    (ai_notes or "") +
+                    "\nSCORING FEEDBACK — apply these fixes to improve the score:\n" +
+                    "\n".join(
+                        f"- {fx['requirement']}: {fx['suggested_text']}"
+                        for fx in _safe_fixes[:5]
+                    )
+                )
+                _retry_result = analyze_resume(
+                    resume_text, jd_text, ai_notes=_retry_notes,
+                    length_hint=length_hint,
+                    skills_table=extract_skills_table(file_bytes),
+                )
+                _retry_reps, _retry_rejected = _drop_unsupported_tool_claims(
+                    _retry_result.get('replacements', []),
+                    _retry_result.get('missing_keywords', []),
+                    resume_text,
+                )
+                _retry_reps, _retry_title_dropped = _guard_title_seniority(_retry_reps, _role_lines)
+                if _retry_title_dropped:
+                    _retry_rejected.extend(
+                        {**r, "unsupported": ["seniority-guard"]} for r in _retry_title_dropped)
+                _retry_removals = _retry_result.get('removals', [])
+                _retry_bytes = file_bytes
+                _retry_reps = _filter_replacements_overlapping_removals(_retry_reps, _retry_removals)
+                if _retry_removals:
+                    _rs, _retry_removals = remove_bullets(_retry_bytes, _retry_removals)
+                    _retry_bytes = _rs.read()
+                _retry_bytes = create_tailored_docx(_retry_bytes, _retry_reps).read()
+                _retry_bytes, _retry_skills_added, _retry_unmatched = _apply_skills_additions(
+                    _retry_bytes, _retry_result)
+                if target_pages:
+                    _retry_bytes, _retry_removals, _ = _enforce_page_target(
+                        _retry_bytes, jd_text, target_pages, _retry_removals)
+                _retry_measured = _measure_scores(
+                    resume_text, _retry_bytes, jd_text, before=_before_score_result)
+                if _retry_measured["after"]["final_score"] > after_score:
+                    with open(file_path, "wb") as _rf:
+                        _rf.write(_retry_bytes)
+                    measured = _retry_measured
+                    score = _retry_measured["before"]["final_score"]
+                    after_score = _retry_measured["after"]["final_score"]
+                    replacements = _retry_reps
+                    removals = _retry_removals
+                    skills_added = _retry_skills_added
+                    unmatched_keywords = _retry_unmatched
+                    rejected_edits = _retry_rejected
+                    _retry_missing_kw = _retry_result.get('missing_keywords', [])
+                    with open(diff_path, "w", encoding="utf-8") as _df:
+                        _write_tailoring_diff(_df, company_name, replacements, removals,
+                                              _retry_missing_kw, skills_added,
+                                              unmatched_keywords, rejected_edits)
+                    logger.info(f"Retry improved score to {after_score}% for {company_name}")
+        except Exception as _re:
+            logger.warning(f"Retry tailoring failed: {_re}")
 
     # ── Prepend measured score section to difference.txt ──
     try:

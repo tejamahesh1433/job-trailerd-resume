@@ -23,21 +23,40 @@ logger = logging.getLogger("main")
 # Expose for testability — monkeypatch _TRUTH_PATH and clear _truth_cache in tests
 _TRUTH_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "candidate_truth.md")
 _truth_cache: set | None = None
+_truth_mtime: float | None = None
 
-TOOL_RELEASE_YEAR = {
-    "kubernetes": 2015, "amazon eks": 2018, "eks": 2018, "aks": 2018,
-    "gke": 2015, "argocd": 2018, "argo rollouts": 2019, "fluxcd": 2017,
-    "flux": 2017, "github actions": 2019, "trivy": 2019, "checkov": 2019,
-    "terraform": 2014, "opentelemetry": 2019, "loki": 2018, "tempo": 2020,
-    "istio": 2017, "linkerd": 2016, "aws compute optimizer": 2019,
-    "savings plans": 2019, "cloudwatch logs insights": 2018,
-    "ecr image scanning": 2019, "ecr": 2015, "bedrock": 2023,
-    "amazon bedrock": 2023, "openshift rosa": 2021, "rosa": 2021,
-    "litmuschaos": 2018, "gremlin": 2017, "opa": 2016,
-    "open policy agent": 2016, "snyk": 2015, "datadog": 2010,
+# (year, month) tuples — flag only when release > role_end (strict >, not >=)
+TOOL_RELEASE_DATES: dict[str, tuple[int, int]] = {
+    "kubernetes": (2015, 6), "eks": (2018, 6), "aks": (2018, 6),
+    "gke": (2015, 8), "argocd": (2018, 5), "argo rollouts": (2019, 10),
+    "flux": (2017, 7), "github actions": (2019, 11),
+    "trivy": (2019, 2), "checkov": (2019, 6), "terraform": (2014, 7),
+    "opentelemetry": (2019, 10), "loki": (2018, 12), "tempo": (2020, 10),
+    "istio": (2017, 5), "linkerd": (2016, 1),
+    "aws compute optimizer": (2019, 11), "savings plans": (2019, 11),
+    "cloudwatch logs insights": (2018, 11),
+    "ecr image scanning": (2019, 10), "ecr": (2015, 11),
+    "bedrock": (2023, 9), "rosa": (2021, 3),
+    "litmuschaos": (2018, 6), "gremlin": (2017, 10),
+    "opa": (2016, 1), "snyk": (2015, 1), "datadog": (2010, 1),
+    # Aliases — kept as separate entries so regex can match them;
+    # _TOOL_ALIASES maps them to their canonical name for deduplication.
+    "amazon eks": (2018, 6), "amazon bedrock": (2023, 9),
+    "openshift rosa": (2021, 3), "open policy agent": (2016, 1),
+    "fluxcd": (2017, 7),
 }
 
-_CURRENT_YEAR = 2026
+# Alias → canonical tool name (for deduplication within a role block)
+_TOOL_ALIASES: dict[str, str] = {
+    "amazon eks": "eks",
+    "amazon bedrock": "bedrock",
+    "openshift rosa": "rosa",
+    "open policy agent": "opa",
+    "fluxcd": "flux",
+}
+
+# Keep for backwards compatibility (tests may reference it)
+TOOL_RELEASE_YEAR = {tool: ym[0] for tool, ym in TOOL_RELEASE_DATES.items()}
 
 _MONTH_ABBREVS = (
     "Jan(?:uary)?", "Feb(?:ruary)?", "Mar(?:ch)?", "Apr(?:il)?", "May",
@@ -56,8 +75,10 @@ _MONTH_MAP = {
 }
 
 # Matches "Apr 2019 – Mar 2024" or "Feb 2014 – June 2016" or "Apr 2024 – Present"
+# Named groups: sm/sy = start month/year; em/ey = end month/year; end = full end token
 _DATE_RANGE_RE = re.compile(
-    rf"(?:{_MONTH_PAT})\s+(\d{{4}})\s*[–—\-]+\s*(Present|(?:{_MONTH_PAT})\s+(\d{{4}}))",
+    rf"(?P<sm>{_MONTH_PAT})\s+(?P<sy>\d{{4}})\s*[–—\-]+\s*"
+    rf"(?P<end>Present|(?P<em>{_MONTH_PAT})\s+(?P<ey>\d{{4}}))",
     re.IGNORECASE,
 )
 
@@ -75,78 +96,97 @@ def _is_network_error(exc: Exception) -> bool:
 
 def detect_anachronisms(resume_text: str) -> list[dict]:
     """Split resume into employer blocks by date-range header lines, then flag any
-    tool from TOOL_RELEASE_YEAR that appears in a block whose end date precedes the
-    tool's release year. 'Present' is treated as 2026."""
+    tool from TOOL_RELEASE_DATES whose (year, month) release is strictly after the
+    block's end date. Uses datetime.now() for 'Present'. Deduplicates per
+    (role, canonical_tool) using _TOOL_ALIASES so 'eks' and 'amazon eks' in the
+    same block generate exactly one flag."""
+    from datetime import datetime
+    now = datetime.now()
+    _current: tuple[int, int] = (now.year, now.month)
+
     lines = resume_text.splitlines()
-    blocks: list[tuple[str, int, int, str]] = []  # (role, start_year, end_year, text)
+    blocks: list[tuple[str, tuple[int, int], tuple[int, int], str]] = []
 
     current_start: int | None = None
     current_role = ""
-    current_start_year = 0
-    current_end_year = 0
+    current_start_ym: tuple[int, int] = (0, 1)
+    current_end_ym: tuple[int, int] = (0, 1)
 
     for i, line in enumerate(lines):
         m = _DATE_RANGE_RE.search(line)
         if m:
             if current_start is not None:
-                blocks.append((current_role, current_start_year, current_end_year,
+                blocks.append((current_role, current_start_ym, current_end_ym,
                                 "\n".join(lines[current_start:i])))
             current_start = i
-            start_year = int(m.group(1))
-            end_part = m.group(2)
-            end_year = int(m.group(3)) if m.group(3) else _CURRENT_YEAR
-            if end_part.lower().startswith("present"):
-                end_year = _CURRENT_YEAR
-            current_start_year = start_year
-            current_end_year = end_year
-            # Role name: text before the first '|' or first 50 chars
+            start_year = int(m.group("sy"))
+            start_month = _MONTH_MAP.get(m.group("sm").lower()[:3], 1)
+            current_start_ym = (start_year, start_month)
+
+            end_str = m.group("end")
+            if end_str.lower().startswith("present"):
+                current_end_ym = _current
+            else:
+                end_year = int(m.group("ey"))
+                end_month = _MONTH_MAP.get(m.group("em").lower()[:3], 1)
+                current_end_ym = (end_year, end_month)
+
             role_part = line.split("|")[0].strip() if "|" in line else line[:60].strip()
-            # Remove the date portion from the role name
             current_role = _DATE_RANGE_RE.sub("", role_part).strip(" |–—-")
 
     if current_start is not None:
-        blocks.append((current_role, current_start_year, current_end_year,
+        blocks.append((current_role, current_start_ym, current_end_ym,
                        "\n".join(lines[current_start:])))
 
     flags: list[dict] = []
-    for role, _start, end_year, block_text in blocks:
-        for tool, release_year in TOOL_RELEASE_YEAR.items():
-            if release_year >= end_year:
-                pattern = r"(?i)\b" + re.escape(tool) + r"\b"
-                if re.search(pattern, block_text):
+    for role, _start_ym, end_ym, block_text in blocks:
+        seen: set[tuple[str, str]] = set()  # (role, canonical) already flagged
+        for tool, release_ym in TOOL_RELEASE_DATES.items():
+            canonical = _TOOL_ALIASES.get(tool, tool)
+            key = (role, canonical)
+            if key in seen:
+                continue
+            if release_ym > end_ym:
+                if re.search(r"(?i)\b" + re.escape(tool) + r"\b", block_text):
+                    seen.add(key)
                     flags.append({
                         "role": role,
-                        "tool": tool,
-                        "released": release_year,
-                        "role_end": end_year,
+                        "tool": canonical,
+                        "released": f"{release_ym[0]}-{release_ym[1]:02d}",
+                        "role_end": f"{end_ym[0]}-{end_ym[1]:02d}",
                     })
     return flags
 
 
 def load_candidate_truth() -> set[str]:
     """Read backend/data/candidate_truth.md and return lowercased skill names for
-    lines matching '- <Skill>: yes'. Missing file returns empty set, never raises."""
-    global _truth_cache
-    if _truth_cache is not None:
-        return _truth_cache
+    lines matching '- <Skill>: yes'. Invalidates cache when the file's mtime
+    changes. Missing file returns empty set, never raises."""
+    global _truth_cache, _truth_mtime
 
     path = os.path.abspath(_TRUTH_PATH)
+    try:
+        current_mtime = os.path.getmtime(path)
+    except OSError:
+        return set()
+
+    if _truth_cache is not None and _truth_mtime == current_mtime:
+        return _truth_cache
+
     skills: set[str] = set()
     try:
         with open(path, encoding="utf-8") as f:
             for line in f:
                 stripped = line.strip()
-                # Match "- SomeName: yes" (case-insensitive on "yes")
                 m = re.match(r"^-\s+(.+?):\s+yes\b", stripped, re.IGNORECASE)
                 if m:
-                    skill_name = m.group(1).strip()
-                    # Drop inline comment (pipe-separated annotation)
-                    skill_name = skill_name.split("|")[0].strip()
+                    skill_name = m.group(1).strip().split("|")[0].strip()
                     skills.add(skill_name.lower())
     except OSError:
         pass
 
     _truth_cache = skills
+    _truth_mtime = current_mtime
     return skills
 
 
