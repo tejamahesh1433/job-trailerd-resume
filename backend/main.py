@@ -729,31 +729,53 @@ def _clean_skills_additions(raw) -> list:
     return cleaned
 
 
-def _apply_skills_additions(working_bytes: bytes, result: dict) -> tuple:
+def _apply_skills_additions(working_bytes: bytes, result: dict, base_resume_text: str = "") -> tuple:
     """Append the AI's JD skills to the resume's Technical Proficiency table (deterministic,
     additive — see add_skills_to_docx) and then VERIFY against the final resume text that
     the JD's missing keywords actually landed, rather than trusting the model's claim.
-    Returns (new_bytes, skills_added, unmatched_keywords): `skills_added` is
-    [{"category", "skill"}, ...] actually written; `unmatched_keywords` are missing
-    keywords still absent from the resume (e.g. non-DevOps ones the prompt forbids adding,
-    or ones the AI didn't place) — surfaced to the user, never silently dropped."""
-    additions = _clean_skills_additions(result.get('skills_additions'))
+    Only adds a skill when it already appears in the base resume OR is 'yes' in
+    candidate_truth.md — '?' and absent skills are collected in dropped_skills instead.
+    Returns (new_bytes, skills_added, unmatched_keywords, dropped_skills)."""
+    confirmed = load_candidate_truth()
+    raw_additions = _clean_skills_additions(result.get('skills_additions'))
+    filtered_additions, dropped_skills = [], []
+    for item in raw_additions:
+        kept_skills, drop_skills = [], []
+        for skill in item.get('skills', []):
+            skill_lower = skill.lower()
+            in_base = bool(base_resume_text and re.search(
+                r"(?i)\b" + re.escape(skill) + r"\b", base_resume_text))
+            in_confirmed = skill_lower in confirmed
+            if in_base or in_confirmed:
+                kept_skills.append(skill)
+            else:
+                drop_skills.append(skill)
+                logger.warning(f"Dropped skills_addition '{skill}' — not in base resume and not confirmed (mark yes in candidate_truth.md)")
+        if kept_skills:
+            filtered_additions.append({"category": item['category'], "skills": kept_skills})
+        for s in drop_skills:
+            dropped_skills.append({"category": item['category'], "skill": s})
+
     skills_added = []
-    if additions:
-        stream, added, unplaced = add_skills_to_docx(working_bytes, additions)
+    if filtered_additions:
+        stream, added, unplaced = add_skills_to_docx(working_bytes, filtered_additions)
         working_bytes = stream.read()
         skills_added = [{"category": c, "skill": s} for c, s in added]
         if unplaced:
             logger.warning(f"Skills with no matching category, not added: {unplaced}")
     unmatched = find_absent_keywords(working_bytes, result.get('missing_keywords') or [])
-    return working_bytes, skills_added, unmatched
+    return working_bytes, skills_added, unmatched, dropped_skills
 
 
-def _write_skills_diff(f, skills_added: list, unmatched_keywords: list):
+def _write_skills_diff(f, skills_added: list, unmatched_keywords: list, dropped_skills: list | None = None):
     if skills_added:
         f.write(f"Skills Added to Technical Proficiency: {len(skills_added)}\n")
         for entry in skills_added:
             f.write(f"  + [{entry['category']}] {entry['skill']}\n")
+    if dropped_skills:
+        f.write(f"Not added (unconfirmed — mark yes in candidate_truth.md to allow): {len(dropped_skills)}\n")
+        for entry in dropped_skills:
+            f.write(f"  ~ [{entry['category']}] {entry['skill']}\n")
     if unmatched_keywords:
         f.write(f"JD keywords NOT in final resume (review manually): {', '.join(unmatched_keywords)}\n")
 
@@ -897,7 +919,8 @@ def _guard_title_seniority(replacements: list, role_lines: list) -> tuple:
 
 def _write_tailoring_diff(f, company_name: str, replacements: list, removals: list,
                           missing_kw: list, skills_added: list,
-                          unmatched_keywords: list, rejected_edits: list):
+                          unmatched_keywords: list, rejected_edits: list,
+                          dropped_skills: list | None = None):
     """Write the body of difference.txt for a tailoring pass (no score estimate line —
     the measured-score header is prepended separately)."""
     f.write(f"Resume Tailoring Differences for {company_name}\n")
@@ -907,7 +930,7 @@ def _write_tailoring_diff(f, company_name: str, replacements: list, removals: li
         f.write(f"Total Removals (page-length notes): {len(removals)}\n")
     if missing_kw:
         f.write(f"Missing Keywords: {', '.join(missing_kw)}\n")
-    _write_skills_diff(f, skills_added, unmatched_keywords)
+    _write_skills_diff(f, skills_added, unmatched_keywords, dropped_skills)
     _write_rejected_diff(f, rejected_edits)
     f.write("=" * 60 + "\n\n")
     for i, rep in enumerate(replacements, 1):
@@ -2320,7 +2343,7 @@ async def _scan_resume_core(
             rejected_edits.extend({**r, "unsupported": ["seniority-guard"]} for r in _title_dropped)
 
         removals = result.get('removals', [])
-        skills_added, unmatched_keywords = [], []
+        skills_added, unmatched_keywords, dropped_skills = [], [], []
         after_score = result.get('after_score', score)
         has_user_notes = bool(ai_notes and ai_notes.strip())
         _tailoring_happened = False
@@ -2329,7 +2352,7 @@ async def _scan_resume_core(
         if score >= 85 and not has_user_notes:
             # Base resume already strong — no bullet/summary tailoring, but still append any
             # skills this JD requires that the base skills table is missing (additive only)
-            working_bytes, skills_added, unmatched_keywords = _apply_skills_additions(file_bytes, result)
+            working_bytes, skills_added, unmatched_keywords, dropped_skills = _apply_skills_additions(file_bytes, result, base_resume_text=resume_text)
             with open(file_path, "wb") as f:
                 f.write(working_bytes)
             after_score = score  # No bullet tailoring done; keep actual score
@@ -2338,7 +2361,7 @@ async def _scan_resume_core(
                         f"added {len(skills_added)} missing skills")
             with open(diff_path, "w", encoding="utf-8") as f:
                 f.write(f"Score: {score}% — already above 85%, no bullet tailoring needed.\n")
-                _write_skills_diff(f, skills_added, unmatched_keywords)
+                _write_skills_diff(f, skills_added, unmatched_keywords, dropped_skills)
                 _write_rejected_diff(f, rejected_edits)
 
         elif replacements or removals or result.get('skills_additions'):
@@ -2350,7 +2373,7 @@ async def _scan_resume_core(
                 working_bytes = working_stream.read()
                 logger.info(f"Removed {len(removals)} bullets for {company_name} per AI notes")
             working_bytes = create_tailored_docx(working_bytes, replacements).read()
-            working_bytes, skills_added, unmatched_keywords = _apply_skills_additions(working_bytes, result)
+            working_bytes, skills_added, unmatched_keywords, dropped_skills = _apply_skills_additions(working_bytes, result, base_resume_text=resume_text)
             logger.info(f"Applied {len(replacements)} replacements for {company_name}")
             if target_pages:
                 working_bytes, removals, final_pages = _enforce_page_target(
@@ -2363,7 +2386,8 @@ async def _scan_resume_core(
             missing_kw = result.get('missing_keywords', [])
             with open(diff_path, "w", encoding="utf-8") as f:
                 _write_tailoring_diff(f, company_name, replacements, removals,
-                                      missing_kw, skills_added, unmatched_keywords, rejected_edits)
+                                      missing_kw, skills_added, unmatched_keywords, rejected_edits,
+                                      dropped_skills)
         else:
             with open(file_path, "wb") as f:
                 f.write(file_bytes)
@@ -2424,8 +2448,8 @@ async def _scan_resume_core(
                         _rs, _retry_removals = remove_bullets(_retry_bytes, _retry_removals)
                         _retry_bytes = _rs.read()
                     _retry_bytes = create_tailored_docx(_retry_bytes, _retry_reps).read()
-                    _retry_bytes, _retry_skills_added, _retry_unmatched = _apply_skills_additions(
-                        _retry_bytes, _retry_result)
+                    _retry_bytes, _retry_skills_added, _retry_unmatched, _retry_dropped = _apply_skills_additions(
+                        _retry_bytes, _retry_result, base_resume_text=resume_text)
                     if target_pages:
                         _retry_bytes, _retry_removals, _ = _enforce_page_target(
                             _retry_bytes, jd_text, target_pages, _retry_removals)
@@ -2442,11 +2466,12 @@ async def _scan_resume_core(
                         removals = _retry_removals
                         skills_added = _retry_skills_added
                         unmatched_keywords = _retry_unmatched
+                        dropped_skills = _retry_dropped
                         rejected_edits = _retry_rejected
                         with open(diff_path, "w", encoding="utf-8") as _df:
                             _write_tailoring_diff(_df, company_name, replacements, removals,
                                                   result.get('missing_keywords', []), skills_added,
-                                                  unmatched_keywords, rejected_edits)
+                                                  unmatched_keywords, rejected_edits, dropped_skills)
                         logger.info(f"Retry improved score to {after_score}% for {company_name}")
             except Exception as _re:
                 logger.warning(f"Retry tailoring failed: {_re}")
@@ -2643,21 +2668,21 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
         rejected_edits.extend({**r, "unsupported": ["seniority-guard"]} for r in _title_dropped)
 
     removals = result.get('removals', [])
-    skills_added, unmatched_keywords = [], []
+    skills_added, unmatched_keywords, dropped_skills = [], [], []
     after_score = result.get('after_score', score)
     has_user_notes = bool(ai_notes and ai_notes.strip())
     _tailoring_happened = False
 
     if score >= 85 and not has_user_notes:
         # Same as the interactive path: no bullet tailoring, but still add missing required skills
-        working_bytes, skills_added, unmatched_keywords = _apply_skills_additions(file_bytes, result)
+        working_bytes, skills_added, unmatched_keywords, dropped_skills = _apply_skills_additions(file_bytes, result, base_resume_text=resume_text)
         with open(file_path, "wb") as f:
             f.write(working_bytes)
         after_score = score  # No bullet tailoring done; keep actual score
         replacements = []
         with open(diff_path, "w", encoding="utf-8") as f:
             f.write(f"Score: {score}% — already above 85%, no bullet tailoring needed.\n")
-            _write_skills_diff(f, skills_added, unmatched_keywords)
+            _write_skills_diff(f, skills_added, unmatched_keywords, dropped_skills)
             _write_rejected_diff(f, rejected_edits)
 
     elif replacements or removals or result.get('skills_additions'):
@@ -2668,7 +2693,7 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
             working_stream, removals = remove_bullets(working_bytes, removals)
             working_bytes = working_stream.read()
         working_bytes = create_tailored_docx(working_bytes, replacements).read()
-        working_bytes, skills_added, unmatched_keywords = _apply_skills_additions(working_bytes, result)
+        working_bytes, skills_added, unmatched_keywords, dropped_skills = _apply_skills_additions(working_bytes, result, base_resume_text=resume_text)
         if target_pages:
             working_bytes, removals, final_pages = _enforce_page_target(
                 working_bytes, jd_text, target_pages, removals)
@@ -2679,7 +2704,8 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
         missing_kw = result.get('missing_keywords', [])
         with open(diff_path, "w", encoding="utf-8") as f:
             _write_tailoring_diff(f, company_name, replacements, removals,
-                                  missing_kw, skills_added, unmatched_keywords, rejected_edits)
+                                  missing_kw, skills_added, unmatched_keywords, rejected_edits,
+                                  dropped_skills)
     else:
         with open(file_path, "wb") as f:
             f.write(file_bytes)
@@ -2741,8 +2767,8 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
                     _rs, _retry_removals = remove_bullets(_retry_bytes, _retry_removals)
                     _retry_bytes = _rs.read()
                 _retry_bytes = create_tailored_docx(_retry_bytes, _retry_reps).read()
-                _retry_bytes, _retry_skills_added, _retry_unmatched = _apply_skills_additions(
-                    _retry_bytes, _retry_result)
+                _retry_bytes, _retry_skills_added, _retry_unmatched, _retry_dropped = _apply_skills_additions(
+                    _retry_bytes, _retry_result, base_resume_text=resume_text)
                 if target_pages:
                     _retry_bytes, _retry_removals, _ = _enforce_page_target(
                         _retry_bytes, jd_text, target_pages, _retry_removals)
@@ -2759,11 +2785,12 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
                     removals = _retry_removals
                     skills_added = _retry_skills_added
                     unmatched_keywords = _retry_unmatched
+                    dropped_skills = _retry_dropped
                     rejected_edits = _retry_rejected
                     with open(diff_path, "w", encoding="utf-8") as _df:
                         _write_tailoring_diff(_df, company_name, replacements, removals,
                                               result.get('missing_keywords', []), skills_added,
-                                              unmatched_keywords, rejected_edits)
+                                              unmatched_keywords, rejected_edits, dropped_skills)
                     logger.info(f"Retry improved score to {after_score}% for {company_name}")
         except Exception as _re:
             logger.warning(f"Retry tailoring failed: {_re}")

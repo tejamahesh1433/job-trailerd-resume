@@ -184,6 +184,24 @@ def load_candidate_truth() -> set[str]:
     return skills
 
 
+def load_unconfirmed_skills() -> set[str]:
+    """Return lowercased skill names for lines matching '- <Skill>: ?' in
+    candidate_truth.md. Missing file returns empty set, never raises."""
+    path = os.path.abspath(_TRUTH_PATH)
+    skills: set[str] = set()
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                m = re.match(r"^-\s+(.+?):\s+\?", stripped, re.IGNORECASE)
+                if m:
+                    skill_name = m.group(1).strip().split("|")[0].strip()
+                    skills.add(skill_name.lower())
+    except OSError:
+        pass
+    return skills
+
+
 def score_resume(resume_text: str, jd_text: str) -> dict:
     """Call Gemini with the recruiter-scorer prompt. Also applies deterministic
     anachronism penalties so they can't be omitted by the AI. Returns the full

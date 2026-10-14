@@ -408,3 +408,136 @@ def test_load_tool_dates_from_json_fallback_on_missing_file():
         tools, aliases = _load_tool_dates_from_json("/nonexistent/path/tool_release_dates.json")
     assert tools == {}
     assert aliases == {}
+
+
+# ── Skills-addition honesty filter tests ──────────────────────────────────────
+
+def test_apply_skills_additions_drops_question_skill(tmp_path):
+    """A skill marked '?' in candidate_truth must be dropped from skills_additions."""
+    import docx as _docx
+    from io import BytesIO
+    from unittest.mock import patch
+
+    # Build minimal docx with a "Scripting & Languages" skills table row
+    doc = _docx.Document()
+    tbl = doc.add_table(rows=1, cols=2)
+    tbl.rows[0].cells[0].text = "Scripting & Languages"
+    tbl.rows[0].cells[1].text = "Python, Bash"
+    buf = BytesIO()
+    doc.save(buf)
+    resume_bytes = buf.getvalue()
+
+    result = {
+        "skills_additions": [{"category": "Scripting & Languages", "skills": ["TypeScript"]}],
+        "missing_keywords": [],
+    }
+    # TypeScript is NOT in resume bytes and NOT in confirmed (yes) skills
+    with patch("main.load_candidate_truth", return_value=set()):
+        wb, added, unmatched, dropped = main_module._apply_skills_additions(
+            resume_bytes, result, base_resume_text="Python, Bash")
+    assert not added, f"Expected no skills added, got: {added}"
+    assert len(dropped) == 1
+    assert dropped[0]["skill"] == "TypeScript"
+
+
+def test_apply_skills_additions_keeps_yes_skill(tmp_path):
+    """A skill marked 'yes' in candidate_truth must be allowed even if absent from resume."""
+    import docx as _docx
+    from io import BytesIO
+    from unittest.mock import patch
+
+    doc = _docx.Document()
+    # _skills_table requires >= 3 rows to be recognized as the skills table
+    tbl = doc.add_table(rows=3, cols=2)
+    tbl.rows[0].cells[0].text = "Cloud Platforms"
+    tbl.rows[0].cells[1].text = "AWS"
+    tbl.rows[1].cells[0].text = "Containers"
+    tbl.rows[1].cells[1].text = "Docker"
+    tbl.rows[2].cells[0].text = "Scripting"
+    tbl.rows[2].cells[1].text = "Python"
+    buf = BytesIO()
+    doc.save(buf)
+    resume_bytes = buf.getvalue()
+
+    result = {
+        "skills_additions": [{"category": "Cloud Platforms", "skills": ["Terraform"]}],
+        "missing_keywords": [],
+    }
+    # Terraform is confirmed (yes) in candidate_truth
+    with patch("main.load_candidate_truth", return_value={"terraform"}):
+        wb, added, unmatched, dropped = main_module._apply_skills_additions(
+            resume_bytes, result, base_resume_text="AWS")
+    assert len(added) == 1
+    assert added[0]["skill"] == "Terraform"
+    assert not dropped
+
+
+def test_apply_skills_additions_keeps_skill_already_in_resume():
+    """A skill already in the base resume text must be kept regardless of candidate_truth."""
+    import docx as _docx
+    from io import BytesIO
+    from unittest.mock import patch
+
+    doc = _docx.Document()
+    # _skills_table requires >= 3 rows to be recognized as the skills table
+    tbl = doc.add_table(rows=3, cols=2)
+    tbl.rows[0].cells[0].text = "Containers & Orchestration"
+    tbl.rows[0].cells[1].text = "Docker"
+    tbl.rows[1].cells[0].text = "Cloud Platforms"
+    tbl.rows[1].cells[1].text = "AWS"
+    tbl.rows[2].cells[0].text = "Scripting"
+    tbl.rows[2].cells[1].text = "Python"
+    buf = BytesIO()
+    doc.save(buf)
+    resume_bytes = buf.getvalue()
+
+    result = {
+        "skills_additions": [{"category": "Containers & Orchestration", "skills": ["Kubernetes"]}],
+        "missing_keywords": [],
+    }
+    # Kubernetes is in base resume text — should be kept even if not in confirmed skills
+    with patch("main.load_candidate_truth", return_value=set()):
+        wb, added, unmatched, dropped = main_module._apply_skills_additions(
+            resume_bytes, result, base_resume_text="Docker, Kubernetes")
+    assert len(added) == 1
+    assert added[0]["skill"] == "Kubernetes"
+    assert not dropped
+
+
+def test_extract_text_from_docx_skills_table_before_experience():
+    """After the document-order fix, the skills table should appear before job blocks
+    in the extracted text — so detect_anachronisms won't include it in the last employer
+    block and won't generate false positives for tools only in the skills table."""
+    import docx as _docx
+    from io import BytesIO
+    from services.docx_service import extract_text_from_docx
+
+    # Build a docx: skills table first, then a job block
+    doc = _docx.Document()
+    # Skills table (2-col)
+    tbl = doc.add_table(rows=1, cols=2)
+    tbl.rows[0].cells[0].text = "Containers"
+    tbl.rows[0].cells[1].text = "Docker, ROSA"  # ROSA released 2021 — anachronism bait
+    # Job paragraph with a date range before ROSA existed
+    doc.add_paragraph("Acme Corp  Feb 2014 – Jun 2016")
+    doc.add_paragraph("  Managed AWS infrastructure.")
+
+    buf = BytesIO()
+    doc.save(buf)
+    text = extract_text_from_docx(buf.getvalue())
+    lines = text.split('\n')
+
+    # Skills table content must appear BEFORE the date-range line
+    skills_idx = next((i for i, l in enumerate(lines) if 'Docker' in l), None)
+    job_idx = next((i for i, l in enumerate(lines) if '2014' in l), None)
+    assert skills_idx is not None, "Skills table not found in extracted text"
+    assert job_idx is not None, "Job block not found in extracted text"
+    assert skills_idx < job_idx, (
+        f"Skills table (line {skills_idx}) should appear before job block (line {job_idx})"
+    )
+
+    # detect_anachronisms should NOT flag ROSA for the Acme 2014-2016 role
+    from services.scoring_service import detect_anachronisms
+    flags = detect_anachronisms(text)
+    rosa_flags = [f for f in flags if 'rosa' in f['tool'].lower()]
+    assert not rosa_flags, f"ROSA should not be flagged (it's in skills table, not job block): {rosa_flags}"
