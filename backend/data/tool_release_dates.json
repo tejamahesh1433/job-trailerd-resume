@@ -70,6 +70,19 @@
     "fluentbit": "2015-11",
     "buildah": "2017-09"
   },
+  "match": {
+    "tempo":      ["grafana tempo", "tempo tracing", "tempo observability"],
+    "vector":     ["vector.dev", "datadog vector", "timber vector", "vector agent"],
+    "vault":      ["hashicorp vault", "vault secrets", "vault agent", "vault token", "vault pki", "vault audit", "vault kubernetes"],
+    "consul":     ["hashicorp consul", "consul service", "consul connect", "consul kv", "consul mesh"],
+    "envoy":      ["envoy proxy", "envoy sidecar", "envoy gateway", "envoy xds"],
+    "harbor":     ["harbor registry", "harbor container registry", "vmware harbor", "goharbor"],
+    "flux":       ["fluxcd", "flux cd", "flux gitops", "weaveworks flux", "flux operator", "flux bootstrap"],
+    "gatekeeper": ["opa gatekeeper", "kube gatekeeper", "kubernetes gatekeeper"],
+    "falco":      ["falco runtime", "sysdig falco", "falco security", "falco rules", "falco alerts"],
+    "velero":     ["velero backup", "velero restore", "heptio velero"],
+    "spinnaker":  ["spinnaker cd", "spinnaker pipeline", "netflix spinnaker", "spinnaker deployment"]
+  },
   "aliases": {
     "amazon eks": "eks",
     "amazon bedrock": "bedrock",

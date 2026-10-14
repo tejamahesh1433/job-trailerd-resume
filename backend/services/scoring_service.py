@@ -29,9 +29,10 @@ _truth_mtime: float | None = None
 _TOOL_DATES_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "tool_release_dates.json")
 
 
-def _load_tool_dates_from_json(path: str) -> tuple[dict[str, tuple[int, int]], dict[str, str]]:
-    """Load TOOL_RELEASE_DATES and _TOOL_ALIASES from JSON. Falls back to ({}, {}) on any error
-    so the service starts even when the file is missing or malformed."""
+def _load_tool_dates_from_json(path: str) -> tuple[dict[str, tuple[int, int]], dict[str, str], dict[str, list[str]]]:
+    """Load TOOL_RELEASE_DATES, _TOOL_ALIASES, and _TOOL_MATCH_PHRASES from JSON.
+    Falls back to ({}, {}, {}) on any error so the service starts even when the
+    file is missing or malformed."""
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
@@ -40,16 +41,20 @@ def _load_tool_dates_from_json(path: str) -> tuple[dict[str, tuple[int, int]], d
             year_s, month_s = ym_str.split("-", 1)
             tools[name.lower()] = (int(year_s), int(month_s))
         aliases: dict[str, str] = {k.lower(): v.lower() for k, v in data.get("aliases", {}).items()}
-        return tools, aliases
+        match_phrases: dict[str, list[str]] = {
+            k.lower(): [p.lower() for p in v]
+            for k, v in data.get("match", {}).items()
+        }
+        return tools, aliases, match_phrases
     except Exception as _e:  # noqa: BLE001
         import warnings
         warnings.warn(f"Could not load tool_release_dates.json ({path}): {_e}; anachronism detection disabled")
-        return {}, {}
+        return {}, {}, {}
 
 
-TOOL_RELEASE_DATES, _TOOL_ALIASES = _load_tool_dates_from_json(_TOOL_DATES_PATH)
+TOOL_RELEASE_DATES, _TOOL_ALIASES, _TOOL_MATCH_PHRASES = _load_tool_dates_from_json(_TOOL_DATES_PATH)
 
-# Keep for backwards compatibility (tests may reference it)
+# Keep for backwards compatibility
 TOOL_RELEASE_YEAR = {tool: ym[0] for tool, ym in TOOL_RELEASE_DATES.items()}
 
 _MONTH_ABBREVS = (
@@ -140,8 +145,17 @@ def detect_anachronisms(resume_text: str) -> list[dict]:
             key = (role, canonical)
             if key in seen:
                 continue
-            if release_ym > end_ym:  # noqa: SIM102
-                if re.search(r"(?i)\b" + re.escape(tool) + r"\b", block_text):
+            if release_ym > end_ym:
+                # Ambiguous common-word tools require a specific qualifying phrase
+                match_list = _TOOL_MATCH_PHRASES.get(tool)
+                if match_list:
+                    hit = any(
+                        re.search(r"(?i)\b" + re.escape(phrase) + r"\b", block_text)
+                        for phrase in match_list
+                    )
+                else:
+                    hit = bool(re.search(r"(?i)\b" + re.escape(tool) + r"\b", block_text))
+                if hit:
                     seen.add(key)
                     flags.append({
                         "role": role,

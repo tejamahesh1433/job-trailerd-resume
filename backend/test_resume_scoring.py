@@ -405,9 +405,10 @@ def test_load_tool_dates_from_json_fallback_on_missing_file():
     from services.scoring_service import _load_tool_dates_from_json
     with warnings.catch_warnings(record=True):
         warnings.simplefilter("always")
-        tools, aliases = _load_tool_dates_from_json("/nonexistent/path/tool_release_dates.json")
+        tools, aliases, match_phrases = _load_tool_dates_from_json("/nonexistent/path/tool_release_dates.json")
     assert tools == {}
     assert aliases == {}
+    assert match_phrases == {}
 
 
 # ── Skills-addition honesty filter tests ──────────────────────────────────────
@@ -572,3 +573,88 @@ def test_convert_docx_to_pdf_uses_libreoffice_when_word_fails(tmp_path):
     else:
         # Neither path available — should return None gracefully, not raise
         assert result is None
+
+
+# ─── match-phrase filter for ambiguous tool names ─────────────────────────────
+
+def test_ambiguous_terms_in_2016_role_not_flagged():
+    """'attack vector', 'delivery tempo', bare 'envoy', bare 'harbor' in a 2016
+    role must NOT be flagged — they don't match any qualifying phrase."""
+    from services.scoring_service import detect_anachronisms
+    text = (
+        "Acme Corp | Feb 2014 – Jun 2016\n"
+        "Reduced attack vector by hardening IAM policies.\n"
+        "Improved delivery tempo through CI optimization.\n"
+        "Served as envoy to the partner team.\n"
+        "Deployed services in the data harbor on-premise.\n"
+    )
+    flags = detect_anachronisms(text)
+    assert not flags, f"Expected 0 flags, got: {flags}"
+
+
+def test_hashicorp_vault_in_pre_release_role_flagged():
+    """'HashiCorp Vault' in a role ending Dec 2014 MUST be flagged (released 2015-04)."""
+    from services.scoring_service import detect_anachronisms
+    text = (
+        "Freddie Mac | Feb 2012 – Dec 2014\n"
+        "Managed secrets using HashiCorp Vault for credential rotation.\n"
+    )
+    flags = detect_anachronisms(text)
+    vault_flags = [f for f in flags if f["tool"] == "vault"]
+    assert vault_flags, f"Expected vault to be flagged, got: {flags}"
+
+
+def test_grafana_tempo_in_2016_role_flagged():
+    """'Grafana Tempo' in a role ending Jun 2016 MUST be flagged (released 2020-10)."""
+    from services.scoring_service import detect_anachronisms
+    text = (
+        "Startup Inc | Jan 2015 – Jun 2016\n"
+        "Set up distributed tracing with Grafana Tempo for microservices.\n"
+    )
+    flags = detect_anachronisms(text)
+    tempo_flags = [f for f in flags if f["tool"] == "tempo"]
+    assert tempo_flags, f"Expected tempo to be flagged, got: {flags}"
+
+
+# ─── final honesty safety net ─────────────────────────────────────────────────
+
+def test_honesty_safety_net_removes_typescript_replacement(tmp_path):
+    """A bullet replacement whose 'new' text contains 'TypeScript' (unconfirmed '?')
+    and TypeScript is not in the base resume → replacement reverted by safety net."""
+    import re
+    from io import BytesIO
+    from unittest.mock import patch, MagicMock
+    import docx as _docx
+
+    # Build a minimal docx with one bullet
+    d = _docx.Document()
+    d.add_paragraph("Managed AWS infrastructure to support scalability.")
+    buf = BytesIO()
+    d.save(buf)
+    original_bytes = buf.getvalue()
+
+    # A replacement that injects TypeScript (unconfirmed)
+    replacement = {
+        "original": "Managed AWS infrastructure to support scalability.",
+        "new": "Managed AWS infrastructure and TypeScript services to support scalability.",
+        "keywords_added": ["TypeScript"],
+    }
+
+    # Apply the replacement to produce final_bytes
+    from services.docx_service import create_tailored_docx
+    final_bytes = create_tailored_docx(original_bytes, [replacement]).read()
+
+    # Fake unconfirmed skills returns TypeScript
+    with patch("main.load_unconfirmed_skills", return_value={"typescript"}), \
+         patch("main.load_candidate_truth", return_value=set()):
+        import main as main_module
+        cleaned, reverted = main_module._apply_honesty_safety_net(
+            final_bytes,
+            "Managed AWS infrastructure to support scalability.",  # base text (no TypeScript)
+            [replacement],
+        )
+
+    assert len(reverted) == 1, f"Expected 1 reverted, got {reverted}"
+    from services.docx_service import extract_text_from_docx
+    cleaned_text = extract_text_from_docx(cleaned)
+    assert "TypeScript" not in cleaned_text, "TypeScript should have been removed"
