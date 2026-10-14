@@ -34,7 +34,7 @@ from slowapi.errors import RateLimitExceeded
 
 from fastapi.responses import RedirectResponse
 from services.ai_service import analyze_resume, generate_cover_letter, analyze_job_metadata, generate_additional_points, generate_recruiter_outreach_email, generate_checkin_followup_email, generate_linkedin_message, extract_contacts_from_text, trim_resume_length, AIProviderNetworkError
-from services.scoring_service import score_resume, load_candidate_truth
+from services.scoring_service import score_resume, load_candidate_truth, load_unconfirmed_skills
 from services.ollama_service import generate_mail_draft, generate_follow_up, detect_w2_fulltime
 from services.docx_service import extract_text_from_docx, create_tailored_docx, insert_bullets_after, remove_bullets, extract_skills_table, add_skills_to_docx, find_absent_keywords, extract_title_lines
 from services import gmail_service
@@ -767,6 +767,54 @@ def _apply_skills_additions(working_bytes: bytes, result: dict, base_resume_text
     return working_bytes, skills_added, unmatched, dropped_skills
 
 
+def _apply_honesty_safety_net(
+    final_bytes: bytes,
+    base_resume_text: str,
+    replacements: list,
+) -> tuple[bytes, list]:
+    """Final check after all edits: revert any bullet replacement whose 'new' text
+    contains an unconfirmed or tool-release term that wasn't already in the base resume.
+    Returns (cleaned_bytes, reverted_reps). reverted_reps is [] when nothing was removed.
+    Skills-table violations are already blocked upstream by _apply_skills_additions; this
+    function catches the remaining leak path — bullet replacements."""
+    from services.scoring_service import TOOL_RELEASE_DATES
+    confirmed = load_candidate_truth()
+    unconfirmed = load_unconfirmed_skills()
+    watchlist: set[str] = unconfirmed | set(TOOL_RELEASE_DATES.keys())
+
+    final_text = extract_text_from_docx(final_bytes)
+
+    violations: set[str] = set()
+    for term in watchlist:
+        if term.lower() in confirmed:
+            continue
+        pattern = r"(?i)\b" + re.escape(term) + r"\b"
+        if re.search(pattern, final_text) and not re.search(pattern, base_resume_text):
+            violations.add(term)
+
+    if not violations:
+        return final_bytes, []
+
+    bad_reps: list[dict] = []
+    for rep in replacements:
+        new_text = rep.get("new", "")
+        if any(re.search(r"(?i)\b" + re.escape(v) + r"\b", new_text) for v in violations):
+            bad_reps.append(rep)
+
+    if not bad_reps:
+        return final_bytes, []
+
+    # Revert by swapping new↔original — preserves page enforcement and skills already applied
+    reversals = [{"original": rep.get("new", ""), "new": rep.get("original", "")} for rep in bad_reps]
+    cleaned = create_tailored_docx(final_bytes, reversals).read()
+
+    for rep in bad_reps:
+        v_found = [v for v in violations if re.search(r"(?i)\b" + re.escape(v) + r"\b", rep.get("new", ""))]
+        logger.warning(f"Honesty safety net reverted bullet containing {v_found}")
+
+    return cleaned, bad_reps
+
+
 def _write_skills_diff(f, skills_added: list, unmatched_keywords: list, dropped_skills: list | None = None):
     if skills_added:
         f.write(f"Skills Added to Technical Proficiency: {len(skills_added)}\n")
@@ -920,7 +968,8 @@ def _guard_title_seniority(replacements: list, role_lines: list) -> tuple:
 def _write_tailoring_diff(f, company_name: str, replacements: list, removals: list,
                           missing_kw: list, skills_added: list,
                           unmatched_keywords: list, rejected_edits: list,
-                          dropped_skills: list | None = None):
+                          dropped_skills: list | None = None,
+                          honesty_removed: list | None = None):
     """Write the body of difference.txt for a tailoring pass (no score estimate line —
     the measured-score header is prepended separately)."""
     f.write(f"Resume Tailoring Differences for {company_name}\n")
@@ -931,6 +980,10 @@ def _write_tailoring_diff(f, company_name: str, replacements: list, removals: li
     if missing_kw:
         f.write(f"Missing Keywords: {', '.join(missing_kw)}\n")
     _write_skills_diff(f, skills_added, unmatched_keywords, dropped_skills)
+    if honesty_removed:
+        f.write(f"Removed by honesty check: {len(honesty_removed)}\n")
+        for rep in honesty_removed:
+            f.write(f"  ~ {(rep.get('new', ''))[:100]}\n")
     _write_rejected_diff(f, rejected_edits)
     f.write("=" * 60 + "\n\n")
     for i, rep in enumerate(replacements, 1):
@@ -2380,6 +2433,7 @@ async def _scan_resume_core(
                     working_bytes, jd_text, target_pages, removals)
                 logger.info(f"Page-target enforcement for {company_name}: target={target_pages}, "
                             f"final={final_pages}, total removals={len(removals)}")
+            working_bytes, honesty_removed = _apply_honesty_safety_net(working_bytes, resume_text, replacements)
             with open(file_path, "wb") as f:
                 f.write(working_bytes)
 
@@ -2387,7 +2441,7 @@ async def _scan_resume_core(
             with open(diff_path, "w", encoding="utf-8") as f:
                 _write_tailoring_diff(f, company_name, replacements, removals,
                                       missing_kw, skills_added, unmatched_keywords, rejected_edits,
-                                      dropped_skills)
+                                      dropped_skills, honesty_removed)
         else:
             with open(file_path, "wb") as f:
                 f.write(file_bytes)
@@ -2453,6 +2507,8 @@ async def _scan_resume_core(
                     if target_pages:
                         _retry_bytes, _retry_removals, _ = _enforce_page_target(
                             _retry_bytes, jd_text, target_pages, _retry_removals)
+                    _retry_bytes, _retry_honesty_removed = _apply_honesty_safety_net(
+                        _retry_bytes, resume_text, _retry_reps)
                     _retry_measured = _measure_scores(
                         resume_text, _retry_bytes, jd_text, before=_before_score_result)
                     if _retry_measured["after"]["final_score"] > after_score:
@@ -2471,7 +2527,8 @@ async def _scan_resume_core(
                         with open(diff_path, "w", encoding="utf-8") as _df:
                             _write_tailoring_diff(_df, company_name, replacements, removals,
                                                   result.get('missing_keywords', []), skills_added,
-                                                  unmatched_keywords, rejected_edits, dropped_skills)
+                                                  unmatched_keywords, rejected_edits, dropped_skills,
+                                                  _retry_honesty_removed)
                         logger.info(f"Retry improved score to {after_score}% for {company_name}")
             except Exception as _re:
                 logger.warning(f"Retry tailoring failed: {_re}")
@@ -2699,13 +2756,14 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
                 working_bytes, jd_text, target_pages, removals)
             logger.info(f"Page-target enforcement for {company_name}: target={target_pages}, "
                         f"final={final_pages}, total removals={len(removals)}")
+        working_bytes, honesty_removed = _apply_honesty_safety_net(working_bytes, resume_text, replacements)
         with open(file_path, "wb") as f:
             f.write(working_bytes)
         missing_kw = result.get('missing_keywords', [])
         with open(diff_path, "w", encoding="utf-8") as f:
             _write_tailoring_diff(f, company_name, replacements, removals,
                                   missing_kw, skills_added, unmatched_keywords, rejected_edits,
-                                  dropped_skills)
+                                  dropped_skills, honesty_removed)
     else:
         with open(file_path, "wb") as f:
             f.write(file_bytes)
@@ -2772,6 +2830,8 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
                 if target_pages:
                     _retry_bytes, _retry_removals, _ = _enforce_page_target(
                         _retry_bytes, jd_text, target_pages, _retry_removals)
+                _retry_bytes, _retry_honesty_removed = _apply_honesty_safety_net(
+                    _retry_bytes, resume_text, _retry_reps)
                 _retry_measured = _measure_scores(
                     resume_text, _retry_bytes, jd_text, before=_before_score_result)
                 if _retry_measured["after"]["final_score"] > after_score:
@@ -2790,7 +2850,8 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
                     with open(diff_path, "w", encoding="utf-8") as _df:
                         _write_tailoring_diff(_df, company_name, replacements, removals,
                                               result.get('missing_keywords', []), skills_added,
-                                              unmatched_keywords, rejected_edits, dropped_skills)
+                                              unmatched_keywords, rejected_edits, dropped_skills,
+                                              _retry_honesty_removed)
                     logger.info(f"Retry improved score to {after_score}% for {company_name}")
         except Exception as _re:
             logger.warning(f"Retry tailoring failed: {_re}")
@@ -3441,10 +3502,19 @@ async def api_add_points(request: Request, record_id: int, payload: AddPointsReq
         if not insertions:
             raise HTTPException(status_code=422, detail="Could not determine where to add these points. Try rephrasing or specifying a project/company name.")
 
-        updated_stream = insert_bullets_after(current_bytes, insertions)
+        updated_bytes = insert_bullets_after(current_bytes, insertions).read()
+        # Honesty safety net: revert any new bullet containing an unconfirmed tool term
+        _insertion_reps = [
+            {"original": ins.get("anchor", ""), "new": ins.get("new_bullet", "")}
+            for ins in insertions if ins.get("new_bullet")
+        ]
+        updated_bytes, _honesty_removed = _apply_honesty_safety_net(
+            updated_bytes, resume_text, _insertion_reps)
+        if _honesty_removed:
+            logger.warning(f"api_add_points honesty check removed {len(_honesty_removed)} insertion(s)")
         # Update the SAME tailored resume file in place — never create a new file or record
         with open(file_path, "wb") as f:
-            f.write(updated_stream.read())
+            f.write(updated_bytes)
 
         existing_scan = record.get('scan_result') or {}
         if not isinstance(existing_scan, dict):
@@ -3486,6 +3556,10 @@ async def api_add_points(request: Request, record_id: int, payload: AddPointsReq
                 for ins in insertions:
                     f.write(f"Section: {ins.get('section', 'N/A')}\n")
                     f.write(f"ADDED:\n{ins.get('new_bullet', 'N/A')}\n\n")
+                if _honesty_removed:
+                    f.write(f"Removed by honesty check: {len(_honesty_removed)}\n")
+                    for rep in _honesty_removed:
+                        f.write(f"  ~ {(rep.get('new', ''))[:100]}\n")
         except OSError:
             pass
 
