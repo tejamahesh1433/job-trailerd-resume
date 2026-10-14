@@ -34,6 +34,7 @@ from slowapi.errors import RateLimitExceeded
 
 from fastapi.responses import RedirectResponse
 from services.ai_service import analyze_resume, generate_cover_letter, analyze_job_metadata, generate_additional_points, generate_recruiter_outreach_email, generate_checkin_followup_email, generate_linkedin_message, extract_contacts_from_text, trim_resume_length, AIProviderNetworkError
+from services.scoring_service import score_resume, load_candidate_truth
 from services.ollama_service import generate_mail_draft, generate_follow_up, detect_w2_fulltime
 from services.docx_service import extract_text_from_docx, create_tailored_docx, insert_bullets_after, remove_bullets, extract_skills_table, add_skills_to_docx, find_absent_keywords
 from services import gmail_service
@@ -772,14 +773,28 @@ def _keyword_tokens(keyword: str) -> list:
     return [t for t in _words(keyword) if len(t) >= 2 and t not in _TOKEN_STOPWORDS]
 
 
+_NON_TOOL_PHRASES = {
+    'analysis', 'review', 'reviews', 'guidance', 'leadership', 'collaboration',
+    'management', 'practices', 'methodology', 'support', 'troubleshooting',
+    'engineer', 'engineering', 'design', 'strategy', 'planning', 'coordination',
+    'ownership', 'mentoring', 'processes', 'process', 'improvement',
+}
+
+
 def _unsupported_tool_keywords(replacement: dict, jd_keywords: list, resume_text: str) -> list:
     """JD keywords a replacement's new text claims but that the base resume never mentions.
     Judged word by word, so a compound like 'DevOps/SRE' is fine when both words already
     appear, while 'Puppet' (absent) or 'compliance zones' (absent 'zones') are not.
     Years-of-experience/requirement phrases and industry-domain words are wording rather
-    than tool claims, so they're exempt (the skills filter already rejects the former)."""
+    than tool claims, so they're exempt (the skills filter already rejects the former).
+    Practice/wording phrases (analysis, review, guidance, etc.) are never tool claims."""
     new_text = replacement.get('new') or ''
     resume_words = set(_words(resume_text))
+    # Confirmed skills count as supported even if not yet in the resume text
+    confirmed_skills_words: set[str] = set()
+    for skill in load_candidate_truth():
+        confirmed_skills_words.update(_words(skill))
+    all_known_words = resume_words | confirmed_skills_words
     candidates = list(dict.fromkeys(list(replacement.get('keywords_added') or []) + list(jd_keywords or [])))
     unsupported = []
     for kw in candidates:
@@ -788,9 +803,12 @@ def _unsupported_tool_keywords(replacement: dict, jd_keywords: list, resume_text
         tokens = _keyword_tokens(kw)
         if not tokens or not _looks_like_skill(kw.strip()):
             continue
+        # If any token in the keyword is a practice/wording word, it's not a tool claim
+        if any(t in _NON_TOOL_PHRASES for t in tokens):
+            continue
         if all(t in _DOMAIN_WORDS for t in tokens):
             continue
-        if any(t not in _DOMAIN_WORDS and t not in resume_words for t in tokens):
+        if any(t not in _DOMAIN_WORDS and t not in all_known_words for t in tokens):
             unsupported.append(kw.strip())
     return unsupported
 
@@ -822,6 +840,16 @@ def _write_rejected_diff(f, rejected: list):
         f.write(f"Edits DISCARDED for claiming tools not in your resume: {len(rejected)}\n")
         for rej in rejected:
             f.write(f"  x {', '.join(rej['unsupported'])} — {(rej.get('new') or '')[:110]}...\n")
+
+
+def _measure_scores(original_text: str, final_docx_bytes: bytes, jd_text: str) -> dict:
+    """Score the original and final (post-edit) resume against the JD. Returns
+    {"before": score_dict, "after": score_dict} where score_dict is the full
+    score_resume() output. Raises on AI failure so callers can fall back gracefully."""
+    final_text = extract_text_from_docx(final_docx_bytes)
+    before = score_resume(original_text, jd_text)
+    after = score_resume(final_text, jd_text)
+    return {"before": before, "after": after}
 
 
 def _job_artifact_dir(record_id: int, company_name: str) -> str:
@@ -2276,6 +2304,102 @@ async def _scan_resume_core(
             with open(diff_path, "w", encoding="utf-8") as f:
                 f.write("No changes were needed. The resume already matched the job description well.\n")
 
+        # ── Measured scoring (best-effort, never blocks the scan) ──
+        measured = None
+        try:
+            with open(file_path, "rb") as _mf:
+                _final_bytes = _mf.read()
+            measured = _measure_scores(resume_text, _final_bytes, jd_text)
+            score = measured["before"]["final_score"]
+            after_score = measured["after"]["final_score"]
+        except Exception as _me:
+            logger.warning(f"Measured scoring failed (using AI estimates): {_me}")
+
+        # ── One-shot retry when measured after_score < 90 and safe fixes exist ──
+        if measured and after_score < 90 and measured["after"].get("fixes"):
+            try:
+                _confirmed = load_candidate_truth()
+                _safe_fixes = [
+                    fx for fx in measured["after"]["fixes"]
+                    if not fx.get("only_if_true", True)
+                    or fx.get("requirement", "").lower() in _confirmed
+                ]
+                if _safe_fixes:
+                    _retry_notes = (
+                        (ai_notes or "") +
+                        "\nSCORING FEEDBACK — apply these fixes to improve the score:\n" +
+                        "\n".join(
+                            f"- {fx['requirement']}: {fx['suggested_text']}"
+                            for fx in _safe_fixes[:5]
+                        )
+                    )
+                    _retry_result = analyze_resume(
+                        resume_text, jd_text, ai_notes=_retry_notes,
+                        length_hint=length_hint,
+                        skills_table=extract_skills_table(file_bytes),
+                    )
+                    _retry_reps, _ = _drop_unsupported_tool_claims(
+                        _retry_result.get('replacements', []),
+                        _retry_result.get('missing_keywords', []),
+                        resume_text,
+                    )
+                    _retry_removals = _retry_result.get('removals', [])
+                    _retry_bytes = file_bytes
+                    _retry_reps = _filter_replacements_overlapping_removals(_retry_reps, _retry_removals)
+                    if _retry_removals:
+                        _rs, _retry_removals = remove_bullets(_retry_bytes, _retry_removals)
+                        _retry_bytes = _rs.read()
+                    _retry_bytes = create_tailored_docx(_retry_bytes, _retry_reps).read()
+                    _retry_bytes, _, _ = _apply_skills_additions(_retry_bytes, _retry_result)
+                    _retry_measured = _measure_scores(resume_text, _retry_bytes, jd_text)
+                    if _retry_measured["after"]["final_score"] > after_score:
+                        with open(file_path, "wb") as _rf:
+                            _rf.write(_retry_bytes)
+                        measured = _retry_measured
+                        score = _retry_measured["before"]["final_score"]
+                        after_score = _retry_measured["after"]["final_score"]
+                        logger.info(
+                            f"Retry improved score to {after_score}% for {company_name}"
+                        )
+            except Exception as _re:
+                logger.warning(f"Retry tailoring failed: {_re}")
+
+        # ── Prepend measured score section to difference.txt ──
+        try:
+            if measured:
+                _kw_b = measured["before"]["keyword_match_pct"]
+                _kw_a = measured["after"]["keyword_match_pct"]
+                _pen_str = "; ".join(
+                    f"{p['type']}: {p['points']}"
+                    for p in (measured["after"].get("penalties") or [])
+                ) or "none"
+                _gaps_str = ", ".join(measured["after"].get("top_gaps") or []) or "none"
+                _risks_str = ", ".join(measured["after"].get("interview_risks") or []) or "none"
+                _uns_str = ", ".join(result.get("unsupported_requirements") or []) or "none"
+                _mhdr = (
+                    f"Measured score:  {score}% → {after_score}%"
+                    f"  (Δ {after_score - score:+d})"
+                    f"   [keyword match: {_kw_b}% → {_kw_a}%]\n"
+                    f"Penalties: {_pen_str}\n"
+                    f"Remaining gaps: {_gaps_str}\n"
+                    f"Interview risks: {_risks_str}\n"
+                    f"Unsupported requirements (not added — confirm in candidate_truth.md to allow):"
+                    f" {_uns_str}\n"
+                    + "=" * 60 + "\n\n"
+                )
+            else:
+                _mhdr = (
+                    f"Score: estimate (scoring unavailable) — {score}% → {after_score}%\n"
+                    + "=" * 60 + "\n\n"
+                )
+            with open(diff_path, "r", encoding="utf-8") as _df:
+                _existing_diff = _df.read()
+            with open(diff_path, "w", encoding="utf-8") as _df:
+                _df.write(_mhdr)
+                _df.write(_existing_diff)
+        except Exception as _de:
+            logger.warning(f"Failed to update diff with measured scores: {_de}")
+
         contact_info = result.get('contact_info', {})
         with open(jd_path, "w", encoding="utf-8") as f:
             f.write("Contact Info:\n")
@@ -2298,6 +2422,10 @@ async def _scan_resume_core(
             "skills_added": skills_added,
             "unmatched_keywords": unmatched_keywords,
             "rejected_edits": [{"new": r.get("new"), "unsupported": r["unsupported"]} for r in rejected_edits],
+            "measured": measured,
+            "penalties": measured["after"]["penalties"] if measured else [],
+            "interview_risks": measured["after"]["interview_risks"] if measured else [],
+            "unsupported_requirements": result.get("unsupported_requirements", []),
         }
 
         if rerun_record:
@@ -2477,6 +2605,53 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
         with open(diff_path, "w", encoding="utf-8") as f:
             f.write("No changes were needed. The resume already matched the job description well.\n")
 
+    # ── Measured scoring (best-effort, never blocks the batch scan) ──
+    measured = None
+    try:
+        with open(file_path, "rb") as _mf:
+            _final_bytes = _mf.read()
+        measured = _measure_scores(resume_text, _final_bytes, jd_text)
+        score = measured["before"]["final_score"]
+        after_score = measured["after"]["final_score"]
+    except Exception as _me:
+        logger.warning(f"Measured scoring failed (using AI estimates): {_me}")
+
+    # ── Prepend measured score section to difference.txt ──
+    try:
+        if measured:
+            _kw_b = measured["before"]["keyword_match_pct"]
+            _kw_a = measured["after"]["keyword_match_pct"]
+            _pen_str = "; ".join(
+                f"{p['type']}: {p['points']}"
+                for p in (measured["after"].get("penalties") or [])
+            ) or "none"
+            _gaps_str = ", ".join(measured["after"].get("top_gaps") or []) or "none"
+            _risks_str = ", ".join(measured["after"].get("interview_risks") or []) or "none"
+            _uns_str = ", ".join(result.get("unsupported_requirements") or []) or "none"
+            _mhdr = (
+                f"Measured score:  {score}% → {after_score}%"
+                f"  (Δ {after_score - score:+d})"
+                f"   [keyword match: {_kw_b}% → {_kw_a}%]\n"
+                f"Penalties: {_pen_str}\n"
+                f"Remaining gaps: {_gaps_str}\n"
+                f"Interview risks: {_risks_str}\n"
+                f"Unsupported requirements (not added — confirm in candidate_truth.md to allow):"
+                f" {_uns_str}\n"
+                + "=" * 60 + "\n\n"
+            )
+        else:
+            _mhdr = (
+                f"Score: estimate (scoring unavailable) — {score}% → {after_score}%\n"
+                + "=" * 60 + "\n\n"
+            )
+        with open(diff_path, "r", encoding="utf-8") as _df:
+            _existing_diff = _df.read()
+        with open(diff_path, "w", encoding="utf-8") as _df:
+            _df.write(_mhdr)
+            _df.write(_existing_diff)
+    except Exception as _de:
+        logger.warning(f"Failed to update diff with measured scores: {_de}")
+
     contact_info = result.get('contact_info', {})
     with open(jd_path, "w", encoding="utf-8") as f:
         f.write("Contact Info:\n")
@@ -2496,6 +2671,10 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
         "contact_info": contact_info, "replacements": replacements, "removals": removals,
         "skills_added": skills_added, "unmatched_keywords": unmatched_keywords,
         "rejected_edits": [{"new": r.get("new"), "unsupported": r["unsupported"]} for r in rejected_edits],
+        "measured": measured,
+        "penalties": measured["after"]["penalties"] if measured else [],
+        "interview_risks": measured["after"]["interview_risks"] if measured else [],
+        "unsupported_requirements": result.get("unsupported_requirements", []),
     }
     record_id = save_resume_record(company_name, jd_text, after_score, file_path, json.dumps(scan_data), **vendor_details)
     append_to_csv(company_name, jd_text, score, after_score, original_filename, file_path, vendor_details)
@@ -3103,6 +3282,15 @@ async def api_add_points(request: Request, record_id: int, payload: AddPointsReq
         ]
 
         new_after_score = ai_result.get('after_score', existing_scan.get('after_score', record.get('score')))
+        try:
+            with open(file_path, "rb") as _sf:
+                _scored_bytes = _sf.read()
+            _measured_after = score_resume(
+                extract_text_from_docx(_scored_bytes), record.get('jd_text', '')
+            )
+            new_after_score = _measured_after.get('final_score', new_after_score)
+        except Exception as _se:
+            logger.warning(f"Post-add-points scoring failed (using AI estimate): {_se}")
 
         merged_scan = {
             **existing_scan,

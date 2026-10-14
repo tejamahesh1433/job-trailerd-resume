@@ -5,6 +5,7 @@ import json
 from services.usage_tracker import log_api_call
 from services.model_config import GEMINI_QUALITY_MODEL, GEMINI_FAST_MODEL, GEMINI_PRO_FALLBACK_MODEL
 from services.docx_service import extract_title_lines
+from services.scoring_service import load_candidate_truth
 
 
 def _get_gemini_client() -> genai.Client:
@@ -102,9 +103,19 @@ def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "", length_hi
             'the short title line directly beneath the candidate\'s name at the very top of the resume yourself.'
         )
 
+    confirmed = load_candidate_truth()
+    if confirmed:
+        confirmed_block = (
+            "    CANDIDATE CONFIRMED SKILLS (may be used in bullet rewrites and skills additions; "
+            "these are already-owned skills not yet in the resume):\n    "
+            + ", ".join(sorted(confirmed)) + "\n"
+        )
+    else:
+        confirmed_block = ""
+
     prompt = f"""
     You are an expert ATS (Applicant Tracking System) scanner and career coach specializing in DevOps engineering roles.
-{notes_section}{length_target_block}
+{notes_section}{confirmed_block}{length_target_block}
     Job Description:
     {jd_text}
 
@@ -119,14 +130,14 @@ def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "", length_hi
     - "About [Company]" sections or explicit "Company:" fields
     - Recruiter signature blocks with company names
     IMPORTANT: Do NOT confuse technology platforms/tools (DigitalOcean, AWS, Azure, Kubernetes, Docker, Terraform, GitHub, Datadog, etc.) with the hiring company. These are technologies mentioned in requirements, NOT the employer. If truly not found anywhere, return "Unknown_Company".
-    Task 3: Identify bullet points in the resume to rewrite so the TAILORED resume scores AT LEAST 80% ATS match.
+    Task 3: Identify bullet points in the resume to rewrite to improve the resume's ATS match.
     - Provide up to 10 replacements. More replacements = better match.
     - Include rewrites for the Professional Summary to incorporate key JD keywords. Do NOT rewrite the TECHNICAL PROFICIENCY skills table through "replacements" — skills go through "skills_additions" (Task 10), which is applied by code and can't corrupt the table.
     - "original" MUST be the EXACT, CHARACTER-FOR-CHARACTER literal text found in the resume — copy-paste it exactly, including all punctuation and spacing. Do NOT paraphrase or shorten the original.
     - "new" should weave in the JD's keywords naturally into the existing bullet point — but ONLY technologies/tools/platforms that ALREADY appear somewhere in the resume (see the TOOL-CLAIM RULE below). A JD tool the resume doesn't mention goes in "skills_additions" only, never in a bullet, summary or headline rewrite.
     - If the original score is already 80+, still provide 3-5 replacements to push it higher.
     - For each replacement, include a "keywords_added" field listing the specific JD keywords that were incorporated in that rewrite.
-    Task 4: Estimate the new ATS score (0-100) after ALL replacements are applied (after_score). The after_score MUST be at least 80. If your replacements don't achieve 80, add more replacements until they do.
+    Task 4: Estimate the new ATS score (0-100) after ALL replacements are applied (after_score). This is an estimate only — the final score will be measured separately.
     Task 5: Identify up to 10 keywords from the JD that are missing from the resume.
     Task 6: Break down the original score into 4 section scores (0-100): "Skills", "Experience", "Education", "Summary".
     Task 7: Extract the RECRUITER/VENDOR contact info from the Job Description (NOT the candidate's info from the resume). Look for names, email addresses, and phone numbers in the JD's signature block, header, or body. Return null for any field not found.
@@ -136,6 +147,7 @@ def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "", length_hi
     - If the JD's title differs from the resume's current headline, rewrite the headline to align with the JD's title. Keep it truthful and within the candidate's DevOps/Cloud/Infrastructure domain — never rebrand into an unrelated discipline (e.g. never turn it into "Software Developer" or "Data Scientist").
     - Do the SAME for the Role line of ONLY the two MOST RECENT work experience entries — the first two employers listed under Professional/Work Experience in reverse-chronological order at the top of that section. Rewrite each of those two title lines to align with the JD's position title, staying consistent with what that specific job's own bullets describe. Do NOT touch the title line of any older/earlier employer.
     - MANDATORY, DO NOT SKIP: if the resume has two or more work experience entries, you MUST produce a role-title replacement for BOTH of the two most recent employers — not just the first/most recent one. Before finalizing your answer, check that your "replacements" array contains: (1) the headline replacement, (2) a role-title replacement for employer #1 (most recent), AND (3) a role-title replacement for employer #2 (second most recent). All three are required whenever the JD's title differs from the resume's current titles.
+    - CRITICAL TITLE GUARD: never raise a title's seniority beyond the JD's own title. An older employer (employer #2) must NEVER receive a more senior title than a newer employer (employer #1). If aligning both titles would require making employer #2 more senior, leave employer #2's title unchanged. If the JD title would only be applied to employer #2 (because employer #1's rewrite is rejected), leave both titles unchanged.
     - Add the headline change and each of the (up to two) role-title changes as their own entries in the "replacements" array, exactly like a bullet rewrite — "original" must be copied character-for-character from the verbatim lines given above (not paraphrased, not the Professional Summary), "new" is the rewritten title line.
     Task 9: RESUME LENGTH / PAGE COUNT — only do this if USER INSTRUCTIONS above explicitly ask for a target length (e.g. "keep it to 3 pages", "make it 4 pages max", "shorten it", "make it more concise", "trim it down"). If a MEASURED LENGTH TARGET block appears above, its numbers are mandatory minimums — do not undershoot them.
     - Select entire bullet points to remove COMPLETELY (not reword) to reach that length — do not merely shrink wording, actually cut whole bullets. A handful of cuts is almost never enough on a multi-job resume; be aggressive.
@@ -158,6 +170,10 @@ def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "", length_hi
     - Only use DevOps-relevant keywords from the JD: CI/CD, Kubernetes, Docker, Terraform, Ansible, AWS, Azure, GCP, Jenkins, monitoring, observability, infrastructure automation, IaC, Linux, scripting, networking, security hardening, etc.
     - Map the candidate's existing experience to the JD's domain. For example: if the JD asks for VMware and the resume has cloud infrastructure experience, reword to emphasize virtualization, hypervisor management, infrastructure orchestration, etc.
     - NEVER invent experiences the candidate doesn't have. Only reword existing bullet points to highlight relevant transferable skills.
+    - A tool/skill may be named in a rewritten bullet only if it is already in the resume text above OR is in CANDIDATE CONFIRMED SKILLS.
+    - A JD keyword added to skills_additions must also appear in at least one bullet rewrite, unless it is already demonstrated in an existing bullet.
+    - Never place a tool in a role whose end date precedes the tool's existence (e.g. do not mention GitHub Actions in a 2016-2018 role).
+    - Fix any spelling errors you notice while rewriting a line.
     - TOOL-CLAIM RULE (hard rule, checked by code — a violating replacement is DISCARDED entirely): a bullet, summary or headline rewrite may name a technology, tool, platform, language or framework ONLY if that exact name already appears somewhere in the Resume text above. Never write a JD tool the resume lacks (e.g. "Puppet", "Kafka", "Splunk" when absent) into a bullet as if the candidate used it — that fabricates hands-on experience they could be questioned on. Such tools may appear ONLY in "skills_additions". Rewording a bullet around tools it already mentions (or that the resume already lists elsewhere) is fine.
     - ALWAYS populate "skills_additions" (Task 10) with the DevOps-relevant JD keywords the candidate could plausibly claim.
     - MANDATORY: Every legitimate DevOps-domain keyword listed in missing_keywords MUST be incorporated into at least one replacement OR listed in "skills_additions". A missing keyword that is a TOOL/TECHNOLOGY the resume does not already mention goes ONLY in "skills_additions" (TOOL-CLAIM RULE) — never into a replacement. Non-tool keywords (seniority wording, methodologies the candidate genuinely practices) may go into replacements.
@@ -196,6 +212,9 @@ def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "", length_hi
                 "category": "<exact category name from the skills table>",
                 "skills": ["<skill to append>"]
             }}
+        ],
+        "unsupported_requirements": [
+            "<JD requirements that could not be met truthfully>"
         ]
     }}
     """
@@ -350,7 +369,7 @@ def generate_additional_points(resume_text: str, jd_text: str, points_text: str,
 
     CRITICAL CONSTRAINT: The candidate is a DevOps/Cloud/Infrastructure engineer. Stay within DevOps, Cloud, Infrastructure, SRE, and Platform Engineering domains — do not add unrelated skills.
 
-    Also estimate the resume's new overall ATS match score (0-100) after these bullets are added (after_score).
+    Include an after_score key (integer 0-100) as an estimate only; the actual score will be measured separately.
 
     Return the result strictly in the following JSON format:
     {{
