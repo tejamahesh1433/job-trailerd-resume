@@ -3,11 +3,11 @@ _measure_scores, score storage, scoring failure fallback, and title guard."""
 from io import BytesIO
 from unittest.mock import patch
 
-import main as main_module
-import pytest
-from services.scoring_service import detect_anachronisms
-
 import docx
+import pytest
+
+import main as main_module
+from services.scoring_service import detect_anachronisms
 
 RESUME_WITH_EKS_IN_2016 = """
 Acme Corp  Feb 2014 – Jan 2016
@@ -114,6 +114,7 @@ def test_every_confirmed_skill_is_in_base_resume():
     """Every skill marked 'yes' in candidate_truth.md must be found in the base resume text."""
     import os
     import re
+
     import services.scoring_service as ss
 
     if not os.path.exists(BASE_RESUME_PATH):
@@ -260,6 +261,7 @@ def test_analyze_resume_prompt_contains_critical_title_guard_text():
     """The analyze_resume prompt must include the CRITICAL TITLE GUARD instruction."""
     import json
     from unittest.mock import MagicMock
+
     from services.ai_service import analyze_resume
 
     captured: list[str] = []
@@ -321,8 +323,6 @@ def test_guard_title_seniority_allows_equal_or_lower_seniority():
 def test_retry_win_updates_result_for_scan_data():
     """When the retry wins, unsupported_requirements and missing_keywords in scan_data
     must come from the retry result, not the original AI pass."""
-    import re as _re
-    import services.scoring_service as ss
 
     original_result = {
         "score": 65, "after_score": 68,
@@ -360,7 +360,7 @@ def test_safe_fixes_filter_matches_confirmed_skill_by_word_boundary():
     """A fix with only_if_true=True should be kept when a confirmed skill name
     appears word-boundary in the requirement or suggested_text."""
     import re
-    import services.scoring_service as ss
+
 
     confirmed = {"kubernetes", "terraform", "eks"}
 
@@ -385,3 +385,26 @@ def test_safe_fixes_filter_matches_confirmed_skill_by_word_boundary():
     assert len(kept) == 3, f"Expected 3 kept fixes, got {len(kept)}: {kept}"
     dropped = [fx for fx in fixes if not _keep(fx)]
     assert dropped[0]["requirement"] == "Serverless Lambda deployment"
+
+
+# ─── tool_release_dates.json loading ─────────────────────────────────────────
+
+def test_tool_release_dates_json_loads_at_least_60_tools():
+    """The JSON file must exist and contain ≥60 canonical tool entries."""
+    from services.scoring_service import TOOL_RELEASE_DATES
+    assert len(TOOL_RELEASE_DATES) >= 60, (
+        f"TOOL_RELEASE_DATES has only {len(TOOL_RELEASE_DATES)} entries — expected ≥60. "
+        "Check backend/data/tool_release_dates.json"
+    )
+
+
+def test_load_tool_dates_from_json_fallback_on_missing_file():
+    """_load_tool_dates_from_json must return ({}, {}) and not raise when the file is absent."""
+    import warnings
+
+    from services.scoring_service import _load_tool_dates_from_json
+    with warnings.catch_warnings(record=True):
+        warnings.simplefilter("always")
+        tools, aliases = _load_tool_dates_from_json("/nonexistent/path/tool_release_dates.json")
+    assert tools == {}
+    assert aliases == {}

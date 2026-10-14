@@ -11,6 +11,7 @@ import re
 
 from google import genai
 from google.genai import types
+
 from services.model_config import (
     GEMINI_FAST_MODEL,
     GEMINI_PRO_FALLBACK_MODEL,
@@ -25,35 +26,28 @@ _TRUTH_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "candidate_t
 _truth_cache: set | None = None
 _truth_mtime: float | None = None
 
-# (year, month) tuples — flag only when release > role_end (strict >, not >=)
-TOOL_RELEASE_DATES: dict[str, tuple[int, int]] = {
-    "kubernetes": (2015, 6), "eks": (2018, 6), "aks": (2018, 6),
-    "gke": (2015, 8), "argocd": (2018, 5), "argo rollouts": (2019, 10),
-    "flux": (2017, 7), "github actions": (2019, 11),
-    "trivy": (2019, 2), "checkov": (2019, 6), "terraform": (2014, 7),
-    "opentelemetry": (2019, 10), "loki": (2018, 12), "tempo": (2020, 10),
-    "istio": (2017, 5), "linkerd": (2016, 1),
-    "aws compute optimizer": (2019, 11), "savings plans": (2019, 11),
-    "cloudwatch logs insights": (2018, 11),
-    "ecr image scanning": (2019, 10), "ecr": (2015, 11),
-    "bedrock": (2023, 9), "rosa": (2021, 3),
-    "litmuschaos": (2018, 6), "gremlin": (2017, 10),
-    "opa": (2016, 1), "snyk": (2015, 1), "datadog": (2010, 1),
-    # Aliases — kept as separate entries so regex can match them;
-    # _TOOL_ALIASES maps them to their canonical name for deduplication.
-    "amazon eks": (2018, 6), "amazon bedrock": (2023, 9),
-    "openshift rosa": (2021, 3), "open policy agent": (2016, 1),
-    "fluxcd": (2017, 7),
-}
+_TOOL_DATES_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "tool_release_dates.json")
 
-# Alias → canonical tool name (for deduplication within a role block)
-_TOOL_ALIASES: dict[str, str] = {
-    "amazon eks": "eks",
-    "amazon bedrock": "bedrock",
-    "openshift rosa": "rosa",
-    "open policy agent": "opa",
-    "fluxcd": "flux",
-}
+
+def _load_tool_dates_from_json(path: str) -> tuple[dict[str, tuple[int, int]], dict[str, str]]:
+    """Load TOOL_RELEASE_DATES and _TOOL_ALIASES from JSON. Falls back to ({}, {}) on any error
+    so the service starts even when the file is missing or malformed."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        tools: dict[str, tuple[int, int]] = {}
+        for name, ym_str in data.get("tools", {}).items():
+            year_s, month_s = ym_str.split("-", 1)
+            tools[name.lower()] = (int(year_s), int(month_s))
+        aliases: dict[str, str] = {k.lower(): v.lower() for k, v in data.get("aliases", {}).items()}
+        return tools, aliases
+    except Exception as _e:  # noqa: BLE001
+        import warnings
+        warnings.warn(f"Could not load tool_release_dates.json ({path}): {_e}; anachronism detection disabled")
+        return {}, {}
+
+
+TOOL_RELEASE_DATES, _TOOL_ALIASES = _load_tool_dates_from_json(_TOOL_DATES_PATH)
 
 # Keep for backwards compatibility (tests may reference it)
 TOOL_RELEASE_YEAR = {tool: ym[0] for tool, ym in TOOL_RELEASE_DATES.items()}
@@ -146,7 +140,7 @@ def detect_anachronisms(resume_text: str) -> list[dict]:
             key = (role, canonical)
             if key in seen:
                 continue
-            if release_ym > end_ym:
+            if release_ym > end_ym:  # noqa: SIM102
                 if re.search(r"(?i)\b" + re.escape(tool) + r"\b", block_text):
                     seen.add(key)
                     flags.append({
