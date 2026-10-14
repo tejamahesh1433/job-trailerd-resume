@@ -2389,7 +2389,11 @@ async def _scan_resume_core(
                 _safe_fixes = [
                     fx for fx in measured["after"]["fixes"]
                     if not fx.get("only_if_true", True)
-                    or fx.get("requirement", "").lower() in _confirmed
+                    or any(
+                        re.search(r"\b" + re.escape(s) + r"\b",
+                                  (fx.get("requirement", "") + " " + fx.get("suggested_text", "")).lower())
+                        for s in _confirmed
+                    )
                 ]
                 if _safe_fixes:
                     _retry_notes = (
@@ -2433,15 +2437,15 @@ async def _scan_resume_core(
                         measured = _retry_measured
                         score = _retry_measured["before"]["final_score"]
                         after_score = _retry_measured["after"]["final_score"]
+                        result = _retry_result
                         replacements = _retry_reps
                         removals = _retry_removals
                         skills_added = _retry_skills_added
                         unmatched_keywords = _retry_unmatched
                         rejected_edits = _retry_rejected
-                        _retry_missing_kw = _retry_result.get('missing_keywords', [])
                         with open(diff_path, "w", encoding="utf-8") as _df:
                             _write_tailoring_diff(_df, company_name, replacements, removals,
-                                                  _retry_missing_kw, skills_added,
+                                                  result.get('missing_keywords', []), skills_added,
                                                   unmatched_keywords, rejected_edits)
                         logger.info(f"Retry improved score to {after_score}% for {company_name}")
             except Exception as _re:
@@ -2701,7 +2705,11 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
             _safe_fixes = [
                 fx for fx in measured["after"]["fixes"]
                 if not fx.get("only_if_true", True)
-                or fx.get("requirement", "").lower() in _confirmed
+                or any(
+                    re.search(r"\b" + re.escape(s) + r"\b",
+                              (fx.get("requirement", "") + " " + fx.get("suggested_text", "")).lower())
+                    for s in _confirmed
+                )
             ]
             if _safe_fixes:
                 _retry_notes = (
@@ -2746,15 +2754,15 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
                     measured = _retry_measured
                     score = _retry_measured["before"]["final_score"]
                     after_score = _retry_measured["after"]["final_score"]
+                    result = _retry_result
                     replacements = _retry_reps
                     removals = _retry_removals
                     skills_added = _retry_skills_added
                     unmatched_keywords = _retry_unmatched
                     rejected_edits = _retry_rejected
-                    _retry_missing_kw = _retry_result.get('missing_keywords', [])
                     with open(diff_path, "w", encoding="utf-8") as _df:
                         _write_tailoring_diff(_df, company_name, replacements, removals,
-                                              _retry_missing_kw, skills_added,
+                                              result.get('missing_keywords', []), skills_added,
                                               unmatched_keywords, rejected_edits)
                     logger.info(f"Retry improved score to {after_score}% for {company_name}")
         except Exception as _re:

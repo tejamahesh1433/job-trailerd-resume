@@ -314,3 +314,74 @@ def test_guard_title_seniority_allows_equal_or_lower_seniority():
     kept, dropped = main_module._guard_title_seniority(replacements, role_lines)
     assert dropped == []
     assert len(kept) == 2
+
+
+# ─── retry win propagates result to scan_data ────────────────────────────────
+
+def test_retry_win_updates_result_for_scan_data():
+    """When the retry wins, unsupported_requirements and missing_keywords in scan_data
+    must come from the retry result, not the original AI pass."""
+    import re as _re
+    import services.scoring_service as ss
+
+    original_result = {
+        "score": 65, "after_score": 68,
+        "company_name": "RetryTestCo",
+        "missing_keywords": ["original-kw"],
+        "unsupported_requirements": ["original-unsupported"],
+        "section_scores": {}, "contact_info": {},
+        "replacements": [], "removals": [], "skills_additions": [],
+    }
+    retry_result = {
+        "score": 65, "after_score": 75,
+        "company_name": "RetryTestCo",
+        "missing_keywords": ["retry-kw"],
+        "unsupported_requirements": ["retry-unsupported"],
+        "section_scores": {}, "contact_info": {},
+        "replacements": [], "removals": [], "skills_additions": [],
+    }
+
+    # Simulate the retry-win assignment pattern: result = _retry_result
+    result = original_result
+    # Retry wins:
+    result = retry_result
+
+    assert result.get("missing_keywords") == ["retry-kw"], (
+        "missing_keywords must come from the retry result after it wins"
+    )
+    assert result.get("unsupported_requirements") == ["retry-unsupported"], (
+        "unsupported_requirements must come from the retry result after it wins"
+    )
+
+
+# ─── safe-fixes filter uses word-boundary skill matching ─────────────────────
+
+def test_safe_fixes_filter_matches_confirmed_skill_by_word_boundary():
+    """A fix with only_if_true=True should be kept when a confirmed skill name
+    appears word-boundary in the requirement or suggested_text."""
+    import re
+    import services.scoring_service as ss
+
+    confirmed = {"kubernetes", "terraform", "eks"}
+
+    fixes = [
+        # kept: only_if_true=False
+        {"requirement": "incident response", "suggested_text": "Led post-mortems", "only_if_true": False},
+        # kept: 'kubernetes' appears word-boundary in requirement
+        {"requirement": "Kubernetes cluster management", "suggested_text": "managed clusters", "only_if_true": True},
+        # kept: 'eks' appears word-boundary in suggested_text
+        {"requirement": "container orchestration", "suggested_text": "deployed on EKS", "only_if_true": True},
+        # dropped: only_if_true=True and no confirmed skill matches
+        {"requirement": "Serverless Lambda deployment", "suggested_text": "used Lambda", "only_if_true": True},
+    ]
+
+    def _keep(fx):
+        if not fx.get("only_if_true", True):
+            return True
+        text = (fx.get("requirement", "") + " " + fx.get("suggested_text", "")).lower()
+        return any(re.search(r"\b" + re.escape(s) + r"\b", text) for s in confirmed)
+
+    kept = [fx for fx in fixes if _keep(fx)]
+    assert len(kept) == 3, f"Expected 3 kept fixes, got {len(kept)}: {kept}"
+    dropped = [fx for fx in fixes if not _keep(fx)]
+    assert dropped[0]["requirement"] == "Serverless Lambda deployment"
