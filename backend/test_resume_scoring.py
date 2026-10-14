@@ -541,3 +541,34 @@ def test_extract_text_from_docx_skills_table_before_experience():
     flags = detect_anachronisms(text)
     rosa_flags = [f for f in flags if 'rosa' in f['tool'].lower()]
     assert not rosa_flags, f"ROSA should not be flagged (it's in skills table, not job block): {rosa_flags}"
+
+
+# ─── page-count LibreOffice fallback ─────────────────────────────────────────
+
+def test_convert_docx_to_pdf_uses_libreoffice_when_word_fails(tmp_path):
+    """When docx2pdf raises (no Word license / headless env), _convert_docx_to_pdf
+    should fall through to the LibreOffice branch and return a page count via
+    the fallback path (or None gracefully if soffice is also absent)."""
+    import shutil as _shutil
+    import sys
+
+    dummy_docx = tmp_path / "test.docx"
+    import docx as _docx
+    d = _docx.Document()
+    d.add_paragraph("Hello world")
+    d.save(str(dummy_docx))
+
+    soffice = _shutil.which("soffice") or _shutil.which("libreoffice")
+
+    with patch("main.sys") as mock_sys:
+        mock_sys.platform = "win32"
+        # Force docx2pdf to raise so we fall through to LibreOffice
+        with patch.dict("sys.modules", {"docx2pdf": None}):
+            result = main_module._convert_docx_to_pdf(str(dummy_docx))
+
+    if soffice:
+        # LibreOffice is present — should produce a PDF
+        assert result is not None and result.endswith(".pdf")
+    else:
+        # Neither path available — should return None gracefully, not raise
+        assert result is None
