@@ -68,7 +68,7 @@ def run_case(label: str, seeded_count: int):
     with patch("requests.get", side_effect=fake_get), \
          patch.object(main, "DDGS") as mock_ddgs:
         mock_ddgs.return_value.text.return_value = []
-        asyncio.run(main._run_command_center_search("DevOps Engineer", ["linkedin"], [], []))
+        main._run_command_center_search("DevOps Engineer", ["linkedin"], [], [])
 
     remaining_before_run = max(0, usage_tracker.JSEARCH_FREE_MONTHLY_LIMIT - seeded_count)
     print(f"[{label}] seeded={seeded_count} jsearch_requests_made={jsearch_calls['count']} "
