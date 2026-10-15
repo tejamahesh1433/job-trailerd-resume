@@ -23,6 +23,7 @@ backend/online-platform/
 backend/output_resumes/
 backend/main-resumes/
 backend/main-resumes.zip
+backend/.tmp/
 graphify-out/
 
 # Logs
