@@ -6,7 +6,6 @@ Isolated from real data (uses a temp DATA_DIR) and makes no real network calls
 Run: python test_jsearch_quota_gate.py
 """
 
-import asyncio
 import os
 import sys
 import tempfile

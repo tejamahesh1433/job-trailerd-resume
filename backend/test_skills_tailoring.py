@@ -141,7 +141,7 @@ def test_apply_skills_additions_end_to_end_reports_added_and_unmatched(resume_by
         # placed; Java is already in the resume's bullets so it must NOT be flagged as absent.
         "missing_keywords": ["New Relic", "Angular", "Kafka", "Java"],
     }
-    new_bytes, skills_added, unmatched = main_module._apply_skills_additions(resume_bytes, result)
+    new_bytes, skills_added, unmatched, _dropped = main_module._apply_skills_additions(resume_bytes, result)
 
     assert skills_added == [{"category": "Monitoring & Observability", "skill": "New Relic"}]
     assert unmatched == ["Angular", "Kafka"]
@@ -149,7 +149,7 @@ def test_apply_skills_additions_end_to_end_reports_added_and_unmatched(resume_by
 
 
 def test_apply_skills_additions_with_no_ai_additions_still_verifies_keywords(resume_bytes):
-    new_bytes, skills_added, unmatched = main_module._apply_skills_additions(
+    new_bytes, skills_added, unmatched, _dropped = main_module._apply_skills_additions(
         resume_bytes, {"missing_keywords": ["Kafka", "Terraform"]})
     assert new_bytes == resume_bytes
     assert skills_added == []

@@ -551,7 +551,6 @@ def test_convert_docx_to_pdf_uses_libreoffice_when_word_fails(tmp_path):
     should fall through to the LibreOffice branch and return a page count via
     the fallback path (or None gracefully if soffice is also absent)."""
     import shutil as _shutil
-    import sys
 
     dummy_docx = tmp_path / "test.docx"
     import docx as _docx
@@ -621,9 +620,8 @@ def test_grafana_tempo_in_2016_role_flagged():
 def test_honesty_safety_net_removes_typescript_replacement(tmp_path):
     """A bullet replacement whose 'new' text contains 'TypeScript' (unconfirmed '?')
     and TypeScript is not in the base resume → replacement reverted by safety net."""
-    import re
     from io import BytesIO
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import patch
     import docx as _docx
 
     # Build a minimal docx with one bullet
