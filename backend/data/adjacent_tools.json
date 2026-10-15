@@ -1,0 +1,21 @@
+{
+  "categories": [
+    {"name":"Infrastructure as Code","transferable":true,"tools":["Terraform","OpenTofu","Pulumi","CloudFormation","CDK","Bicep","Crossplane","Spacelift","Atlantis","Terraform Cloud","Terraform Enterprise"],"review_concepts":["state and drift","modules and providers","plan/apply lifecycle","policy and secrets"]},
+    {"name":"CI/CD","transferable":true,"tools":["Jenkins","GitHub Actions","GitLab CI","Azure DevOps","CircleCI","Tekton","Bamboo","TeamCity","Spinnaker"],"review_concepts":["pipeline stages","artifacts and caching","secrets and approvals","deployment strategies"]},
+    {"name":"GitOps","transferable":true,"tools":["ArgoCD","FluxCD"],"review_concepts":["desired state","reconciliation","sync and drift","promotion patterns"]},
+    {"name":"Containers and orchestration","transferable":true,"tools":["Docker","Podman","Kubernetes","EKS","AKS","GKE","OpenShift","Rancher","Nomad","ECS","Cloud Run"],"review_concepts":["images and registries","scheduling","networking and ingress","health and scaling"]},
+    {"name":"Messaging and streaming","transferable":true,"tools":["Kafka","Kinesis","Pub/Sub","SQS","SNS","EventBridge","RabbitMQ","Event Hubs","Service Bus","NATS"],"review_concepts":["delivery semantics","ordering and partitions","retries and dead letters","throughput and retention"]},
+    {"name":"Workflow orchestration","transferable":true,"tools":["Airflow","Argo Workflows","Step Functions","Dagster","Prefect","Kubeflow","Flyte","Logic Apps"],"review_concepts":["DAGs and dependencies","retries and idempotency","scheduling","observability"]},
+    {"name":"Observability","transferable":true,"tools":["Prometheus","Grafana","Datadog","New Relic","Dynatrace","Splunk","ELK","Loki","Tempo","Jaeger","OpenTelemetry","CloudWatch","Azure Monitor"],"review_concepts":["metrics logs and traces","instrumentation","alerting and SLOs","cardinality and retention"]},
+    {"name":"Configuration management","transferable":true,"tools":["Ansible","Chef","Puppet","Salt"],"review_concepts":["idempotency","inventory and targeting","modules and recipes","drift management"]},
+    {"name":"Secrets management","transferable":true,"tools":["Vault","AWS Secrets Manager","Azure Key Vault","GCP Secret Manager"],"review_concepts":["identity and access","rotation","encryption","audit logging"]},
+    {"name":"Security scanning","transferable":true,"tools":["SonarQube","Snyk","Trivy","Checkov","Prisma","Wiz","Aqua"],"review_concepts":["SAST and SCA","image and IaC scanning","policy gates","triage and remediation"]},
+    {"name":"Web frameworks","transferable":true,"tools":["FastAPI","Flask","Django","Express","Spring Boot"],"review_concepts":["routing and middleware","validation","authentication","deployment and scaling"]},
+    {"name":"Programming languages","transferable":false,"tools":["Python","Go","Java","JavaScript","TypeScript","C#","Ruby","Bash","PowerShell"],"review_concepts":["syntax and types","testing","package ecosystem","concurrency"]},
+    {"name":"Relational databases","transferable":true,"tools":["PostgreSQL","MySQL","SQL Server","Oracle","Aurora","Cloud SQL","Azure SQL"],"review_concepts":["indexes and query plans","transactions","backup and recovery","replication"]},
+    {"name":"NoSQL databases","transferable":true,"tools":["DynamoDB","MongoDB","Cosmos DB","Firestore","Cassandra","Redis","ElastiCache"],"review_concepts":["data modeling","consistency","partitioning","capacity and scaling"]},
+    {"name":"Cloud compute","transferable":true,"tools":["EC2","Azure Virtual Machines","Compute Engine"],"review_concepts":["images and instance types","networking","identity","autoscaling"]},
+    {"name":"Object storage","transferable":true,"tools":["S3","Blob Storage","Cloud Storage"],"review_concepts":["durability and tiers","access policy","lifecycle rules","encryption"]},
+    {"name":"Serverless functions","transferable":true,"tools":["Lambda","Azure Functions","Cloud Functions"],"review_concepts":["events and triggers","cold starts","identity","concurrency and limits"]}
+  ]
+}
