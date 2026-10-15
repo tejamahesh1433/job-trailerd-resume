@@ -34,8 +34,12 @@ from slowapi.errors import RateLimitExceeded
 
 from fastapi.responses import RedirectResponse
 from services.ai_service import analyze_resume, generate_cover_letter, analyze_job_metadata, generate_additional_points, generate_recruiter_outreach_email, generate_checkin_followup_email, generate_linkedin_message, extract_contacts_from_text, trim_resume_length, AIProviderNetworkError
+from services.scoring_service import score_resume, load_candidate_truth, load_unconfirmed_skills
+from services.tailoring_policy import (
+    classify_skill, get_skills_add_cap, get_tailoring_mode,
+)
 from services.ollama_service import generate_mail_draft, generate_follow_up, detect_w2_fulltime
-from services.docx_service import extract_text_from_docx, create_tailored_docx, insert_bullets_after, remove_bullets, extract_skills_table, add_skills_to_docx, find_absent_keywords
+from services.docx_service import extract_text_from_docx, create_tailored_docx, insert_bullets_after, remove_bullets, extract_skills_table, add_skills_to_docx, find_absent_keywords, extract_title_lines
 from services import gmail_service
 from services.profile_service import process_uploaded_doc
 from services.usage_tracker import get_usage_stats
@@ -534,16 +538,16 @@ def _resolve_resume_path(record: dict) -> Optional[str]:
 def _convert_docx_to_pdf(docx_path: str) -> Optional[str]:
     """Best-effort docx -> pdf conversion — never raises; a scan/tailoring action must
     still succeed even without a PDF copy. Uses MS Word COM automation (docx2pdf) on
-    Windows, and LibreOffice headless (bundled in the Docker image) everywhere else."""
+    Windows with LibreOffice headless as fallback, and LibreOffice everywhere else."""
     pdf_path = os.path.splitext(docx_path)[0] + ".pdf"
     if sys.platform == "win32":
         try:
             from docx2pdf import convert
             convert(docx_path, pdf_path)
-            return pdf_path if os.path.exists(pdf_path) else None
+            if os.path.exists(pdf_path):
+                return pdf_path
         except Exception as e:
             logger.warning(f"docx-to-pdf conversion via MS Word failed for {docx_path}: {e}")
-            return None
 
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
     if not soffice:
@@ -728,31 +732,145 @@ def _clean_skills_additions(raw) -> list:
     return cleaned
 
 
-def _apply_skills_additions(working_bytes: bytes, result: dict) -> tuple:
+def _apply_skills_additions(working_bytes: bytes, result: dict, base_resume_text: str = "",
+                            tailoring_mode: str | None = None) -> tuple:
     """Append the AI's JD skills to the resume's Technical Proficiency table (deterministic,
     additive — see add_skills_to_docx) and then VERIFY against the final resume text that
     the JD's missing keywords actually landed, rather than trusting the model's claim.
-    Returns (new_bytes, skills_added, unmatched_keywords): `skills_added` is
-    [{"category", "skill"}, ...] actually written; `unmatched_keywords` are missing
-    keywords still absent from the resume (e.g. non-DevOps ones the prompt forbids adding,
-    or ones the AI didn't place) — surfaced to the user, never silently dropped."""
-    additions = _clean_skills_additions(result.get('skills_additions'))
+    Only adds a skill when it already appears in the base resume OR is 'yes' in
+    candidate_truth.md — '?' and absent skills are collected in dropped_skills instead.
+    Returns (new_bytes, skills_added, unmatched_keywords, dropped_skills)."""
+    mode = get_tailoring_mode(tailoring_mode)
+    truth = load_candidate_truth()
+    if isinstance(truth, set):
+        truth = {skill.lower(): "yes" for skill in truth}
+    raw_additions = _clean_skills_additions(result.get('skills_additions'))
+    filtered_additions, dropped_skills = [], []
+    for item in raw_additions:
+        kept_skills, drop_skills = [], []
+        for skill in item.get('skills', []):
+            disposition, evidence = classify_skill(skill, base_resume_text, mode, truth)
+            if disposition != "blocked":
+                kept_skills.append(skill)
+            else:
+                drop_skills.append(skill)
+                logger.warning(f"Dropped skills_addition '{skill}' under {mode} mode")
+        if kept_skills:
+            filtered_additions.append({"category": item['category'], "skills": kept_skills})
+        for s in drop_skills:
+            dropped_skills.append({"category": item['category'], "skill": s, "reason": truth.get(s.lower(), "unknown")})
+
+    cap = get_skills_add_cap()
+    remaining = cap
+    capped_additions = []
+    for item in filtered_additions:
+        selected = item["skills"][:remaining]
+        if selected:
+            capped_additions.append({"category": item["category"], "skills": selected})
+        for skill in item["skills"][len(selected):]:
+            dropped_skills.append({"category": item["category"], "skill": skill, "reason": "cap"})
+        remaining -= len(selected)
+    filtered_additions = capped_additions
+
     skills_added = []
-    if additions:
-        stream, added, unplaced = add_skills_to_docx(working_bytes, additions)
+    if filtered_additions:
+        stream, added, unplaced = add_skills_to_docx(working_bytes, filtered_additions)
         working_bytes = stream.read()
-        skills_added = [{"category": c, "skill": s} for c, s in added]
+        for category, skill in added:
+            disposition, evidence = classify_skill(skill, base_resume_text, mode, truth)
+            skills_added.append({"category": category, "skill": skill, "source": disposition,
+                                 "evidence": evidence})
         if unplaced:
             logger.warning(f"Skills with no matching category, not added: {unplaced}")
     unmatched = find_absent_keywords(working_bytes, result.get('missing_keywords') or [])
-    return working_bytes, skills_added, unmatched
+    return working_bytes, skills_added, unmatched, dropped_skills
 
 
-def _write_skills_diff(f, skills_added: list, unmatched_keywords: list):
-    if skills_added:
-        f.write(f"Skills Added to Technical Proficiency: {len(skills_added)}\n")
-        for entry in skills_added:
-            f.write(f"  + [{entry['category']}] {entry['skill']}\n")
+def _apply_honesty_safety_net(
+    final_bytes: bytes,
+    base_resume_text: str,
+    replacements: list,
+    tailoring_mode: str | None = None,
+) -> tuple[bytes, list]:
+    """Final check after all edits: revert any bullet replacement whose 'new' text
+    contains an unconfirmed or tool-release term that wasn't already in the base resume.
+    Returns (cleaned_bytes, reverted_reps). reverted_reps is [] when nothing was removed.
+    Skills-table violations are already blocked upstream by _apply_skills_additions; this
+    function catches the remaining leak path — bullet replacements."""
+    from services.scoring_service import TOOL_RELEASE_DATES
+    truth = load_candidate_truth()
+    if isinstance(truth, set):
+        truth = {skill.lower(): "yes" for skill in truth}
+    confirmed = {skill for skill, level in truth.items() if level == "yes"}
+    unconfirmed = load_unconfirmed_skills() | {
+        skill for skill, level in truth.items() if level in {"familiar", "no"}
+    }
+    watchlist: set[str] = unconfirmed | set(TOOL_RELEASE_DATES.keys())
+
+    final_text = extract_text_from_docx(final_bytes)
+
+    violations: set[str] = set()
+    for term in watchlist:
+        if term.lower() in confirmed:
+            continue
+        pattern = r"(?i)\b" + re.escape(term) + r"\b"
+        if re.search(pattern, final_text) and not re.search(pattern, base_resume_text):
+            violations.add(term)
+
+    if not violations:
+        return final_bytes, []
+
+    bad_reps: list[dict] = []
+    familiar_summary_used = False
+    summary_text = re.split(r"(?im)^\s*(professional\s+)?experience\s*$", base_resume_text, maxsplit=1)[0]
+    for rep in replacements:
+        new_text = rep.get("new", "")
+        rep_violations = [v for v in violations if re.search(r"(?i)\b" + re.escape(v) + r"\b", new_text)]
+        allowed_familiar = [v for v in rep_violations if (
+            get_tailoring_mode(tailoring_mode) == "aggressive"
+            and not familiar_summary_used
+            and truth.get(v.lower()) == "familiar"
+            and rep.get("original", "") in summary_text
+            and re.search(r"(?i)\b(hands-on exposure|exposure to)\b", new_text)
+        )]
+        if allowed_familiar:
+            familiar_summary_used = True
+        if any(v not in allowed_familiar for v in rep_violations):
+            bad_reps.append(rep)
+
+    if not bad_reps:
+        return final_bytes, []
+
+    # Revert by swapping new↔original — preserves page enforcement and skills already applied
+    reversals = [{"original": rep.get("new", ""), "new": rep.get("original", "")} for rep in bad_reps]
+    cleaned = create_tailored_docx(final_bytes, reversals).read()
+
+    for rep in bad_reps:
+        v_found = [v for v in violations if re.search(r"(?i)\b" + re.escape(v) + r"\b", rep.get("new", ""))]
+        logger.warning(f"Honesty safety net reverted bullet containing {v_found}")
+
+    return cleaned, bad_reps
+
+
+def _write_skills_diff(f, skills_added: list, unmatched_keywords: list, dropped_skills: list | None = None):
+    adjacent = [x for x in skills_added if x.get("source") == "adjacent"]
+    familiar = [x for x in skills_added if x.get("source") == "familiar"]
+    f.write("Added via adjacency (because you have X):\n")
+    for entry in adjacent:
+        f.write(f"  + {entry['skill']} (because you have {entry['evidence']['because']})\n")
+    f.write("Added as familiar:\n")
+    for entry in familiar:
+        f.write(f"  + {entry['skill']}\n")
+    if dropped_skills:
+        f.write("Not added (unknown/no — mark in candidate_truth.md):\n")
+        for entry in dropped_skills:
+            f.write(f"  ~ [{entry['category']}] {entry['skill']} ({entry.get('reason', 'unknown')})\n")
+    f.write("Be ready to explain:\n")
+    for entry in adjacent:
+        concepts = entry.get("evidence", {}).get("review_concepts", [])
+        f.write(f"  - {entry['skill']}: {', '.join(concepts)}\n")
+    for entry in familiar:
+        f.write(f"  - {entry['skill']}: fundamentals, architecture, tradeoffs, practical example\n")
     if unmatched_keywords:
         f.write(f"JD keywords NOT in final resume (review manually): {', '.join(unmatched_keywords)}\n")
 
@@ -772,14 +890,41 @@ def _keyword_tokens(keyword: str) -> list:
     return [t for t in _words(keyword) if len(t) >= 2 and t not in _TOKEN_STOPWORDS]
 
 
-def _unsupported_tool_keywords(replacement: dict, jd_keywords: list, resume_text: str) -> list:
+_NON_TOOL_PHRASES = {
+    'analysis', 'review', 'reviews', 'guidance', 'leadership', 'collaboration',
+    'management', 'practices', 'methodology', 'support', 'troubleshooting',
+    'engineer', 'engineering', 'design', 'strategy', 'planning', 'coordination',
+    'ownership', 'mentoring', 'processes', 'process', 'improvement',
+}
+
+
+def _unsupported_tool_keywords(replacement: dict, jd_keywords: list, resume_text: str,
+                               tailoring_mode: str | None = None,
+                               allow_familiar_summary: bool = True) -> list:
     """JD keywords a replacement's new text claims but that the base resume never mentions.
     Judged word by word, so a compound like 'DevOps/SRE' is fine when both words already
     appear, while 'Puppet' (absent) or 'compliance zones' (absent 'zones') are not.
     Years-of-experience/requirement phrases and industry-domain words are wording rather
-    than tool claims, so they're exempt (the skills filter already rejects the former)."""
+    than tool claims, so they're exempt (the skills filter already rejects the former).
+    Practice/wording phrases (analysis, review, guidance, etc.) are never tool claims."""
     new_text = replacement.get('new') or ''
     resume_words = set(_words(resume_text))
+    # Confirmed skills count as supported even if not yet in the resume text
+    confirmed_skills_words: set[str] = set()
+    _truth = load_candidate_truth()
+    if isinstance(_truth, set):
+        _truth = {skill.lower(): "yes" for skill in _truth}
+    for skill, level in _truth.items():
+        if level != "yes":
+            continue
+        confirmed_skills_words.update(_words(skill))
+    all_known_words = resume_words | confirmed_skills_words
+    mode = get_tailoring_mode(tailoring_mode)
+    truth = load_candidate_truth()
+    if isinstance(truth, set):
+        truth = {skill.lower(): "yes" for skill in truth}
+    summary_text = re.split(r"(?im)^\s*(professional\s+)?experience\s*$", resume_text, maxsplit=1)[0]
+    is_summary = bool(replacement.get("original") and replacement.get("original") in summary_text)
     candidates = list(dict.fromkeys(list(replacement.get('keywords_added') or []) + list(jd_keywords or [])))
     unsupported = []
     for kw in candidates:
@@ -788,9 +933,17 @@ def _unsupported_tool_keywords(replacement: dict, jd_keywords: list, resume_text
         tokens = _keyword_tokens(kw)
         if not tokens or not _looks_like_skill(kw.strip()):
             continue
+        # If any token in the keyword is a practice/wording word, it's not a tool claim
+        if any(t in _NON_TOOL_PHRASES for t in tokens):
+            continue
         if all(t in _DOMAIN_WORDS for t in tokens):
             continue
-        if any(t not in _DOMAIN_WORDS and t not in resume_words for t in tokens):
+        familiar_summary = (
+            mode == "aggressive" and allow_familiar_summary and is_summary
+            and truth.get(kw.strip().lower()) == "familiar"
+            and re.search(r"(?i)\b(hands-on exposure|exposure to)\b", new_text)
+        )
+        if not familiar_summary and any(t not in _DOMAIN_WORDS and t not in all_known_words for t in tokens):
             unsupported.append(kw.strip())
     return unsupported
 
@@ -799,7 +952,8 @@ def _contains_kw(text: str, kw: str) -> bool:
     return re.search(r'(?<![\w+#.])' + re.escape(kw.strip()) + r'(?![\w+#])', text, re.IGNORECASE) is not None
 
 
-def _drop_unsupported_tool_claims(replacements: list, jd_keywords: list, resume_text: str) -> tuple:
+def _drop_unsupported_tool_claims(replacements: list, jd_keywords: list, resume_text: str,
+                                  tailoring_mode: str | None = None) -> tuple:
     """Code-side enforcement of the prompt's TOOL-CLAIM RULE: discard any replacement whose
     new text names a JD tool the base resume doesn't already mention, since that fabricates
     hands-on experience (e.g. 'Ansible Tower, Chef, and Puppet' when Puppet was never used).
@@ -807,13 +961,25 @@ def _drop_unsupported_tool_claims(replacements: list, jd_keywords: list, resume_
     them without claiming a specific job used them. Returns (kept, rejected), where each
     rejected entry is the replacement plus an 'unsupported' list, for reporting."""
     kept, rejected = [], []
+    familiar_summary_used = False
     for rep in replacements:
-        unsupported = _unsupported_tool_keywords(rep, jd_keywords, resume_text)
+        unsupported = _unsupported_tool_keywords(
+            rep, jd_keywords, resume_text, tailoring_mode,
+            allow_familiar_summary=not familiar_summary_used,
+        )
         if unsupported:
             rejected.append({**rep, "unsupported": unsupported})
             logger.warning(f"Discarded replacement — would claim tools absent from the resume: {unsupported}")
         else:
             kept.append(rep)
+            truth = load_candidate_truth()
+            if isinstance(truth, set):
+                truth = {skill.lower(): "yes" for skill in truth}
+            if get_tailoring_mode(tailoring_mode) == "aggressive" and any(
+                level == "familiar" and re.search(r"(?i)\b" + re.escape(skill) + r"\b", rep.get("new", ""))
+                for skill, level in truth.items()
+            ):
+                familiar_summary_used = True
     return kept, rejected
 
 
@@ -822,6 +988,93 @@ def _write_rejected_diff(f, rejected: list):
         f.write(f"Edits DISCARDED for claiming tools not in your resume: {len(rejected)}\n")
         for rej in rejected:
             f.write(f"  x {', '.join(rej['unsupported'])} — {(rej.get('new') or '')[:110]}...\n")
+
+
+def _measure_scores(original_text: str, final_docx_bytes: bytes, jd_text: str,
+                    before: dict | None = None) -> dict:
+    """Score original and final resume. Pass a pre-computed before-score to skip
+    re-scoring the original (used when the caller already scored it for the skip check)."""
+    final_text = extract_text_from_docx(final_docx_bytes)
+    _before = before if before is not None else score_resume(original_text, jd_text)
+    after = score_resume(final_text, jd_text)
+    return {"before": _before, "after": after}
+
+
+_SENIORITY_RANK = {"principal": 4, "staff": 3, "lead": 3, "senior": 2, "mid": 1, "junior": 0}
+
+
+def _title_seniority(text: str) -> int:
+    """Return a numeric seniority rank for a title line (higher = more senior)."""
+    low = text.lower()
+    for word, rank in sorted(_SENIORITY_RANK.items(), key=lambda x: -x[1]):
+        if re.search(r"\b" + word + r"\b", low):
+            return rank
+    return 1  # unlabeled titles treated as mid-level
+
+
+def _guard_title_seniority(replacements: list, role_lines: list) -> tuple:
+    """Drop any replacement that would give employer #2's role a higher seniority
+    rank than employer #1's. role_lines[0] = most recent employer's role line."""
+    if len(role_lines) < 2:
+        return replacements, []
+
+    emp1_orig, emp2_orig = role_lines[0], role_lines[1]
+    emp1_new_text: str | None = None
+    emp2_rep_idx: int | None = None
+    emp2_new_text: str | None = None
+
+    for i, rep in enumerate(replacements):
+        if rep.get("original") == emp1_orig:
+            emp1_new_text = rep.get("new", "")
+        if rep.get("original") == emp2_orig:
+            emp2_rep_idx = i
+            emp2_new_text = rep.get("new", "")
+
+    if emp2_rep_idx is None or emp2_new_text is None:
+        return replacements, []
+
+    emp1_effective = _title_seniority(emp1_new_text if emp1_new_text is not None else emp1_orig)
+    if _title_seniority(emp2_new_text) > emp1_effective:
+        dropped = [replacements[emp2_rep_idx]]
+        kept = [rep for i, rep in enumerate(replacements) if i != emp2_rep_idx]
+        logger.warning("Title guard: dropped employer #2 role replacement — would be more senior than employer #1")
+        return kept, dropped
+
+    return replacements, []
+
+
+def _write_tailoring_diff(f, company_name: str, replacements: list, removals: list,
+                          missing_kw: list, skills_added: list,
+                          unmatched_keywords: list, rejected_edits: list,
+                          dropped_skills: list | None = None,
+                          honesty_removed: list | None = None):
+    """Write the body of difference.txt for a tailoring pass (no score estimate line —
+    the measured-score header is prepended separately)."""
+    f.write(f"Resume Tailoring Differences for {company_name}\n")
+    f.write("=" * 60 + "\n\n")
+    f.write(f"Total Replacements: {len(replacements)}\n")
+    if removals:
+        f.write(f"Total Removals (page-length notes): {len(removals)}\n")
+    if missing_kw:
+        f.write(f"Missing Keywords: {', '.join(missing_kw)}\n")
+    _write_skills_diff(f, skills_added, unmatched_keywords, dropped_skills)
+    if honesty_removed:
+        f.write(f"Removed by honesty check: {len(honesty_removed)}\n")
+        for rep in honesty_removed:
+            f.write(f"  ~ {(rep.get('new', ''))[:100]}\n")
+    _write_rejected_diff(f, rejected_edits)
+    f.write("=" * 60 + "\n\n")
+    for i, rep in enumerate(replacements, 1):
+        kw_added = rep.get("keywords_added", [])
+        f.write(f"--- REPLACEMENT #{i} ---\n")
+        if kw_added:
+            f.write(f"Keywords Added: {', '.join(kw_added)}\n\n")
+        f.write(f"REMOVED:\n{rep.get('original', 'N/A')}\n\n")
+        f.write(f"ADDED:\n{rep.get('new', 'N/A')}\n")
+        f.write("=" * 60 + "\n\n")
+    for i, rem in enumerate(removals, 1):
+        f.write(f"--- REMOVAL #{i} (deleted entirely) ---\n{rem}\n")
+        f.write("=" * 60 + "\n\n")
 
 
 def _job_artifact_dir(record_id: int, company_name: str) -> str:
@@ -870,6 +1123,7 @@ class BatchScanRequest(BaseModel):
     jd_texts: List[str]
     selected_resume: str
     ai_notes: Optional[str] = None
+    tailoring_mode: Optional[str] = None
 
 def _extract_experience_years(jd_text: str) -> int:
     """Extract the maximum years of experience required from a JD.
@@ -2036,12 +2290,14 @@ async def _scan_resume_core(
     override_company_dir: Optional[str] = None,
     skip_duplicate_check: bool = False,
     override_experience_check: bool = False,
+    tailoring_mode: str | None = None,
 ):
     """Internal scan/tailor implementation. storage_root, override_company_dir, and
     skip_duplicate_check are internal-only — never accept these from an HTTP request.
     The public /api/scan endpoint below only forwards the plain user-facing fields;
     only trusted internal callers (Command Center tailoring) pass the rest, and even
     then override_company_dir is validated to stay inside an allowed root before use."""
+    tailoring_mode = get_tailoring_mode(tailoring_mode)
     if override_company_dir:
         allowed_roots = (os.path.abspath("trailerd"), os.path.abspath("online-platform"))
         resolved = os.path.abspath(override_company_dir)
@@ -2172,7 +2428,7 @@ async def _scan_resume_core(
             }
         try:
             result = analyze_resume(resume_text, jd_text, ai_notes=ai_notes or "", length_hint=length_hint,
-                                    skills_table=extract_skills_table(file_bytes))
+                                    skills_table=extract_skills_table(file_bytes), tailoring_mode=tailoring_mode)
         except AIProviderNetworkError as e:
             logger.warning(f"AI provider network error: {e}")
             raise HTTPException(status_code=503, detail="Couldn't reach the AI provider due to a network issue. Check your internet connection and try again.")
@@ -2204,18 +2460,33 @@ async def _scan_resume_core(
         jd_path = f"{company_dir}/jd_info.txt"
         diff_path = f"{company_dir}/difference.txt"
 
+        # ── Pre-score original BEFORE the skip decision so the threshold uses a
+        # measured score, not the AI's self-estimate. Fall back to AI estimate. ──
+        _before_score_result: dict | None = None
+        try:
+            _before_score_result = score_resume(resume_text, jd_text)
+            score = _before_score_result["final_score"]
+        except Exception as _pse:
+            logger.warning(f"Pre-scoring failed (using AI estimate for skip check): {_pse}")
+
         replacements, rejected_edits = _drop_unsupported_tool_claims(
-            result.get('replacements', []), result.get('missing_keywords', []), resume_text)
+            result.get('replacements', []), result.get('missing_keywords', []), resume_text, tailoring_mode)
+        _role_lines = extract_title_lines(resume_text).get("role_lines", [])
+        replacements, _title_dropped = _guard_title_seniority(replacements, _role_lines)
+        if _title_dropped:
+            rejected_edits.extend({**r, "unsupported": ["seniority-guard"]} for r in _title_dropped)
+
         removals = result.get('removals', [])
-        skills_added, unmatched_keywords = [], []
+        skills_added, unmatched_keywords, dropped_skills = [], [], []
         after_score = result.get('after_score', score)
         has_user_notes = bool(ai_notes and ai_notes.strip())
+        _tailoring_happened = False
 
         # ── Decide: skip tailoring, reuse existing, or create new ──
         if score >= 85 and not has_user_notes:
             # Base resume already strong — no bullet/summary tailoring, but still append any
             # skills this JD requires that the base skills table is missing (additive only)
-            working_bytes, skills_added, unmatched_keywords = _apply_skills_additions(file_bytes, result)
+            working_bytes, skills_added, unmatched_keywords, dropped_skills = _apply_skills_additions(file_bytes, result, base_resume_text=resume_text, tailoring_mode=tailoring_mode)
             with open(file_path, "wb") as f:
                 f.write(working_bytes)
             after_score = score  # No bullet tailoring done; keep actual score
@@ -2223,11 +2494,12 @@ async def _scan_resume_core(
             logger.info(f"Score {score}% >= 85% for {company_name} — no bullet tailoring needed; "
                         f"added {len(skills_added)} missing skills")
             with open(diff_path, "w", encoding="utf-8") as f:
-                f.write(f"Score: {score}% — already above 85%%, no bullet tailoring needed.\n")
-                _write_skills_diff(f, skills_added, unmatched_keywords)
+                f.write(f"Score: {score}% — already above 85%, no bullet tailoring needed.\n")
+                _write_skills_diff(f, skills_added, unmatched_keywords, dropped_skills)
                 _write_rejected_diff(f, rejected_edits)
 
         elif replacements or removals or result.get('skills_additions'):
+            _tailoring_happened = True
             working_bytes = file_bytes
             replacements = _filter_replacements_overlapping_removals(replacements, removals)
             if removals:
@@ -2235,46 +2507,167 @@ async def _scan_resume_core(
                 working_bytes = working_stream.read()
                 logger.info(f"Removed {len(removals)} bullets for {company_name} per AI notes")
             working_bytes = create_tailored_docx(working_bytes, replacements).read()
-            working_bytes, skills_added, unmatched_keywords = _apply_skills_additions(working_bytes, result)
+            working_bytes, skills_added, unmatched_keywords, dropped_skills = _apply_skills_additions(working_bytes, result, base_resume_text=resume_text, tailoring_mode=tailoring_mode)
             logger.info(f"Applied {len(replacements)} replacements for {company_name}")
             if target_pages:
                 working_bytes, removals, final_pages = _enforce_page_target(
                     working_bytes, jd_text, target_pages, removals)
                 logger.info(f"Page-target enforcement for {company_name}: target={target_pages}, "
                             f"final={final_pages}, total removals={len(removals)}")
+            working_bytes, honesty_removed = _apply_honesty_safety_net(working_bytes, resume_text, replacements, tailoring_mode)
             with open(file_path, "wb") as f:
                 f.write(working_bytes)
 
             missing_kw = result.get('missing_keywords', [])
             with open(diff_path, "w", encoding="utf-8") as f:
-                f.write(f"Resume Tailoring Differences for {company_name}\n")
-                f.write("=" * 60 + "\n\n")
-                f.write(f"Score: {score}% → {after_score}% (Δ +{after_score - score})\n")
-                f.write(f"Total Replacements: {len(replacements)}\n")
-                if removals:
-                    f.write(f"Total Removals (page-length notes): {len(removals)}\n")
-                if missing_kw:
-                    f.write(f"Missing Keywords: {', '.join(missing_kw)}\n")
-                _write_skills_diff(f, skills_added, unmatched_keywords)
-                _write_rejected_diff(f, rejected_edits)
-                f.write("=" * 60 + "\n\n")
-                for i, rep in enumerate(replacements, 1):
-                    kw_added = rep.get('keywords_added', [])
-                    f.write(f"--- REPLACEMENT #{i} ---\n")
-                    if kw_added:
-                        f.write(f"Keywords Added: {', '.join(kw_added)}\n\n")
-                    f.write(f"REMOVED:\n{rep.get('original', 'N/A')}\n\n")
-                    f.write(f"ADDED:\n{rep.get('new', 'N/A')}\n")
-                    f.write("=" * 60 + "\n\n")
-                for i, rem in enumerate(removals, 1):
-                    f.write(f"--- REMOVAL #{i} (deleted entirely) ---\n{rem}\n")
-                    f.write("=" * 60 + "\n\n")
+                _write_tailoring_diff(f, company_name, replacements, removals,
+                                      missing_kw, skills_added, unmatched_keywords, rejected_edits,
+                                      dropped_skills, honesty_removed)
         else:
             with open(file_path, "wb") as f:
                 f.write(file_bytes)
             after_score = score
             with open(diff_path, "w", encoding="utf-8") as f:
                 f.write("No changes were needed. The resume already matched the job description well.\n")
+
+        # ── Measured scoring (best-effort, never blocks the scan) ──
+        measured = None
+        try:
+            with open(file_path, "rb") as _mf:
+                _final_bytes = _mf.read()
+            measured = _measure_scores(resume_text, _final_bytes, jd_text, before=_before_score_result)
+            score = measured["before"]["final_score"]
+            after_score = measured["after"]["final_score"]
+        except Exception as _me:
+            logger.warning(f"Measured scoring failed (using AI estimates): {_me}")
+
+        # ── Never-worse rule: if tailoring hurt the score, revert to original ──
+        if _tailoring_happened and measured and after_score < score:
+            logger.warning(
+                f"Never-worse: measured after_score={after_score} < before_score={score}; "
+                f"reverting to original for {company_name}"
+            )
+            with open(file_path, "wb") as _nwf:
+                _nwf.write(file_bytes)
+            after_score = score
+            with open(diff_path, "w", encoding="utf-8") as _nwdf:
+                _nwdf.write(
+                    f"Tailoring reverted: measured score {score}% → {measured['after']['final_score']}% "
+                    f"(after < before). Original resume kept unchanged.\n"
+                )
+            _tailoring_happened = False  # prevent retry from running
+
+        # ── One-shot retry when tailoring happened, measured after_score < 90, and safe fixes exist ──
+        if _tailoring_happened and measured and after_score < 90 and measured["after"].get("fixes"):
+            try:
+                _confirmed = load_candidate_truth()
+                _safe_fixes = [
+                    fx for fx in measured["after"]["fixes"]
+                    if not fx.get("only_if_true", True)
+                    or any(
+                        re.search(r"\b" + re.escape(s) + r"\b",
+                                  (fx.get("requirement", "") + " " + fx.get("suggested_text", "")).lower())
+                        for s in _confirmed
+                    )
+                ]
+                if _safe_fixes:
+                    _retry_notes = (
+                        (ai_notes or "") +
+                        "\nSCORING FEEDBACK — apply these fixes to improve the score:\n" +
+                        "\n".join(
+                            f"- {fx['requirement']}: {fx['suggested_text']}"
+                            for fx in _safe_fixes[:5]
+                        )
+                    )
+                    _retry_result = analyze_resume(
+                        resume_text, jd_text, ai_notes=_retry_notes,
+                        length_hint=length_hint,
+                        skills_table=extract_skills_table(file_bytes),
+                        tailoring_mode=tailoring_mode,
+                    )
+                    _retry_reps, _retry_rejected = _drop_unsupported_tool_claims(
+                        _retry_result.get('replacements', []),
+                        _retry_result.get('missing_keywords', []),
+                        resume_text, tailoring_mode,
+                    )
+                    _retry_reps, _retry_title_dropped = _guard_title_seniority(_retry_reps, _role_lines)
+                    if _retry_title_dropped:
+                        _retry_rejected.extend({**r, "unsupported": ["seniority-guard"]} for r in _retry_title_dropped)
+                    _retry_removals = _retry_result.get('removals', [])
+                    _retry_bytes = file_bytes
+                    _retry_reps = _filter_replacements_overlapping_removals(_retry_reps, _retry_removals)
+                    if _retry_removals:
+                        _rs, _retry_removals = remove_bullets(_retry_bytes, _retry_removals)
+                        _retry_bytes = _rs.read()
+                    _retry_bytes = create_tailored_docx(_retry_bytes, _retry_reps).read()
+                    _retry_bytes, _retry_skills_added, _retry_unmatched, _retry_dropped = _apply_skills_additions(
+                        _retry_bytes, _retry_result, base_resume_text=resume_text, tailoring_mode=tailoring_mode)
+                    if target_pages:
+                        _retry_bytes, _retry_removals, _ = _enforce_page_target(
+                            _retry_bytes, jd_text, target_pages, _retry_removals)
+                    _retry_bytes, _retry_honesty_removed = _apply_honesty_safety_net(
+                        _retry_bytes, resume_text, _retry_reps, tailoring_mode)
+                    _retry_measured = _measure_scores(
+                        resume_text, _retry_bytes, jd_text, before=_before_score_result)
+                    if _retry_measured["after"]["final_score"] > after_score:
+                        with open(file_path, "wb") as _rf:
+                            _rf.write(_retry_bytes)
+                        measured = _retry_measured
+                        score = _retry_measured["before"]["final_score"]
+                        after_score = _retry_measured["after"]["final_score"]
+                        result = _retry_result
+                        replacements = _retry_reps
+                        removals = _retry_removals
+                        skills_added = _retry_skills_added
+                        unmatched_keywords = _retry_unmatched
+                        dropped_skills = _retry_dropped
+                        rejected_edits = _retry_rejected
+                        with open(diff_path, "w", encoding="utf-8") as _df:
+                            _write_tailoring_diff(_df, company_name, replacements, removals,
+                                                  result.get('missing_keywords', []), skills_added,
+                                                  unmatched_keywords, rejected_edits, dropped_skills,
+                                                  _retry_honesty_removed)
+                        logger.info(f"Retry improved score to {after_score}% for {company_name}")
+            except Exception as _re:
+                logger.warning(f"Retry tailoring failed: {_re}")
+
+        # ── Prepend measured score section to difference.txt ──
+        try:
+            if measured:
+                _kw_b = measured["before"]["keyword_match_pct"]
+                _kw_a = measured["after"]["keyword_match_pct"]
+                _pen_str = "; ".join(
+                    f"{p['type']}: {p['points']}"
+                    for p in (measured["after"].get("penalties") or [])
+                ) or "none"
+                _gaps_str = ", ".join(measured["after"].get("top_gaps") or []) or "none"
+                _risks_str = ", ".join(measured["after"].get("interview_risks") or []) or "none"
+                _uns_str = ", ".join(result.get("unsupported_requirements") or []) or "none"
+                _mhdr = (
+                    f"Tailoring mode: {tailoring_mode}\n"
+                    f"Measured score:  {score}% → {after_score}%"
+                    f"  (Δ {after_score - score:+d})"
+                    f"   [keyword match: {_kw_b}% → {_kw_a}%]\n"
+                    f"Penalties: {_pen_str}\n"
+                    f"Remaining gaps: {_gaps_str}\n"
+                    f"Interview risks: {_risks_str}\n"
+                    f"Unsupported requirements (not added — confirm in candidate_truth.md to allow):"
+                    f" {_uns_str}\n"
+                    + "=" * 60 + "\n\n"
+                )
+            else:
+                _mhdr = (
+                    f"Tailoring mode: {tailoring_mode}\n"
+                    f"Score: estimate (scoring unavailable) — {score}% → {after_score}%\n"
+                    + "=" * 60 + "\n\n"
+                )
+            with open(diff_path, "r", encoding="utf-8") as _df:
+                _existing_diff = _df.read()
+            with open(diff_path, "w", encoding="utf-8") as _df:
+                _df.write(_mhdr)
+                _df.write(_existing_diff)
+        except Exception as _de:
+            logger.warning(f"Failed to update diff with measured scores: {_de}")
 
         contact_info = result.get('contact_info', {})
         with open(jd_path, "w", encoding="utf-8") as f:
@@ -2298,6 +2691,11 @@ async def _scan_resume_core(
             "skills_added": skills_added,
             "unmatched_keywords": unmatched_keywords,
             "rejected_edits": [{"new": r.get("new"), "unsupported": r["unsupported"]} for r in rejected_edits],
+            "measured": measured,
+            "penalties": measured["after"]["penalties"] if measured else [],
+            "interview_risks": measured["after"]["interview_risks"] if measured else [],
+            "unsupported_requirements": result.get("unsupported_requirements", []),
+            "tailoring_mode": tailoring_mode,
         }
 
         if rerun_record:
@@ -2342,14 +2740,16 @@ async def _scan_resume_core(
 
 @app.post("/api/scan")
 @limiter.limit("10/minute")
-async def scan_resume(request: Request, jd_text: str = Form(...), resume: Optional[UploadFile] = File(None), selected_resume: Optional[str] = Form(None), ai_notes: Optional[str] = Form(None), rerun_id: Optional[int] = Form(None), override_experience_check: bool = Form(False)):
+async def scan_resume(request: Request, jd_text: str = Form(...), resume: Optional[UploadFile] = File(None), selected_resume: Optional[str] = Form(None), ai_notes: Optional[str] = Form(None), rerun_id: Optional[int] = Form(None), override_experience_check: bool = Form(False), tailoring_mode: Optional[str] = Form(None)):
     """Public HTTP endpoint — only forwards user-facing fields. storage_root,
     override_company_dir, and skip_duplicate_check are internal-only and can never be
     set by a request to this endpoint; see _scan_resume_core."""
-    return await _scan_resume_core(request, jd_text, resume, selected_resume, ai_notes, rerun_id, override_experience_check=override_experience_check)
+    return await _scan_resume_core(request, jd_text, resume, selected_resume, ai_notes, rerun_id, override_experience_check=override_experience_check, tailoring_mode=tailoring_mode)
 
 
-def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, ai_notes: str = "") -> dict:
+def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, ai_notes: str = "",
+                       tailoring_mode: str | None = None) -> dict:
+    tailoring_mode = get_tailoring_mode(tailoring_mode)
     resume_text = extract_text_from_docx(file_bytes)
 
     # Duplicate JD check
@@ -2378,7 +2778,7 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
     for attempt in range(3):
         try:
             result = analyze_resume(resume_text, jd_text, ai_notes=ai_notes, length_hint=length_hint,
-                                    skills_table=extract_skills_table(file_bytes))
+                                    skills_table=extract_skills_table(file_bytes), tailoring_mode=tailoring_mode)
             break
         except RuntimeError as e:
             if attempt < 2 and ("503" in str(e) or "UNAVAILABLE" in str(e) or "429" in str(e) or "All models" in str(e)):
@@ -2412,70 +2812,207 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
     jd_path = f"{company_dir}/jd_info.txt"
     diff_path = f"{company_dir}/difference.txt"
 
+    # ── Pre-score original BEFORE the skip decision ──
+    _before_score_result: dict | None = None
+    try:
+        _before_score_result = score_resume(resume_text, jd_text)
+        score = _before_score_result["final_score"]
+    except Exception as _pse:
+        logger.warning(f"Pre-scoring failed (using AI estimate for skip check): {_pse}")
+
     replacements, rejected_edits = _drop_unsupported_tool_claims(
-        result.get('replacements', []), result.get('missing_keywords', []), resume_text)
+        result.get('replacements', []), result.get('missing_keywords', []), resume_text, tailoring_mode)
+    _role_lines = extract_title_lines(resume_text).get("role_lines", [])
+    replacements, _title_dropped = _guard_title_seniority(replacements, _role_lines)
+    if _title_dropped:
+        rejected_edits.extend({**r, "unsupported": ["seniority-guard"]} for r in _title_dropped)
+
     removals = result.get('removals', [])
-    skills_added, unmatched_keywords = [], []
+    skills_added, unmatched_keywords, dropped_skills = [], [], []
     after_score = result.get('after_score', score)
     has_user_notes = bool(ai_notes and ai_notes.strip())
+    _tailoring_happened = False
 
     if score >= 85 and not has_user_notes:
         # Same as the interactive path: no bullet tailoring, but still add missing required skills
-        working_bytes, skills_added, unmatched_keywords = _apply_skills_additions(file_bytes, result)
+        working_bytes, skills_added, unmatched_keywords, dropped_skills = _apply_skills_additions(file_bytes, result, base_resume_text=resume_text, tailoring_mode=tailoring_mode)
         with open(file_path, "wb") as f:
             f.write(working_bytes)
         after_score = score  # No bullet tailoring done; keep actual score
         replacements = []
         with open(diff_path, "w", encoding="utf-8") as f:
             f.write(f"Score: {score}% — already above 85%, no bullet tailoring needed.\n")
-            _write_skills_diff(f, skills_added, unmatched_keywords)
+            _write_skills_diff(f, skills_added, unmatched_keywords, dropped_skills)
             _write_rejected_diff(f, rejected_edits)
 
     elif replacements or removals or result.get('skills_additions'):
+        _tailoring_happened = True
         working_bytes = file_bytes
         replacements = _filter_replacements_overlapping_removals(replacements, removals)
         if removals:
             working_stream, removals = remove_bullets(working_bytes, removals)
             working_bytes = working_stream.read()
         working_bytes = create_tailored_docx(working_bytes, replacements).read()
-        working_bytes, skills_added, unmatched_keywords = _apply_skills_additions(working_bytes, result)
+        working_bytes, skills_added, unmatched_keywords, dropped_skills = _apply_skills_additions(working_bytes, result, base_resume_text=resume_text, tailoring_mode=tailoring_mode)
         if target_pages:
             working_bytes, removals, final_pages = _enforce_page_target(
                 working_bytes, jd_text, target_pages, removals)
             logger.info(f"Page-target enforcement for {company_name}: target={target_pages}, "
                         f"final={final_pages}, total removals={len(removals)}")
+        working_bytes, honesty_removed = _apply_honesty_safety_net(working_bytes, resume_text, replacements, tailoring_mode)
         with open(file_path, "wb") as f:
             f.write(working_bytes)
         missing_kw = result.get('missing_keywords', [])
         with open(diff_path, "w", encoding="utf-8") as f:
-            f.write(f"Resume Tailoring Differences for {company_name}\n")
-            f.write("=" * 60 + "\n\n")
-            f.write(f"Score: {score}% → {after_score}% (Δ +{after_score - score})\n")
-            f.write(f"Total Replacements: {len(replacements)}\n")
-            if removals:
-                f.write(f"Total Removals (page-length notes): {len(removals)}\n")
-            if missing_kw:
-                f.write(f"Missing Keywords: {', '.join(missing_kw)}\n")
-            _write_skills_diff(f, skills_added, unmatched_keywords)
-            _write_rejected_diff(f, rejected_edits)
-            f.write("=" * 60 + "\n\n")
-            for i, rep in enumerate(replacements, 1):
-                kw_added = rep.get('keywords_added', [])
-                f.write(f"--- REPLACEMENT #{i} ---\n")
-                if kw_added:
-                    f.write(f"Keywords Added: {', '.join(kw_added)}\n\n")
-                f.write(f"REMOVED:\n{rep.get('original', 'N/A')}\n\n")
-                f.write(f"ADDED:\n{rep.get('new', 'N/A')}\n")
-                f.write("=" * 60 + "\n\n")
-            for i, rem in enumerate(removals, 1):
-                f.write(f"--- REMOVAL #{i} (deleted entirely) ---\n{rem}\n")
-                f.write("=" * 60 + "\n\n")
+            _write_tailoring_diff(f, company_name, replacements, removals,
+                                  missing_kw, skills_added, unmatched_keywords, rejected_edits,
+                                  dropped_skills, honesty_removed)
     else:
         with open(file_path, "wb") as f:
             f.write(file_bytes)
         after_score = score
         with open(diff_path, "w", encoding="utf-8") as f:
             f.write("No changes were needed. The resume already matched the job description well.\n")
+
+    # ── Measured scoring (best-effort, never blocks the batch scan) ──
+    measured = None
+    try:
+        with open(file_path, "rb") as _mf:
+            _final_bytes = _mf.read()
+        measured = _measure_scores(resume_text, _final_bytes, jd_text, before=_before_score_result)
+        score = measured["before"]["final_score"]
+        after_score = measured["after"]["final_score"]
+    except Exception as _me:
+        logger.warning(f"Measured scoring failed (using AI estimates): {_me}")
+
+    # ── Never-worse rule: if tailoring hurt the score, revert to original ──
+    if _tailoring_happened and measured and after_score < score:
+        logger.warning(
+            f"Never-worse: measured after_score={after_score} < before_score={score}; "
+            f"reverting to original for {company_name}"
+        )
+        with open(file_path, "wb") as _nwf:
+            _nwf.write(file_bytes)
+        after_score = score
+        with open(diff_path, "w", encoding="utf-8") as _nwdf:
+            _nwdf.write(
+                f"Tailoring reverted: measured score {score}% → {measured['after']['final_score']}% "
+                f"(after < before). Original resume kept unchanged.\n"
+            )
+        _tailoring_happened = False  # prevent retry from running
+
+    # ── One-shot retry when tailoring happened, measured after_score < 90, and safe fixes exist ──
+    if _tailoring_happened and measured and after_score < 90 and measured["after"].get("fixes"):
+        try:
+            _confirmed = load_candidate_truth()
+            _safe_fixes = [
+                fx for fx in measured["after"]["fixes"]
+                if not fx.get("only_if_true", True)
+                or any(
+                    re.search(r"\b" + re.escape(s) + r"\b",
+                              (fx.get("requirement", "") + " " + fx.get("suggested_text", "")).lower())
+                    for s in _confirmed
+                )
+            ]
+            if _safe_fixes:
+                _retry_notes = (
+                    (ai_notes or "") +
+                    "\nSCORING FEEDBACK — apply these fixes to improve the score:\n" +
+                    "\n".join(
+                        f"- {fx['requirement']}: {fx['suggested_text']}"
+                        for fx in _safe_fixes[:5]
+                    )
+                )
+                _retry_result = analyze_resume(
+                    resume_text, jd_text, ai_notes=_retry_notes,
+                    length_hint=length_hint,
+                    skills_table=extract_skills_table(file_bytes),
+                    tailoring_mode=tailoring_mode,
+                )
+                _retry_reps, _retry_rejected = _drop_unsupported_tool_claims(
+                    _retry_result.get('replacements', []),
+                    _retry_result.get('missing_keywords', []),
+                    resume_text, tailoring_mode,
+                )
+                _retry_reps, _retry_title_dropped = _guard_title_seniority(_retry_reps, _role_lines)
+                if _retry_title_dropped:
+                    _retry_rejected.extend(
+                        {**r, "unsupported": ["seniority-guard"]} for r in _retry_title_dropped)
+                _retry_removals = _retry_result.get('removals', [])
+                _retry_bytes = file_bytes
+                _retry_reps = _filter_replacements_overlapping_removals(_retry_reps, _retry_removals)
+                if _retry_removals:
+                    _rs, _retry_removals = remove_bullets(_retry_bytes, _retry_removals)
+                    _retry_bytes = _rs.read()
+                _retry_bytes = create_tailored_docx(_retry_bytes, _retry_reps).read()
+                _retry_bytes, _retry_skills_added, _retry_unmatched, _retry_dropped = _apply_skills_additions(
+                    _retry_bytes, _retry_result, base_resume_text=resume_text, tailoring_mode=tailoring_mode)
+                if target_pages:
+                    _retry_bytes, _retry_removals, _ = _enforce_page_target(
+                        _retry_bytes, jd_text, target_pages, _retry_removals)
+                _retry_bytes, _retry_honesty_removed = _apply_honesty_safety_net(
+                    _retry_bytes, resume_text, _retry_reps, tailoring_mode)
+                _retry_measured = _measure_scores(
+                    resume_text, _retry_bytes, jd_text, before=_before_score_result)
+                if _retry_measured["after"]["final_score"] > after_score:
+                    with open(file_path, "wb") as _rf:
+                        _rf.write(_retry_bytes)
+                    measured = _retry_measured
+                    score = _retry_measured["before"]["final_score"]
+                    after_score = _retry_measured["after"]["final_score"]
+                    result = _retry_result
+                    replacements = _retry_reps
+                    removals = _retry_removals
+                    skills_added = _retry_skills_added
+                    unmatched_keywords = _retry_unmatched
+                    dropped_skills = _retry_dropped
+                    rejected_edits = _retry_rejected
+                    with open(diff_path, "w", encoding="utf-8") as _df:
+                        _write_tailoring_diff(_df, company_name, replacements, removals,
+                                              result.get('missing_keywords', []), skills_added,
+                                              unmatched_keywords, rejected_edits, dropped_skills,
+                                              _retry_honesty_removed)
+                    logger.info(f"Retry improved score to {after_score}% for {company_name}")
+        except Exception as _re:
+            logger.warning(f"Retry tailoring failed: {_re}")
+
+    # ── Prepend measured score section to difference.txt ──
+    try:
+        if measured:
+            _kw_b = measured["before"]["keyword_match_pct"]
+            _kw_a = measured["after"]["keyword_match_pct"]
+            _pen_str = "; ".join(
+                f"{p['type']}: {p['points']}"
+                for p in (measured["after"].get("penalties") or [])
+            ) or "none"
+            _gaps_str = ", ".join(measured["after"].get("top_gaps") or []) or "none"
+            _risks_str = ", ".join(measured["after"].get("interview_risks") or []) or "none"
+            _uns_str = ", ".join(result.get("unsupported_requirements") or []) or "none"
+            _mhdr = (
+                f"Tailoring mode: {tailoring_mode}\n"
+                f"Measured score:  {score}% → {after_score}%"
+                f"  (Δ {after_score - score:+d})"
+                f"   [keyword match: {_kw_b}% → {_kw_a}%]\n"
+                f"Penalties: {_pen_str}\n"
+                f"Remaining gaps: {_gaps_str}\n"
+                f"Interview risks: {_risks_str}\n"
+                f"Unsupported requirements (not added — confirm in candidate_truth.md to allow):"
+                f" {_uns_str}\n"
+                + "=" * 60 + "\n\n"
+            )
+        else:
+            _mhdr = (
+                f"Tailoring mode: {tailoring_mode}\n"
+                f"Score: estimate (scoring unavailable) — {score}% → {after_score}%\n"
+                + "=" * 60 + "\n\n"
+            )
+        with open(diff_path, "r", encoding="utf-8") as _df:
+            _existing_diff = _df.read()
+        with open(diff_path, "w", encoding="utf-8") as _df:
+            _df.write(_mhdr)
+            _df.write(_existing_diff)
+    except Exception as _de:
+        logger.warning(f"Failed to update diff with measured scores: {_de}")
 
     contact_info = result.get('contact_info', {})
     with open(jd_path, "w", encoding="utf-8") as f:
@@ -2496,6 +3033,11 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
         "contact_info": contact_info, "replacements": replacements, "removals": removals,
         "skills_added": skills_added, "unmatched_keywords": unmatched_keywords,
         "rejected_edits": [{"new": r.get("new"), "unsupported": r["unsupported"]} for r in rejected_edits],
+        "measured": measured,
+        "penalties": measured["after"]["penalties"] if measured else [],
+        "interview_risks": measured["after"]["interview_risks"] if measured else [],
+        "unsupported_requirements": result.get("unsupported_requirements", []),
+        "tailoring_mode": tailoring_mode,
     }
     record_id = save_resume_record(company_name, jd_text, after_score, file_path, json.dumps(scan_data), **vendor_details)
     append_to_csv(company_name, jd_text, score, after_score, original_filename, file_path, vendor_details)
@@ -2570,7 +3112,8 @@ async def batch_scan(request: Request, body: BatchScanRequest):
                 continue
 
             try:
-                result = _process_single_jd(jd_text, file_bytes, resume_path, ai_notes=body.ai_notes or "")
+                result = _process_single_jd(jd_text, file_bytes, resume_path, ai_notes=body.ai_notes or "",
+                                            tailoring_mode=body.tailoring_mode)
                 result["index"] = idx
                 result["skipped"] = False
                 results.append(result)
@@ -3040,6 +3583,7 @@ async def api_generate_cover_letter(request: Request, record_id: int):
 class AddPointsRequest(BaseModel):
     points: str
     target_hint: Optional[str] = None
+    tailoring_mode: Optional[str] = None
 
 @app.post("/api/history/{record_id}/add-points")
 @limiter.limit("10/minute")
@@ -3071,7 +3615,13 @@ async def api_add_points(request: Request, record_id: int, payload: AddPointsReq
         resume_text = extract_text_from_docx(current_bytes)
 
         try:
-            ai_result = generate_additional_points(resume_text, record.get('jd_text', ''), points_text, target_hint)
+            _stored_scan = record.get('scan_result')
+            _stored_mode = _stored_scan.get('tailoring_mode') if isinstance(_stored_scan, dict) else None
+            mode = get_tailoring_mode(payload.tailoring_mode or _stored_mode)
+            ai_result = generate_additional_points(
+                resume_text, record.get('jd_text', ''), points_text, target_hint,
+                tailoring_mode=mode,
+            )
         except AIProviderNetworkError as e:
             logger.warning(f"AI provider network error: {e}")
             raise HTTPException(status_code=503, detail="Couldn't reach the AI provider due to a network issue. Check your internet connection and try again.")
@@ -3083,10 +3633,19 @@ async def api_add_points(request: Request, record_id: int, payload: AddPointsReq
         if not insertions:
             raise HTTPException(status_code=422, detail="Could not determine where to add these points. Try rephrasing or specifying a project/company name.")
 
-        updated_stream = insert_bullets_after(current_bytes, insertions)
+        updated_bytes = insert_bullets_after(current_bytes, insertions).read()
+        # Honesty safety net: revert any new bullet containing an unconfirmed tool term
+        _insertion_reps = [
+            {"original": ins.get("anchor", ""), "new": ins.get("new_bullet", "")}
+            for ins in insertions if ins.get("new_bullet")
+        ]
+        updated_bytes, _honesty_removed = _apply_honesty_safety_net(
+            updated_bytes, resume_text, _insertion_reps, mode)
+        if _honesty_removed:
+            logger.warning(f"api_add_points honesty check removed {len(_honesty_removed)} insertion(s)")
         # Update the SAME tailored resume file in place — never create a new file or record
         with open(file_path, "wb") as f:
-            f.write(updated_stream.read())
+            f.write(updated_bytes)
 
         existing_scan = record.get('scan_result') or {}
         if not isinstance(existing_scan, dict):
@@ -3103,6 +3662,15 @@ async def api_add_points(request: Request, record_id: int, payload: AddPointsReq
         ]
 
         new_after_score = ai_result.get('after_score', existing_scan.get('after_score', record.get('score')))
+        try:
+            with open(file_path, "rb") as _sf:
+                _scored_bytes = _sf.read()
+            _measured_after = score_resume(
+                extract_text_from_docx(_scored_bytes), record.get('jd_text', '')
+            )
+            new_after_score = _measured_after.get('final_score', new_after_score)
+        except Exception as _se:
+            logger.warning(f"Post-add-points scoring failed (using AI estimate): {_se}")
 
         merged_scan = {
             **existing_scan,
@@ -3119,6 +3687,10 @@ async def api_add_points(request: Request, record_id: int, payload: AddPointsReq
                 for ins in insertions:
                     f.write(f"Section: {ins.get('section', 'N/A')}\n")
                     f.write(f"ADDED:\n{ins.get('new_bullet', 'N/A')}\n\n")
+                if _honesty_removed:
+                    f.write(f"Removed by honesty check: {len(_honesty_removed)}\n")
+                    for rep in _honesty_removed:
+                        f.write(f"  ~ {(rep.get('new', ''))[:100]}\n")
         except OSError:
             pass
 
@@ -4374,8 +4946,8 @@ def _telegram_process_jd_impl(jd_text: str, chat_id: int, bypass_checks: bool = 
             update_status("JD too short (minimum 50 characters). Please send the full job description.")
             return
 
+        settings = get_settings()
         if not bypass_checks:
-            settings = get_settings()
 
             years = _extract_experience_years(jd_text)
             if years > settings["max_years_experience"]:
@@ -4401,7 +4973,10 @@ def _telegram_process_jd_impl(jd_text: str, chat_id: int, bypass_checks: bool = 
                     return
 
         update_status("[2/3] Tailoring resume against JD...")
-        result = _process_single_jd(jd_text, file_bytes, resume_path)
+        result = _process_single_jd(
+            jd_text, file_bytes, resume_path,
+            tailoring_mode=settings.get("tailoring_mode"),
+        )
 
         if result.get("skipped"):
             update_status(f"Skipped — {result.get('reason', 'Unknown reason')}")
@@ -4824,6 +5399,7 @@ def _telegram_settings_text_and_buttons():
         f"Hard-reject GC/Visa-required JDs: {'ON' if s['hard_reject_visa'] else 'OFF'}\n"
         f"Hard-reject foreign-language-required JDs: {'ON' if s['hard_reject_language'] else 'OFF'}\n"
         f"Hard-reject Lead/Manager roles: {'ON' if s['hard_reject_lead_role'] else 'OFF'}\n"
+        f"Tailoring mode: {s.get('tailoring_mode', 'balanced')}\n"
     )
     buttons = {
         "inline_keyboard": [
@@ -4836,6 +5412,9 @@ def _telegram_settings_text_and_buttons():
             [{"text": f"Visa/GC reject: {'ON' if s['hard_reject_visa'] else 'OFF'} (tap to toggle)", "callback_data": "settings_toggle:visa"}],
             [{"text": f"Language reject: {'ON' if s['hard_reject_language'] else 'OFF'} (tap to toggle)", "callback_data": "settings_toggle:language"}],
             [{"text": f"Lead-role reject: {'ON' if s['hard_reject_lead_role'] else 'OFF'} (tap to toggle)", "callback_data": "settings_toggle:lead"}],
+            [{"text": "Tailoring: strict", "callback_data": "settings_mode:strict"},
+             {"text": "balanced", "callback_data": "settings_mode:balanced"},
+             {"text": "aggressive", "callback_data": "settings_mode:aggressive"}],
         ]
     }
     return text, buttons
@@ -5026,17 +5605,19 @@ async def _telegram_poll_loop():
                                 await telegram_service.edit_message_text(cb_chat_id, cb_message_id, f"Active resume set to: {payload_str}")
                             continue
 
-                        if action in ("settings_toggle", "settings_years"):
+                        if action in ("settings_toggle", "settings_years", "settings_mode"):
                             settings = telegram_service.get_settings()
                             if action == "settings_toggle":
                                 key = {"visa": "hard_reject_visa", "language": "hard_reject_language", "lead": "hard_reject_lead_role"}.get(payload_str)
                                 if key:
                                     settings[key] = not settings[key]
-                            else:
+                            elif action == "settings_years":
                                 try:
                                     settings["max_years_experience"] = max(0, settings["max_years_experience"] + int(payload_str))
                                 except ValueError:
                                     pass
+                            else:
+                                settings["tailoring_mode"] = get_tailoring_mode(payload_str)
                             telegram_service.save_settings(settings)
                             await telegram_service.answer_callback_query(cb_id)
                             if cb_message_id:
@@ -5594,7 +6175,8 @@ async def fetch_job_description_endpoint(request: Request, job_id: int):
 
 @app.post("/api/jobs/{job_id}/tailor")
 @limiter.limit("10/minute")
-async def tailor_job_endpoint(request: Request, job_id: int, selected_resume: Optional[str] = None):
+async def tailor_job_endpoint(request: Request, job_id: int, selected_resume: Optional[str] = None,
+                              tailoring_mode: Optional[str] = None):
     """Tailor a resume against this job's own description without leaving the Command
     Center workspace. Reuses the existing /api/scan flow directly (same function call,
     not a re-implementation) so there's exactly one resume-tailoring code path in the
@@ -5624,6 +6206,7 @@ async def tailor_job_endpoint(request: Request, job_id: int, selected_resume: Op
         # Without this flag, clicking "Generate Tailored Resume" a second time for the
         # same job would 409 against the scan record the first click created.
         skip_duplicate_check=True,
+        tailoring_mode=tailoring_mode,
     )
 
     file_path = scan_response.get('file_path') if isinstance(scan_response, dict) else None

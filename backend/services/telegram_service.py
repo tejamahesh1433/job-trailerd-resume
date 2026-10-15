@@ -18,6 +18,7 @@ DEFAULT_SETTINGS = {
     "hard_reject_visa": True,
     "hard_reject_language": True,
     "hard_reject_lead_role": True,
+    "tailoring_mode": "balanced",
 }
 
 

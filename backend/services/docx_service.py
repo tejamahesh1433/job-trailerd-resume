@@ -32,16 +32,32 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
     doc = docx.Document(BytesIO(file_bytes))
     full_text = []
 
-    for para in doc.paragraphs:
-        if para.text.strip():
-            full_text.append(para.text.strip())
-
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for para in cell.paragraphs:
-                    if para.text.strip():
-                        full_text.append(para.text.strip())
+    for child in doc.element.body:
+        local = child.tag.rsplit('}', 1)[-1] if '}' in child.tag else child.tag
+        if local == 'p':
+            text = Paragraph(child, doc).text.strip()
+            if text:
+                full_text.append(text)
+        elif local == 'tbl':
+            # Use the lxml element objects themselves as set members — strong references
+            # prevent GC-induced id() reuse, and lxml identity hash avoids false deduplication
+            # of distinct cells that happen to share a recycled memory address.
+            seen_tc: set = set()
+            for row_el in child:
+                row_local = row_el.tag.rsplit('}', 1)[-1] if '}' in row_el.tag else row_el.tag
+                if row_local != 'tr':
+                    continue
+                for tc_el in row_el:
+                    tc_local = tc_el.tag.rsplit('}', 1)[-1] if '}' in tc_el.tag else tc_el.tag
+                    if tc_local != 'tc' or tc_el in seen_tc:
+                        continue
+                    seen_tc.add(tc_el)
+                    for p_el in tc_el:
+                        p_local = p_el.tag.rsplit('}', 1)[-1] if '}' in p_el.tag else p_el.tag
+                        if p_local == 'p':
+                            text = Paragraph(p_el, doc).text.strip()
+                            if text:
+                                full_text.append(text)
 
     return '\n'.join(full_text)
 
