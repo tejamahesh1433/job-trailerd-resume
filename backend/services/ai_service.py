@@ -6,6 +6,7 @@ from services.usage_tracker import log_api_call
 from services.model_config import GEMINI_QUALITY_MODEL, GEMINI_FAST_MODEL, GEMINI_PRO_FALLBACK_MODEL
 from services.docx_service import extract_title_lines
 from services.scoring_service import load_candidate_truth
+from services.tailoring_policy import get_tailoring_mode, tailoring_prompt
 
 
 def _get_gemini_client() -> genai.Client:
@@ -35,8 +36,9 @@ def _is_network_error(exc: Exception) -> bool:
 
 
 def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "", length_hint: dict | None = None,
-                   skills_table: list | None = None) -> dict:
+                   skills_table: list | None = None, tailoring_mode: str | None = None) -> dict:
     client = _get_gemini_client()
+    tailoring_mode = get_tailoring_mode(tailoring_mode)
 
     if skills_table:
         skills_rows = "\n".join(f'    - "{r["category"]}": {r["skills"]}' for r in skills_table)
@@ -103,15 +105,7 @@ def analyze_resume(resume_text: str, jd_text: str, ai_notes: str = "", length_hi
             'the short title line directly beneath the candidate\'s name at the very top of the resume yourself.'
         )
 
-    confirmed = load_candidate_truth()
-    if confirmed:
-        confirmed_block = (
-            "    CANDIDATE CONFIRMED SKILLS (may be used in bullet rewrites and skills additions; "
-            "these are already-owned skills not yet in the resume):\n    "
-            + ", ".join(sorted(confirmed)) + "\n"
-        )
-    else:
-        confirmed_block = ""
+    confirmed_block = "    " + tailoring_prompt(tailoring_mode, load_candidate_truth()) + "\n"
 
     prompt = f"""
     You are an expert ATS (Applicant Tracking System) scanner and career coach specializing in DevOps engineering roles.
@@ -339,8 +333,11 @@ Return ONLY valid JSON: {{"removals": ["<exact bullet text>", ...]}}"""
     return json.loads(response.text).get("removals", [])
 
 
-def generate_additional_points(resume_text: str, jd_text: str, points_text: str, target_hint: str = "") -> dict:
+def generate_additional_points(resume_text: str, jd_text: str, points_text: str, target_hint: str = "",
+                               tailoring_mode: str | None = None) -> dict:
     client = _get_gemini_client()
+    tailoring_mode = get_tailoring_mode(tailoring_mode)
+    policy = tailoring_prompt(tailoring_mode, load_candidate_truth())
 
     hint_section = ""
     if target_hint and target_hint.strip():
@@ -351,6 +348,7 @@ def generate_additional_points(resume_text: str, jd_text: str, points_text: str,
 
     prompt = f"""
     You are an expert resume editor for a DevOps/Cloud/Infrastructure engineer's resume.
+    {policy}
 
     An already-tailored resume (below) needs ADDITIONAL bullet points inserted, based on new points supplied by the candidate.
 {hint_section}
