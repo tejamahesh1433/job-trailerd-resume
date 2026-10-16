@@ -3600,6 +3600,32 @@ async def api_generate_cover_letter(request: Request, record_id: int):
         logger.error(f"Cover letter generation error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to generate cover letter")
 
+
+@app.get("/api/history/{record_id}/cover-letter/download")
+@limiter.limit("20/minute")
+async def api_download_cover_letter(request: Request, record_id: int):
+    """Download the generated cover letter .docx for a record."""
+    record = get_resume_by_id(record_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Record not found")
+    file_path = _resolve_resume_path(record)
+    if not file_path:
+        raise HTTPException(status_code=404, detail="No tailored resume found for this record")
+    company_dir = os.path.dirname(os.path.abspath(file_path))
+    cl_file = None
+    for fname in os.listdir(company_dir):
+        if (fname.lower().startswith("cover_letter") or "cover" in fname.lower()) and fname.endswith(".docx"):
+            cl_file = os.path.join(company_dir, fname)
+            break
+    if not cl_file or not os.path.exists(cl_file):
+        raise HTTPException(status_code=404, detail="Cover letter not generated yet — click 'Generate Cover Letter' first")
+    return FileResponse(
+        path=cl_file,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=os.path.basename(cl_file),
+    )
+
+
 class AddPointsRequest(BaseModel):
     points: str
     target_hint: Optional[str] = None
@@ -5976,7 +6002,13 @@ async def _telegram_poll_loop():
                     continue
 
                 if text.startswith("/search"):
-                    await telegram_service.send_message(chat_id, "Starting search... you'll get a digest when it finishes.")
+                    from services.scheduler import get_search_params
+                    _sp = get_search_params()
+                    _plat_str = ", ".join(_sp["platforms"]) if _sp["platforms"] else "all"
+                    await telegram_service.send_message(
+                        chat_id,
+                        f"🔍 Searching for <b>{_sp['query']}</b> on {_plat_str}...\nThis takes 30–60 seconds. You'll get a digest when done."
+                    )
                     await telegram_service.send_chat_action(chat_id, "typing")
                     loop = asyncio.get_event_loop()
                     loop.run_in_executor(None, _telegram_run_search_bg, chat_id)

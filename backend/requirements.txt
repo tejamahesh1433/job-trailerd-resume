@@ -75,6 +75,5 @@ wrapt==2.2.1
 prometheus-fastapi-instrumentator==8.0.2
 duckduckgo-search
 beautifulsoup4
-requests
 tzdata
 firecrawl-py==4.42.0

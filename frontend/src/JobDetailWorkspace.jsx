@@ -426,6 +426,11 @@ export default function JobDetailWorkspace({ jobId, onClose, onSendToTailor, onS
                 <ActionButton label="Generate Tailored Resume" busyKey="tailor" busy={busy} onClick={handleTailorInPlace} />
                 <ActionButton label="Send to Resume Tailor" onClick={handleSendToTailor} />
                 <ActionButton label="Generate Cover Letter" busyKey="cover_letter" busy={busy} onClick={handleGenerateCoverLetter} />
+                {job.cover_letter_generated && (
+                  <a className="jdw-action-btn" href={`${API}/api/history/${jobId}/cover-letter/download`} download>
+                    Download Cover Letter
+                  </a>
+                )}
                 <ActionButton label="Generate Recruiter Email" busyKey="draft:recruiter_email" busy={busy} onClick={() => handleGenerateDraft('recruiter_email')} />
                 <ActionButton label="Generate Follow-up Email" busyKey="draft:follow_up_email" busy={busy} onClick={() => handleGenerateDraft('follow_up_email')} />
                 <ActionButton label="Generate LinkedIn Message" busyKey="draft:linkedin_message" busy={busy} onClick={() => handleGenerateDraft('linkedin_message')} />

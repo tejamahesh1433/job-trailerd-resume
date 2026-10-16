@@ -2,7 +2,7 @@ import os
 import json
 import hashlib
 
-DATA_DIR = os.getenv("DATA_DIR", "data")
+DATA_DIR = os.getenv("DATA_DIR") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 CACHE_FILE = os.path.join(DATA_DIR, "inbox_classify_cache.json")
 MAX_CACHE_ENTRIES = 3000
 

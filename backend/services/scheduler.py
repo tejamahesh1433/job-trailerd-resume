@@ -10,7 +10,7 @@ logger = logging.getLogger("main")
 DATA_DIR = os.getenv("DATA_DIR") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 SCHEDULE_CONFIG_FILE = os.path.join(DATA_DIR, "daily_search_schedule.json")
 
-SCHEDULE_TZ = ZoneInfo("America/New_York")
+SCHEDULE_TZ = ZoneInfo(os.getenv("SCHEDULE_TZ", "America/New_York"))
 DEFAULT_HOUR = 10
 DEFAULT_MINUTE = 0
 DEFAULT_QUERY = "DevOps Engineer"
@@ -53,7 +53,7 @@ def get_schedule_info() -> dict:
         "enabled": config.get("enabled", True),
         "hour": config.get("hour", DEFAULT_HOUR),
         "minute": config.get("minute", DEFAULT_MINUTE),
-        "timezone": "America/New_York",
+        "timezone": os.getenv("SCHEDULE_TZ", "America/New_York"),
         "next_run_at": next_run.isoformat() if config.get("enabled", True) else None,
         "last_run_at": _last_run_at,
         "last_run_result": _last_run_result,

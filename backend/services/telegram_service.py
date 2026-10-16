@@ -138,6 +138,7 @@ def send_message_sync(chat_id: int, text: str, reply_markup: dict = None):
             payload = {
                 "chat_id": chat_id,
                 "text": chunk,
+                "parse_mode": "HTML",
             }
             if reply_markup and i == len(chunks) - 1:
                 payload["reply_markup"] = reply_markup
