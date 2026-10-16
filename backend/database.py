@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 import os
 import re
 
-DATA_DIR = os.getenv("DATA_DIR", "data")
+DATA_DIR = os.getenv("DATA_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_FILE = os.path.join(DATA_DIR, "resumes.db")
 
@@ -247,6 +247,15 @@ def update_resume_status(record_id: int, status: str, rejection_reason: str = No
     else:
         c.execute('UPDATE resumes SET status = ?, status_updated_at = ? WHERE id = ?',
                   (status, datetime.now().isoformat(), record_id))
+    conn.commit()
+    conn.close()
+
+
+def update_interview_date(record_id: int, interview_date: str):
+    """Set or clear the interview_date for a record (ISO date string or None)."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('UPDATE resumes SET interview_date = ? WHERE id = ?', (interview_date, record_id))
     conn.commit()
     conn.close()
 
@@ -721,6 +730,7 @@ def get_job_detail(record_id: int):
     job['rejection_reason'] = d.get('rejection_reason')
     job['file_path'] = d.get('file_path')
     job['cover_letter_generated'] = bool(d.get('cover_letter_generated'))
+    job['interview_date'] = d.get('interview_date')
 
     try:
         job['drafts'] = json.loads(d['drafts_json']) if d.get('drafts_json') else {}

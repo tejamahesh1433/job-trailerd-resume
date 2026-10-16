@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import LocalTime from './LocalTime';
 
-const API_BASE = 'http://localhost:8000';
+const API_BASE = import.meta.env.VITE_API_URL || '';
 const DEFAULT_FILTERS = [
   { key: 'all', label: 'All' },
   { key: 'needs_attention', label: 'Needs Attention' },

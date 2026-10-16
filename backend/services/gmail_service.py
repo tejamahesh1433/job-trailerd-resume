@@ -281,6 +281,50 @@ def save_draft(to_emails: list, subject: str, body: str, attachment_path: str = 
     }
 
 
+def send_email(to_emails: list, subject: str, body: str, attachment_path: str = None, attachments: list = None) -> dict:
+    """Send an email immediately via Gmail. Same signature as save_draft but calls
+    users().messages().send() instead of drafts().create()."""
+    creds = _load_credentials()
+    if not creds:
+        raise RuntimeError("Gmail not connected. Please connect your Gmail account first.")
+
+    if creds.expired and creds.refresh_token:
+        from google.auth.transport.requests import Request
+        creds.refresh(Request())
+        _save_credentials(creds)
+
+    service = build("gmail", "v1", credentials=creds)
+
+    msg = MIMEMultipart()
+    msg["To"] = ", ".join(to_emails) if to_emails else ""
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain"))
+
+    attached_files = []
+    if attachments:
+        for att in attachments:
+            path = att.get("path", "")
+            name = att.get("display_name", os.path.basename(path))
+            if path and os.path.exists(path):
+                _attach_file(msg, path, name)
+                attached_files.append(name)
+    elif attachment_path and os.path.exists(attachment_path):
+        _attach_file(msg, attachment_path, os.path.basename(attachment_path))
+        attached_files.append(os.path.basename(attachment_path))
+
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
+    result = service.users().messages().send(
+        userId="me",
+        body={"raw": raw},
+    ).execute()
+
+    return {
+        "message_id": result.get("id"),
+        "message": "Email sent",
+        "attachments": attached_files,
+    }
+
+
 def get_conversation_with_sender(sender_email: str, max_results: int = 20) -> list:
     """Fetch all emails exchanged with a specific sender, ordered chronologically."""
     creds = _load_credentials()

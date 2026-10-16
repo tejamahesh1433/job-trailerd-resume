@@ -3,6 +3,7 @@ import { JobRow } from './CommandCenter';
 import JobDetailWorkspace from './JobDetailWorkspace';
 import './index.css';
 
+const API_BASE = import.meta.env.VITE_API_URL || '';
 const PAGE_SIZE = 20;
 
 export default function JobMatches({ onBack, onSendToTailor, onSaveToApplications, selectedResumeName }) {
@@ -20,7 +21,7 @@ export default function JobMatches({ onBack, onSendToTailor, onSaveToApplication
   const fetchPage = async (p) => {
     try {
       setLoading(true);
-      const res = await fetch(`http://localhost:8000/api/jobs/matches?limit=${PAGE_SIZE}&offset=${p * PAGE_SIZE}`);
+      const res = await fetch(`${API_BASE}/api/jobs/matches?limit=${PAGE_SIZE}&offset=${p * PAGE_SIZE}`);
       if (!res.ok) throw new Error('Failed to load matches');
       const json = await res.json();
       setJobs(json.jobs || []);

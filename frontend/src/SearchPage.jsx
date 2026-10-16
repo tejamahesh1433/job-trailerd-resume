@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import LocalTime from './LocalTime';
+const API_BASE = import.meta.env.VITE_API_URL || '';
 
 export default function SearchPage({ onSelectRecord }) {
   const [query, setQuery] = useState('');
@@ -20,7 +21,7 @@ export default function SearchPage({ onSelectRecord }) {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`http://localhost:8000/api/search?q=${encodeURIComponent(query.trim())}&limit=50`);
+      const res = await fetch(`${API_BASE}/api/search?q=${encodeURIComponent(query.trim())}&limit=50`);
       const data = await res.json();
       if (!res.ok) { setError(data.detail || 'Search failed'); setResults([]); return; }
       setResults(data.results || []);
@@ -36,7 +37,7 @@ export default function SearchPage({ onSelectRecord }) {
   const handleSaveAddress = async (recordId) => {
     setSavingAddressId(recordId);
     try {
-      const res = await fetch(`http://localhost:8000/api/history/${recordId}/address`, {
+      const res = await fetch(`${API_BASE}/api/history/${recordId}/address`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ address: addressDraft }),
@@ -63,7 +64,7 @@ export default function SearchPage({ onSelectRecord }) {
   const handleSaveNotes = async (recordId) => {
     setSavingNotesId(recordId);
     try {
-      const res = await fetch(`http://localhost:8000/api/history/${recordId}/notes`, {
+      const res = await fetch(`${API_BASE}/api/history/${recordId}/notes`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ notes: notesDraft }),

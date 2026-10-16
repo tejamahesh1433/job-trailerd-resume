@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import './index.css';
+const API_BASE = import.meta.env.VITE_API_URL || '';
 import JobDetailWorkspace from './JobDetailWorkspace';
 import LocalTime from './LocalTime';
 
@@ -47,7 +48,7 @@ export default function CommandCenter({ onSendToTailor, onSaveToApplications, on
 
   const handleDismissInboxReply = async (messageId) => {
     try {
-      const res = await fetch(`http://localhost:8000/api/command-center/inbox-replies/${messageId}/dismiss`, { method: 'POST' });
+      const res = await fetch(`${API_BASE}/api/command-center/inbox-replies/${messageId}/dismiss`, { method: 'POST' });
       if (!res.ok) {
         setSearchStatus({ type: 'error', message: 'Failed to dismiss that reply — try again.' });
         return;
@@ -62,7 +63,7 @@ export default function CommandCenter({ onSendToTailor, onSaveToApplications, on
     if (checkingInbox) return;
     setCheckingInbox(true);
     try {
-      await fetch('http://localhost:8000/api/command-center/inbox-replies/check', { method: 'POST' });
+      await fetch('${API_BASE}/api/command-center/inbox-replies/check', { method: 'POST' });
       await fetchDashboard();
     } catch { /* ignore */ } finally {
       setCheckingInbox(false);
@@ -72,7 +73,7 @@ export default function CommandCenter({ onSendToTailor, onSaveToApplications, on
   const fetchDashboard = async () => {
     try {
       setLoading(true);
-      const res = await fetch('http://localhost:8000/api/command-center/dashboard');
+      const res = await fetch('${API_BASE}/api/command-center/dashboard');
       if (!res.ok) throw new Error('Failed to load dashboard');
       const json = await res.json();
       setData(json);
@@ -90,7 +91,7 @@ export default function CommandCenter({ onSendToTailor, onSaveToApplications, on
     setSearchStatus(null);
 
     try {
-      const res = await fetch('http://localhost:8000/api/jobs/auto-search', {
+      const res = await fetch('${API_BASE}/api/jobs/auto-search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -525,7 +526,7 @@ function AddJobModal({ onClose, onSaved }) {
     setSaving(true);
     setErr(null);
     try {
-      const res = await fetch('http://localhost:8000/api/jobs/manual-add', {
+      const res = await fetch('${API_BASE}/api/jobs/manual-add', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ company: company.trim(), title: title.trim(), url: url.trim(), notes: notes.trim() }),

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './index.css';
+const API_BASE = import.meta.env.VITE_API_URL || '';
 import JobMatcher from './JobMatcher';
 import SearchPage from './SearchPage';
 import CommandCenter from './CommandCenter';
@@ -139,7 +140,7 @@ export default function App() {
 
   useEffect(() => {
     if (currentPage === 'exp') {
-      fetch('http://localhost:8000/api/tech-experience')
+      fetch(`${API_BASE}/api/tech-experience`)
         .then(res => res.json())
         .then(data => { setTechExperience(Array.isArray(data) ? data : []); setTechExperienceLoaded(true); })
         .catch(err => { console.error("Error fetching tech experience:", err); setTechExperienceLoaded(true); });
@@ -147,7 +148,7 @@ export default function App() {
   }, [currentPage]);
 
   const fetchCertifications = () => {
-    return fetch('http://localhost:8000/api/certifications')
+    return fetch(`${API_BASE}/api/certifications`)
       .then(res => res.json())
       .then(data => { setCertifications(Array.isArray(data) ? data : []); setCertificationsLoaded(true); })
       .catch(err => { console.error("Error fetching certifications:", err); setCertificationsLoaded(true); });
@@ -161,7 +162,7 @@ export default function App() {
 
   const handleRefreshCertifications = () => {
     setCertRefreshing(true);
-    fetch('http://localhost:8000/api/certifications/refresh', { method: 'POST' })
+    fetch(`${API_BASE}/api/certifications/refresh`, { method: 'POST' })
       .then(res => res.json())
       .then(data => setCertifications(Array.isArray(data) ? data : []))
       .catch(err => console.error("Error refreshing certifications:", err))
@@ -171,11 +172,11 @@ export default function App() {
 
   useEffect(() => {
     if (currentPage === 'info') {
-      fetch('http://localhost:8000/api/addresses')
+      fetch(`${API_BASE}/api/addresses`)
         .then(res => res.json())
         .then(data => setInfoAddresses(data))
         .catch(err => console.error("Error fetching addresses:", err));
-      fetch('http://localhost:8000/api/telegram/status')
+      fetch(`${API_BASE}/api/telegram/status`)
         .then(res => res.json())
         .then(data => setTelegramStatus(data))
         .catch(() => setTelegramStatus({ configured: false }));
@@ -272,7 +273,7 @@ export default function App() {
 
   const fetchPersonalDocs = async () => {
     try {
-      const res = await fetch('http://localhost:8000/api/documents');
+      const res = await fetch('${API_BASE}/api/documents');
       const data = await res.json();
       if (res.ok) setPersonalDocs(data.documents || {});
     } catch { /* silent */ }
@@ -285,7 +286,7 @@ export default function App() {
       const fd = new FormData();
       fd.append('doc_type', docType);
       fd.append('file', file);
-      const res = await fetch('http://localhost:8000/api/documents/upload', { method: 'POST', body: fd });
+      const res = await fetch('${API_BASE}/api/documents/upload', { method: 'POST', body: fd });
       if (res.ok) {
         await fetchPersonalDocs();
         setFuAttach(prev => ({ ...prev, [docType]: true }));
@@ -299,7 +300,7 @@ export default function App() {
 
   const fetchResumes = async () => {
     try {
-      const res = await fetch('http://localhost:8000/api/resumes');
+      const res = await fetch('${API_BASE}/api/resumes');
       if (!res.ok) return;
       const data = await res.json();
       setStoredResumes(data);
@@ -315,14 +316,14 @@ export default function App() {
 
   const fetchHistory = async () => {
     try {
-      const res = await fetch('http://localhost:8000/api/history?limit=200');
+      const res = await fetch('${API_BASE}/api/history?limit=200');
       if (res.ok) setHistory(await res.json());
     } catch { /* ignore */ }
   };
 
   const checkGmailStatus = async () => {
     try {
-      const res = await fetch('http://localhost:8000/api/gmail/status');
+      const res = await fetch('${API_BASE}/api/gmail/status');
       if (res.ok) {
         const data = await res.json();
         setGmailConnected(data.connected);
@@ -334,14 +335,14 @@ export default function App() {
 
   const fetchUsage = async () => {
     try {
-      const res = await fetch('http://localhost:8000/api/usage');
+      const res = await fetch('${API_BASE}/api/usage');
       if (res.ok) setUsageStats(await res.json());
     } catch { /* ignore */ }
   };
 
   const fetchProfile = async () => {
     try {
-      const res = await fetch('http://localhost:8000/api/profile');
+      const res = await fetch('${API_BASE}/api/profile');
       if (res.ok) {
         const data = await res.json();
         setProfileText(data.content || '');
@@ -394,7 +395,7 @@ export default function App() {
     setSavingToGmail(true);
     setGmailSaved(false);
     try {
-      const res = await fetch('http://localhost:8000/api/gmail/save-draft', {
+      const res = await fetch('${API_BASE}/api/gmail/save-draft', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -417,7 +418,7 @@ export default function App() {
 
   const handleDisconnectGmail = async () => {
     try {
-      await fetch('http://localhost:8000/api/gmail/disconnect', { method: 'POST' });
+      await fetch('${API_BASE}/api/gmail/disconnect', { method: 'POST' });
       setGmailConnected(false);
       setGmailEmail('');
     } catch { /* ignore */ }
@@ -426,7 +427,7 @@ export default function App() {
   const handleSaveProfile = async () => {
     setProfileSaving(true);
     try {
-      const res = await fetch('http://localhost:8000/api/profile', {
+      const res = await fetch('${API_BASE}/api/profile', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: profileText }),
@@ -444,7 +445,7 @@ export default function App() {
     try {
       const form = new FormData();
       form.append('file', file);
-      const res = await fetch('http://localhost:8000/api/profile/upload', { method: 'POST', body: form });
+      const res = await fetch('${API_BASE}/api/profile/upload', { method: 'POST', body: form });
       const data = await res.json();
       if (!res.ok) { setProfileUploadMsg(data.detail || 'Upload failed'); return; }
       setProfileText(data.profile || '');
@@ -466,7 +467,7 @@ export default function App() {
     const formData = new FormData();
     formData.append('resume', file);
     try {
-      const res = await fetch('http://localhost:8000/api/resumes', { method: 'POST', body: formData });
+      const res = await fetch('${API_BASE}/api/resumes', { method: 'POST', body: formData });
       const data = await res.json();
       if (!res.ok) { setError(data.detail || 'Upload failed'); return; }
       await fetchResumes();
@@ -486,7 +487,7 @@ export default function App() {
 
   const handleResumeDelete = async (filename) => {
     try {
-      const res = await fetch(`http://localhost:8000/api/resumes/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+      const res = await fetch(`${API_BASE}/api/resumes/${encodeURIComponent(filename)}`, { method: 'DELETE' });
       if (res.ok) {
         const remaining = storedResumes.filter(r => r.filename !== filename);
         setStoredResumes(remaining);
@@ -521,7 +522,7 @@ export default function App() {
     if (rerunRecordId) formData.append('rerun_id', rerunRecordId);
     if (overrideExperienceCheck) formData.append('override_experience_check', 'true');
     try {
-      const res = await fetch('http://localhost:8000/api/scan', { method: 'POST', body: formData });
+      const res = await fetch('${API_BASE}/api/scan', { method: 'POST', body: formData });
       const data = await res.json();
       if (!res.ok) {
         if (res.status === 409 && data.detail?.duplicate_id) {
@@ -609,7 +610,7 @@ export default function App() {
   const handleDeleteHistory = async (id) => {
     if (!window.confirm('Delete this record?')) return;
     try {
-      const res = await fetch(`http://localhost:8000/api/history/${id}`, { method: 'DELETE' });
+      const res = await fetch(`${API_BASE}/api/history/${id}`, { method: 'DELETE' });
       if (res.ok) fetchHistory();
     } catch (err) {
       console.error('Failed to delete record:', err);
@@ -618,7 +619,7 @@ export default function App() {
 
     const handleSaveToApplications = async (job) => {
     try {
-      const res = await fetch('http://localhost:8000/api/applications', {
+      const res = await fetch('${API_BASE}/api/applications', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -645,7 +646,7 @@ export default function App() {
     setGeneratingCL(true);
     setError(null);
     try {
-      const res = await fetch(`http://localhost:8000/api/history/${activeRecordId}/cover-letter`, { method: 'POST' });
+      const res = await fetch(`${API_BASE}/api/history/${activeRecordId}/cover-letter`, { method: 'POST' });
       const data = await res.json();
       if (!res.ok) { setError(data.detail || `Error ${res.status}`); return; }
       setCoverLetter(data.cover_letter);
@@ -664,7 +665,7 @@ export default function App() {
     setAddPointsSuccess(null);
     setError(null);
     try {
-      const res = await fetch(`http://localhost:8000/api/history/${activeRecordId}/add-points`, {
+      const res = await fetch(`${API_BASE}/api/history/${activeRecordId}/add-points`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ points: addPointsText.trim(), target_hint: addPointsTarget.trim() || undefined }),
@@ -692,7 +693,7 @@ export default function App() {
     latestCLRequestId.current = id;
     setLoadingCLId(id);
     try {
-      const res = await fetch(`http://localhost:8000/api/history/${id}/cover-letter`, { method: 'POST' });
+      const res = await fetch(`${API_BASE}/api/history/${id}/cover-letter`, { method: 'POST' });
       const data = await res.json();
       if (latestCLRequestId.current !== id) return; // superseded by a newer request
       if (!res.ok) {
@@ -709,7 +710,7 @@ export default function App() {
 
   const handleStatusChange = async (id, newStatus) => {
     try {
-      const res = await fetch(`http://localhost:8000/api/history/${id}/status`, {
+      const res = await fetch(`${API_BASE}/api/history/${id}/status`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: newStatus }),
@@ -734,7 +735,7 @@ export default function App() {
     setBatchJobs(jds.map((jd, i) => ({ id: i, jd, status: 'processing', result: null, error: null })));
     setBatchRunning(true);
     try {
-      const res = await fetch('http://localhost:8000/api/batch-scan', {
+      const res = await fetch('${API_BASE}/api/batch-scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jd_texts: jds, selected_resume: selectedResumeName, ai_notes: aiNotes.trim() || undefined }),
@@ -793,7 +794,7 @@ export default function App() {
   const handleSaveVendorDetails = async (id) => {
     setSavingVendorId(id);
     try {
-      const res = await fetch(`http://localhost:8000/api/history/${id}/vendor`, {
+      const res = await fetch(`${API_BASE}/api/history/${id}/vendor`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(vendorEdit),
@@ -811,7 +812,7 @@ export default function App() {
     setGeneratingMail(true);
     setError(null);
     try {
-      const res = await fetch(`http://localhost:8000/api/history/${activeRecordId}/mail-draft`, { method: 'POST' });
+      const res = await fetch(`${API_BASE}/api/history/${activeRecordId}/mail-draft`, { method: 'POST' });
       const data = await res.json();
       if (!res.ok) { setError(data.detail || `Mail draft error (${res.status})`); return; }
       setMailDraft(data);
@@ -827,7 +828,7 @@ export default function App() {
     if (!activeRecordId || !mailDraft) return;
     setSavingDraft(true);
     try {
-      const res = await fetch(`http://localhost:8000/api/history/${activeRecordId}/mail-draft/save`, {
+      const res = await fetch(`${API_BASE}/api/history/${activeRecordId}/mail-draft/save`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ subject: mailDraft.subject, body: mailDraft.body }),
@@ -880,7 +881,7 @@ export default function App() {
     if (batchMode) setBatchMode(false);
 
     try {
-      const res = await fetch(`http://localhost:8000/api/history/${item.id}/content`);
+      const res = await fetch(`${API_BASE}/api/history/${item.id}/content`);
       if (res.ok) {
         const data = await res.json();
         if (activeRecordRequestRef.current !== item.id) return; // superseded by a newer selection
@@ -900,7 +901,7 @@ export default function App() {
     latestMailRequestId.current = id;
     setLoadingMailId(id);
     try {
-      const res = await fetch(`http://localhost:8000/api/history/${id}/mail-draft`, { method: 'POST' });
+      const res = await fetch(`${API_BASE}/api/history/${id}/mail-draft`, { method: 'POST' });
       const data = await res.json();
       if (latestMailRequestId.current !== id) return; // superseded by a newer request
       if (!res.ok) { setError(data.detail || `Error ${res.status}`); return; }
@@ -917,7 +918,7 @@ export default function App() {
     if (!historyMailModal) return;
     setHistoryDraftSaving(true);
     try {
-      const res = await fetch(`http://localhost:8000/api/history/${historyMailModal.record_id}/mail-draft/save`, {
+      const res = await fetch(`${API_BASE}/api/history/${historyMailModal.record_id}/mail-draft/save`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ subject: historyMailModal.subject, body: historyMailModal.body }),
@@ -939,7 +940,7 @@ export default function App() {
     setInboxError(null);
     try {
       const q = query ?? inboxSearch ?? '';
-      const res = await fetch(`http://localhost:8000/api/gmail/inbox?q=${encodeURIComponent(q || 'in:inbox')}`);
+      const res = await fetch(`${API_BASE}/api/gmail/inbox?q=${encodeURIComponent(q || 'in:inbox')}`);
       const data = await res.json();
       if (res.ok) setInboxMessages(data.messages || []);
       else setInboxError(data.detail || 'Failed to fetch inbox');
@@ -961,7 +962,7 @@ export default function App() {
   const handleSelectInboxMsg = async (msgId) => {
     setLoadingMsgId(msgId);
     try {
-      const res = await fetch(`http://localhost:8000/api/gmail/message/${msgId}`);
+      const res = await fetch(`${API_BASE}/api/gmail/message/${msgId}`);
       const data = await res.json();
       if (res.ok) {
         setFollowUpEmail(data.body || '');
@@ -983,8 +984,8 @@ export default function App() {
     setError(null);
     try {
       const url = activeRecordId
-        ? `http://localhost:8000/api/history/${activeRecordId}/follow-up`
-        : 'http://localhost:8000/api/follow-up/standalone';
+        ? `${API_BASE}/api/history/${activeRecordId}/follow-up`
+        : '${API_BASE}/api/follow-up/standalone';
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1009,7 +1010,7 @@ export default function App() {
     setSavingFollowUp(true);
     setFollowUpGmailSaved(false);
     try {
-      const res = await fetch('http://localhost:8000/api/gmail/save-draft', {
+      const res = await fetch('${API_BASE}/api/gmail/save-draft', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2011,16 +2012,16 @@ export default function App() {
 
                 {result.file_path && (
                   <div className="result-downloads">
-                    <a href={`http://localhost:8000/api/download/${result.file_path.replace(/^trailerd\//, '')}`} className="download-btn" download>
+                    <a href={`${API_BASE}/api/download/${result.file_path.replace(/^trailerd\//, '')}`} className="download-btn" download>
                       ↓ {result.tailored ? 'Download Tailored Resume' : 'Download Resume'}
                     </a>
                     {result.pdf_path && (
-                      <a href={`http://localhost:8000/api/download/${result.pdf_path.replace(/^trailerd\//, '')}`} className="download-btn" download>
+                      <a href={`${API_BASE}/api/download/${result.pdf_path.replace(/^trailerd\//, '')}`} className="download-btn" download>
                         ↓ Download PDF
                       </a>
                     )}
                     <div className="file-dl-row">
-                      <a href={`http://localhost:8000/api/download/${result.file_path.replace(/[^/]+\.docx$/, 'jd_info.txt').replace(/^trailerd\//, '')}`} className="file-dl-link" download>
+                      <a href={`${API_BASE}/api/download/${result.file_path.replace(/[^/]+\.docx$/, 'jd_info.txt').replace(/^trailerd\//, '')}`} className="file-dl-link" download>
                         ↓ jd_info.txt
                       </a>
                     </div>
@@ -2171,7 +2172,7 @@ export default function App() {
                       {copied ? '✓ Copied' : '↑ Copy'}
                     </button>
                     {coverLetterPath && (
-                      <a href={`http://localhost:8000/api/download/${coverLetterPath.replace(/^trailerd\//, '')}`} className="cl-download-btn" download>↓ Download .docx</a>
+                      <a href={`${API_BASE}/api/download/${coverLetterPath.replace(/^trailerd\//, '')}`} className="cl-download-btn" download>↓ Download .docx</a>
                     )}
                   </div>
                 </div>
@@ -2237,7 +2238,7 @@ export default function App() {
                         {savingDraft ? '…' : '💾 Save to Folder'}
                       </button>
                     ) : (
-                      <a href={`http://localhost:8000/api/download/${draftPath.replace(/^trailerd\//, '')}`} className="mail-act-btn mail-dl-btn" download>
+                      <a href={`${API_BASE}/api/download/${draftPath.replace(/^trailerd\//, '')}`} className="mail-act-btn mail-dl-btn" download>
                         ↓ Download .txt
                       </a>
                     )}
@@ -2246,7 +2247,7 @@ export default function App() {
                         {savingToGmail ? '…' : gmailSaved ? '✓ Saved to Gmail' : '✉ Save to Gmail Drafts'}
                       </button>
                     ) : (
-                      <a href="http://localhost:8000/api/gmail/auth" className="mail-act-btn mail-gmail-connect-btn">
+                      <a href="${API_BASE}/api/gmail/auth" className="mail-act-btn mail-gmail-connect-btn">
                         ✉ Connect Gmail
                       </a>
                     )}
@@ -2509,9 +2510,9 @@ export default function App() {
                           {job.status === 'done' && <span className="batch-job-score" style={{ color: scoreAccent(job.result.score) }}>{job.result.score}%</span>}
                           {job.status === 'done' && job.result?.id && (
                             <>
-                              <a href={`http://localhost:8000/api/download/${job.result.file_path.replace(/^trailerd\//, '')}`} className="dl-link" download title="Resume">↓</a>
+                              <a href={`${API_BASE}/api/download/${job.result.file_path.replace(/^trailerd\//, '')}`} className="dl-link" download title="Resume">↓</a>
                               {job.result.pdf_path && (
-                                <a href={`http://localhost:8000/api/download/${job.result.pdf_path.replace(/^trailerd\//, '')}`} className="dl-link" download title="Resume PDF">PDF</a>
+                                <a href={`${API_BASE}/api/download/${job.result.pdf_path.replace(/^trailerd\//, '')}`} className="dl-link" download title="Resume PDF">PDF</a>
                               )}
                               <button className="dl-link" title="Open CL & Email panels" onClick={() => { setBatchMode(false); handleSelectRecord(job.result); }}>CL+✉</button>
                             </>
@@ -2541,7 +2542,7 @@ export default function App() {
               <span className="panel-title">Production Log</span>
             </div>
             {history.length > 0 && (
-              <a href="http://localhost:8000/api/history/csv" className="csv-btn" download>↓ CSV Export</a>
+              <a href="${API_BASE}/api/history/csv" className="csv-btn" download>↓ CSV Export</a>
             )}
           </div>
 
@@ -2641,13 +2642,13 @@ export default function App() {
                         </td>
                         <td className="actions-col">
                           {item.file_path && (
-                            <a href={`http://localhost:8000/api/download/${item.file_path.replace(/^trailerd\//, '')}`} className="dl-link" download title="Download resume">↓</a>
+                            <a href={`${API_BASE}/api/download/${item.file_path.replace(/^trailerd\//, '')}`} className="dl-link" download title="Download resume">↓</a>
                           )}
                           {item.pdf_path && (
-                            <a href={`http://localhost:8000/api/download/${item.pdf_path.replace(/^trailerd\//, '')}`} className="dl-link" download title="Download resume PDF">PDF</a>
+                            <a href={`${API_BASE}/api/download/${item.pdf_path.replace(/^trailerd\//, '')}`} className="dl-link" download title="Download resume PDF">PDF</a>
                           )}
                           {item.file_path && (
-                            <a href={`http://localhost:8000/api/download/${item.file_path.replace(/[^/]+\.docx$/, 'jd_info.txt').replace(/^trailerd\//, '')}`} className="dl-link" download title="Download JD info">JD</a>
+                            <a href={`${API_BASE}/api/download/${item.file_path.replace(/[^/]+\.docx$/, 'jd_info.txt').replace(/^trailerd\//, '')}`} className="dl-link" download title="Download JD info">JD</a>
                           )}
                           <button className="cl-hist-btn" onClick={() => handleHistoryCL(item.id, item.company_name)} disabled={loadingCLId === item.id} title="Generate cover letter">
                             {loadingCLId === item.id ? '…' : 'CL'}
@@ -2734,7 +2735,7 @@ export default function App() {
                 {copied ? '✓ Copied' : '↑ Copy'}
               </button>
               {historyCLModal.cl_path && (
-                <a href={`http://localhost:8000/api/download/${historyCLModal.cl_path.replace(/^trailerd\//, '')}`} className="cl-download-btn" download>↓ Download .docx</a>
+                <a href={`${API_BASE}/api/download/${historyCLModal.cl_path.replace(/^trailerd\//, '')}`} className="cl-download-btn" download>↓ Download .docx</a>
               )}
             </div>
           </div>
@@ -2785,7 +2786,7 @@ export default function App() {
                   {historyDraftSaving ? '…Saving' : '💾 Save to Folder'}
                 </button>
               ) : (
-                <a href={`http://localhost:8000/api/download/${historyDraftPath.replace(/^trailerd\//, '')}`} className="mail-act-btn mail-dl-btn" download>
+                <a href={`${API_BASE}/api/download/${historyDraftPath.replace(/^trailerd\//, '')}`} className="mail-act-btn mail-dl-btn" download>
                   ↓ Download .txt
                 </a>
               )}

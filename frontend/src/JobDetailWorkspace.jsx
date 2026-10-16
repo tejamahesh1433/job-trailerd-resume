@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import './index.css';
 import LocalTime from './LocalTime';
 
-const API = 'http://localhost:8000';
+const API = import.meta.env.VITE_API_URL || '';
 
 const PIPELINE_STAGES = ['Found', 'Shortlisted', 'Applied', 'Interviewing', 'Offered', 'Rejected'];
 const STAGE_LABELS = {

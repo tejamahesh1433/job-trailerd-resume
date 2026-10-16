@@ -2185,6 +2185,26 @@ async def add_security_headers(request: Request, call_next):
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     return response
 
+_API_SECRET_KEY = os.getenv("API_SECRET_KEY", "")
+
+@app.middleware("http")
+async def api_key_auth(request: Request, call_next):
+    """Optional bearer-token auth — only active when API_SECRET_KEY is set in the
+    environment. Pass the token as: Authorization: Bearer <key>
+    Exempted paths: /, /docs, /openapi.json, /metrics, /api/gmail/callback (OAuth
+    redirect must not require a header)."""
+    if not _API_SECRET_KEY:
+        return await call_next(request)
+    exempt = {"/", "/docs", "/openapi.json", "/redoc", "/metrics", "/api/gmail/callback"}
+    if request.url.path in exempt or request.url.path.startswith("/metrics"):
+        return await call_next(request)
+    auth = request.headers.get("Authorization", "")
+    token = auth.removeprefix("Bearer ").strip()
+    if token != _API_SECRET_KEY:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+    return await call_next(request)
+
 @app.get("/")
 def read_root():
     return {"status": "ok", "message": "API is running"}
@@ -3890,6 +3910,22 @@ async def get_record_content(request: Request, record_id: int):
         logger.error(f"Get record content error: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve record content")
 
+@app.get("/api/db/backup")
+@limiter.limit("5/minute")
+async def download_db_backup(request: Request):
+    """Download a copy of the SQLite database as a .db file — useful for manual backups
+    before migrations or container restarts without a volume mount."""
+    from database import DB_FILE as _DB_FILE
+    if not os.path.exists(_DB_FILE):
+        raise HTTPException(status_code=404, detail="Database file not found")
+    filename = f"resumes_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+    return FileResponse(
+        path=_DB_FILE,
+        media_type="application/octet-stream",
+        filename=filename,
+    )
+
+
 @app.get("/api/history/csv")
 @limiter.limit("10/minute")
 async def download_history_csv(request: Request):
@@ -5154,6 +5190,7 @@ def _telegram_generate_mail_draft(record_id: int, chat_id: int):
             "inline_keyboard": [
                 [{"text": "Get Mail Draft (.txt)", "callback_data": f"send_draft:{record_id}"}],
                 [{"text": "Save Draft to Gmail", "callback_data": f"gmail_draft:{record_id}"}],
+                [{"text": "Send Email Now", "callback_data": f"send_email_now:{record_id}"}],
             ]
         }
         send_message_sync(chat_id, msg, reply_markup=buttons)
@@ -5386,6 +5423,188 @@ def _telegram_record_followup(record_id: int, chat_id: int):
         logger.error(f"Telegram record followup error: {e}", exc_info=True)
         try:
             send_message_sync(chat_id, f"Failed to record follow-up: {str(e)[:300]}")
+        except Exception:
+            pass
+
+
+def _telegram_stats_text() -> str:
+    """Pipeline stats: counts by status, avg score, top tags."""
+    from database import get_all_resumes, get_career_intel
+    records = get_all_resumes(1000, 0)
+    counts: dict[str, int] = {}
+    for r in records:
+        s = r.get('status') or 'Unknown'
+        counts[s] = counts.get(s, 0) + 1
+    total = len(records)
+    lines = [f"Pipeline stats ({total} total):"]
+    for status in ('Shortlisted', 'Matched', 'Applied', 'Interviewing', 'Offered', 'Rejected', 'Scanned', 'Found'):
+        n = counts.get(status, 0)
+        if n:
+            lines.append(f"- {status}: {n}")
+    intel = get_career_intel()
+    if intel.get('avg_score'):
+        lines.append(f"\nAvg match score: {intel['avg_score']}%")
+    if intel.get('top_skills'):
+        lines.append(f"Top skills in JDs: {', '.join(intel['top_skills'][:6])}")
+    if intel.get('best_source'):
+        lines.append(f"Best source: {intel['best_source']} ({intel['source_pct']}%)")
+    return "\n".join(lines)
+
+
+def _telegram_applied_text(limit: int = 10) -> str:
+    """List recently applied jobs."""
+    import sqlite3
+    from database import DB_FILE as _DB_FILE
+    conn = sqlite3.connect(_DB_FILE)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute(
+        "SELECT id, company_name, jd_text, status_updated_at FROM resumes "
+        "WHERE status = 'Applied' ORDER BY status_updated_at DESC LIMIT ?", (limit,)
+    )
+    rows = c.fetchall()
+    conn.close()
+    if not rows:
+        return "No applied jobs yet."
+    lines = ["Applied jobs:"]
+    for r in rows:
+        date = (r['status_updated_at'] or '')[:10]
+        title = _telegram_truncate(r['jd_text'] or '', 40)
+        company = r['company_name'] or 'Unknown'
+        line = f"- [{r['id']}] {company}"
+        if title:
+            line += f" - {title}"
+        if date:
+            line += f" ({date})"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _telegram_peek_text(record_id: int) -> str:
+    """Quick summary of a single job record."""
+    from database import get_job_detail
+    job = get_job_detail(record_id)
+    if not job:
+        return f"No record found with ID {record_id}."
+    lines = [f"Job #{record_id}"]
+    lines.append(f"Company: {job.get('company') or 'Unknown'}")
+    title = _telegram_truncate(job.get('title') or '', 80)
+    if title:
+        lines.append(f"Title: {title}")
+    lines.append(f"Score: {job.get('score') or 0}%")
+    lines.append(f"Status: {job.get('status') or 'Unknown'}")
+    tags = job.get('tags') or []
+    if tags:
+        lines.append(f"Tags: {', '.join(tags[:6])}")
+    next_action = job.get('next_action') or ''
+    if next_action:
+        lines.append(f"Next: {next_action[:120]}")
+    notes = job.get('user_notes') or ''
+    if notes:
+        lines.append(f"Notes: {notes[:120]}")
+    return "\n".join(lines)
+
+
+def _telegram_run_search_bg(chat_id: int):
+    """Background: run the Command Center search using the saved config and push results."""
+    from services.telegram_service import send_message_sync
+    from services.telegram_notifier import send_daily_digest
+    from services.scheduler import get_search_params
+    try:
+        params = get_search_params()
+        result = _run_command_center_search(
+            params["query"], params["platforms"], params["work_types"], params["contract_types"],
+        )
+        send_daily_digest(result)
+    except Exception as e:
+        logger.error(f"Telegram /search bg error: {e}", exc_info=True)
+        try:
+            send_message_sync(chat_id, f"Search failed: {str(e)[:300]}")
+        except Exception:
+            pass
+
+
+def _telegram_mark_inbox_handled(message_id: str, chat_id: int):
+    """Background: mark an inbox reply as handled."""
+    from services.telegram_service import send_message_sync
+    from services.inbox_matcher import mark_inbox_reply_handled
+    try:
+        mark_inbox_reply_handled(message_id)
+        send_message_sync(chat_id, "Marked as handled.")
+    except Exception as e:
+        logger.error(f"Telegram mark handled error: {e}", exc_info=True)
+        try:
+            send_message_sync(chat_id, f"Failed: {str(e)[:200]}")
+        except Exception:
+            pass
+
+
+def _telegram_send_email_now(record_id: int, chat_id: int):
+    """Background: send the email draft immediately via Gmail (not just save as draft)."""
+    from services.telegram_service import send_message_sync
+    try:
+        record = get_resume_by_id(record_id)
+        if not record:
+            send_message_sync(chat_id, "Record not found.")
+            return
+
+        file_path = _resolve_resume_path(record) or record.get('file_path')
+        company_dir = os.path.dirname(file_path) if file_path else None
+        jd_text = record.get('jd_text', '')
+        company = record.get('company_name', 'Unknown')
+
+        subject = ""
+        body = ""
+        if company_dir and os.path.isdir(company_dir):
+            draft_files = [f for f in os.listdir(company_dir) if f.startswith("mail_draft_") and f.endswith(".txt")]
+            if draft_files:
+                with open(os.path.join(company_dir, draft_files[0]), "r", encoding="utf-8") as f:
+                    content = f.read()
+                if content.startswith("Subject:"):
+                    sep = content.find('\n\n')
+                    subject = content[len("Subject:"):sep].strip() if sep != -1 else content[len("Subject:"):].strip()
+                    body = content[sep + 2:] if sep != -1 else ""
+                else:
+                    body = content
+
+        if not body:
+            send_message_sync(chat_id, f"No mail draft found for {company}. Use 'Generate Mail Draft' first.")
+            return
+
+        to_emails = list(set(re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', jd_text)))
+        if not to_emails:
+            send_message_sync(chat_id, f"No email address found in the JD for {company}. Cannot send.")
+            return
+
+        result = gmail_service.send_email(
+            to_emails=to_emails,
+            subject=subject,
+            body=body,
+            attachment_path=file_path if file_path and os.path.exists(file_path) else None,
+        )
+        attached = result.get('attachments', [])
+        to_line = ', '.join(to_emails)
+        send_message_sync(chat_id, (
+            f"Email sent for {company}!\n"
+            f"To: {to_line}\n"
+            f"Subject: {subject}\n"
+            f"Attachments: {', '.join(attached) if attached else 'none'}"
+        ))
+        update_resume_status(record_id, "Applied")
+        logger.info(f"Telegram send-email-now for record {record_id}")
+    except RuntimeError as e:
+        error_msg = str(e)
+        if "Gmail not connected" in error_msg:
+            from services.telegram_service import send_message_sync as _sm
+            _sm(chat_id, "Gmail not connected. Connect via the web dashboard first.")
+        else:
+            from services.telegram_service import send_message_sync as _sm
+            _sm(chat_id, f"Send failed: {error_msg[:300]}")
+    except Exception as e:
+        logger.error(f"Telegram send email now error: {e}", exc_info=True)
+        try:
+            from services.telegram_service import send_message_sync as _sm
+            _sm(chat_id, f"Send failed: {str(e)[:300]}")
         except Exception:
             pass
 
@@ -5625,6 +5844,12 @@ async def _telegram_poll_loop():
                                 await telegram_service.edit_message_text(cb_chat_id, cb_message_id, text, reply_markup=buttons)
                             continue
 
+                        if action == "mark_handled":
+                            await telegram_service.answer_callback_query(cb_id, "Marked as handled")
+                            loop = asyncio.get_event_loop()
+                            loop.run_in_executor(None, _telegram_mark_inbox_handled, payload_str, cb_chat_id)
+                            continue
+
                         try:
                             rec_id = int(payload_str)
                         except ValueError:
@@ -5644,6 +5869,10 @@ async def _telegram_poll_loop():
                             await telegram_service.answer_callback_query(cb_id, "Saving draft to Gmail...")
                             await telegram_service.send_chat_action(cb_chat_id, "typing")
                             loop.run_in_executor(None, _telegram_save_gmail_draft, rec_id, cb_chat_id)
+                        elif action == "send_email_now":
+                            await telegram_service.answer_callback_query(cb_id, "Sending email now...")
+                            await telegram_service.send_chat_action(cb_chat_id, "typing")
+                            loop.run_in_executor(None, _telegram_send_email_now, rec_id, cb_chat_id)
                         elif action == "send_resume":
                             await telegram_service.answer_callback_query(cb_id, "Sending resume...")
                             await telegram_service.send_chat_action(cb_chat_id, "upload_document")
@@ -5705,13 +5934,173 @@ async def _telegram_poll_loop():
                     await telegram_service.send_message(chat_id, s_text, reply_markup=s_buttons)
                     continue
 
+                if text.startswith("/stats"):
+                    await telegram_service.send_message(chat_id, _telegram_stats_text())
+                    continue
+
+                if text.startswith("/applied"):
+                    await telegram_service.send_message(chat_id, _telegram_applied_text())
+                    continue
+
+                if text.startswith("/peek"):
+                    arg = text[len("/peek"):].strip()
+                    try:
+                        rec_id = int(arg)
+                        await telegram_service.send_message(chat_id, _telegram_peek_text(rec_id))
+                    except ValueError:
+                        await telegram_service.send_message(chat_id, "Usage: /peek <record_id>  e.g. /peek 42")
+                    continue
+
+                if text.startswith("/note"):
+                    parts = text[len("/note"):].strip().split(None, 1)
+                    if len(parts) < 2:
+                        await telegram_service.send_message(chat_id, "Usage: /note <record_id> <text>  e.g. /note 42 Recruiter called today")
+                    else:
+                        try:
+                            rec_id = int(parts[0])
+                            from database import update_user_notes, get_resume_by_id as _grbi
+                            rec = _grbi(rec_id)
+                            if not rec:
+                                await telegram_service.send_message(chat_id, f"No record found with ID {rec_id}.")
+                            else:
+                                existing = (rec.get('user_notes') or '').strip()
+                                from datetime import datetime as _dt
+                                timestamp = _dt.now().strftime('%Y-%m-%d')
+                                new_note = f"[{timestamp}] {parts[1]}"
+                                combined = f"{existing}\n{new_note}".strip() if existing else new_note
+                                update_user_notes(rec_id, combined)
+                                company = rec.get('company_name', str(rec_id))
+                                await telegram_service.send_message(chat_id, f"Note appended for {company}.")
+                        except ValueError:
+                            await telegram_service.send_message(chat_id, "Usage: /note <record_id> <text>")
+                    continue
+
+                if text.startswith("/search"):
+                    await telegram_service.send_message(chat_id, "Starting search... you'll get a digest when it finishes.")
+                    await telegram_service.send_chat_action(chat_id, "typing")
+                    loop = asyncio.get_event_loop()
+                    loop.run_in_executor(None, _telegram_run_search_bg, chat_id)
+                    continue
+
+                if text.startswith("/digest"):
+                    from services.telegram_notifier import notify_new_action_items
+                    from services.inbox_matcher import check_inbox_for_replies
+                    await telegram_service.send_message(chat_id, "Checking for updates...")
+                    loop = asyncio.get_event_loop()
+                    loop.run_in_executor(None, notify_new_action_items)
+                    loop.run_in_executor(None, check_inbox_for_replies)
+                    await telegram_service.send_message(chat_id, _telegram_queue_text())
+                    continue
+
+                if text.startswith("/pause"):
+                    from services.scheduler import set_schedule, get_schedule_info as _gsi2
+                    s = _gsi2()
+                    set_schedule(False, s['hour'], s['minute'])
+                    await telegram_service.send_message(chat_id, "Daily search paused. Use /resume to re-enable.")
+                    continue
+
+                if text.startswith("/resume"):
+                    from services.scheduler import set_schedule, get_schedule_info as _gsi3
+                    s = _gsi3()
+                    set_schedule(True, s['hour'], s['minute'])
+                    await telegram_service.send_message(chat_id, f"Daily search resumed — next run at {s['hour']:02d}:{s['minute']:02d} ET.")
+                    continue
+
+                if text.startswith("/interview"):
+                    arg = text[len("/interview"):].strip()
+                    if not arg:
+                        await telegram_service.send_message(chat_id, "Usage: /interview <record_id> [YYYY-MM-DD]\ne.g. /interview 42 2026-10-20")
+                    else:
+                        parts = arg.split(None, 1)
+                        try:
+                            rec_id = int(parts[0])
+                            interview_date = parts[1].strip() if len(parts) > 1 else None
+                            from database import get_resume_by_id as _grbi2
+                            rec = _grbi2(rec_id)
+                            if not rec:
+                                await telegram_service.send_message(chat_id, f"No record found with ID {rec_id}.")
+                            else:
+                                update_resume_status(rec_id, "Interviewing")
+                                if interview_date:
+                                    from database import update_interview_date as _uid
+                                    _uid(rec_id, interview_date)
+                                company = rec.get('company_name', str(rec_id))
+                                note_text = f"Interview scheduled"
+                                if interview_date:
+                                    note_text += f" for {interview_date}"
+                                from database import update_user_notes as _uun, DB_FILE as _DBF
+                                import sqlite3 as _sq
+                                conn = _sq.connect(_DBF)
+                                conn.row_factory = _sq.Row
+                                c = conn.cursor()
+                                c.execute('SELECT user_notes FROM resumes WHERE id = ?', (rec_id,))
+                                row = c.fetchone()
+                                conn.close()
+                                existing = (row['user_notes'] or '').strip() if row else ''
+                                from datetime import datetime as _dt2
+                                ts = _dt2.now().strftime('%Y-%m-%d')
+                                new_note = f"[{ts}] {note_text}"
+                                _uun(rec_id, f"{existing}\n{new_note}".strip() if existing else new_note)
+                                reply = f"Marked {company} as Interviewing."
+                                if interview_date:
+                                    reply += f"\nInterview date: {interview_date}"
+                                reply += "\n\nPrep tips: research the company's recent work, prepare 2-3 STAR stories, have questions ready for the interviewer."
+                                await telegram_service.send_message(chat_id, reply)
+                        except ValueError:
+                            await telegram_service.send_message(chat_id, "Usage: /interview <record_id> [YYYY-MM-DD]")
+                    continue
+
                 if text.startswith("/start"):
-                    await telegram_service.send_message(chat_id, "Welcome to Job Tailored Resume Bot!\n\nSend me a Job Description (or paste a job posting URL) and I'll:\n- Analyze it against your resume\n- Tailor your resume automatically\n- Save everything to your dashboard\n\nJust paste a JD/URL and hit send.\n\nCommand Center:\n- /matches - recent auto-search matches\n- /followups - applications due for a follow-up\n- /queue - Action Queue summary\n- /resumes - pick which resume to use\n- /settings - adjust hard-reject filters\nYou'll also get pushed here automatically when new matches or action items show up.\n\nTips:\n- Long JDs split across messages are auto-combined\n- Use --- between JDs to send multiple at once\n- Paste a job posting URL directly and I'll fetch and read it\n- If a JD gets hard-rejected, you'll get a 'Process Anyway' button to override it\n- Use /scan to start a new JD (flushes any pending text)")
+                    await telegram_service.send_message(chat_id, (
+                        "Welcome to Job Tailored Resume Bot!\n\n"
+                        "Send me a Job Description (or paste a job posting URL) and I'll:\n"
+                        "- Analyze it against your resume\n"
+                        "- Tailor your resume automatically\n"
+                        "- Save everything to your dashboard\n\n"
+                        "Commands:\n"
+                        "- /matches - recent auto-search matches\n"
+                        "- /followups - applications due for a follow-up\n"
+                        "- /queue - Action Queue summary\n"
+                        "- /stats - full pipeline stats\n"
+                        "- /applied - list applied jobs\n"
+                        "- /peek <id> - quick look at a job record\n"
+                        "- /note <id> <text> - save a note on a job\n"
+                        "- /search - run a manual search now\n"
+                        "- /digest - force an action queue + inbox check now\n"
+                        "- /pause / /resume - pause or resume daily search\n"
+                        "- /interview <id> [date] - mark a job as Interviewing\n"
+                        "- /resumes - pick which resume to use\n"
+                        "- /settings - adjust hard-reject filters\n"
+                        "- /status - bot & integration status\n\n"
+                        "You'll also get pushed here automatically when:\n"
+                        "- New matches or action items show up\n"
+                        "- A company replies to your application email\n\n"
+                        "Tips:\n"
+                        "- Long JDs split across messages are auto-combined\n"
+                        "- Use --- between JDs to send multiple at once\n"
+                        "- Paste a job posting URL directly and I'll fetch and read it\n"
+                        "- If a JD gets hard-rejected, you'll get a 'Process Anyway' button\n"
+                        "- Use /scan to start a new JD (flushes any pending text)"
+                    ))
                     continue
 
                 if text.startswith("/status"):
+                    from services import gmail_service as _gm
+                    from services.scheduler import get_schedule_info as _gsi
                     resumes = [f for f in os.listdir("original") if f.endswith(".docx")] if os.path.exists("original") else []
-                    await telegram_service.send_message(chat_id, f"Bot is running.\nResumes available: {len(resumes)}")
+                    gmail_ok = _gm.is_connected().get('connected', False)
+                    sched = _gsi()
+                    last_search = sched.get('last_run_at') or 'never'
+                    next_search = (sched.get('next_run_at') or 'disabled')[:16]
+                    queue_text = _telegram_queue_text()
+                    await telegram_service.send_message(chat_id, (
+                        f"Bot running. Polling: active\n"
+                        f"Resumes: {len(resumes)}\n"
+                        f"Gmail: {'connected' if gmail_ok else 'not connected'}\n"
+                        f"Last search: {last_search}\n"
+                        f"Next search: {next_search}\n\n"
+                        f"{queue_text}"
+                    ))
                     continue
 
                 if text.startswith("/scan"):
@@ -5734,7 +6123,27 @@ async def _telegram_poll_loop():
                     continue
 
                 if text.startswith("/"):
-                    await telegram_service.send_message(chat_id, "Commands:\n/start - Welcome message\n/status - Check bot status\n/scan - Start a new JD (flushes pending text)\n/matches - Recent Command Center matches\n/followups - Applications due for a follow-up\n/queue - Action Queue summary\n/resumes - Pick which resume to use\n/settings - Adjust hard-reject filters\n\nOr just send a Job Description (or a URL) to process it.\nUse --- between JDs to send multiple at once.")
+                    await telegram_service.send_message(chat_id, (
+                        "Commands:\n"
+                        "/start - Welcome & full command list\n"
+                        "/status - Bot & integration status\n"
+                        "/scan - Start a new JD (flushes pending text)\n"
+                        "/matches - Recent Command Center matches\n"
+                        "/followups - Applications due for a follow-up\n"
+                        "/queue - Action Queue summary\n"
+                        "/stats - Full pipeline stats\n"
+                        "/applied - List applied jobs\n"
+                        "/peek <id> - Quick job record lookup\n"
+                        "/note <id> <text> - Save a note on a job\n"
+                        "/search - Run a manual search now\n"
+                        "/digest - Force action queue + inbox check now\n"
+                        "/pause / /resume - Pause or resume daily search\n"
+                        "/interview <id> [date] - Mark as Interviewing\n"
+                        "/resumes - Pick which resume to use\n"
+                        "/settings - Adjust hard-reject filters\n\n"
+                        "Or just send a Job Description (or a URL) to process it.\n"
+                        "Use --- between JDs to send multiple at once."
+                    ))
                     continue
 
                 logger.info(f"Telegram message from chat {chat_id}: {len(text)} chars")
@@ -5993,6 +6402,10 @@ class ScheduleUpdate(BaseModel):
     enabled: bool = True
     hour: int = 10
     minute: int = 0
+    query: Optional[str] = None
+    platforms: Optional[List[str]] = None
+    work_types: Optional[List[str]] = None
+    contract_types: Optional[List[str]] = None
 
 @app.post("/api/automation/schedule")
 @limiter.limit("10/minute")
@@ -6000,7 +6413,11 @@ async def update_schedule_endpoint(request: Request, payload: ScheduleUpdate):
     if not (0 <= payload.hour <= 23) or not (0 <= payload.minute <= 59):
         raise HTTPException(status_code=400, detail="hour must be 0-23 and minute 0-59")
     from services.scheduler import set_schedule, get_schedule_info
-    set_schedule(payload.enabled, payload.hour, payload.minute)
+    set_schedule(
+        payload.enabled, payload.hour, payload.minute,
+        query=payload.query, platforms=payload.platforms,
+        work_types=payload.work_types, contract_types=payload.contract_types,
+    )
     return get_schedule_info()
 
 

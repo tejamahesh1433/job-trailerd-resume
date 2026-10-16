@@ -6,7 +6,7 @@ import logging
 
 logger = logging.getLogger("main")
 
-DATA_DIR = os.getenv("DATA_DIR", "data")
+DATA_DIR = os.getenv("DATA_DIR") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 SEEN_FILE = os.path.join(DATA_DIR, "inbox_reply_seen.json")
 MATCHES_FILE = os.path.join(DATA_DIR, "inbox_reply_matches.json")
 
@@ -161,7 +161,7 @@ def check_inbox_for_replies() -> list:
             return []
 
         try:
-            search_result = gmail_service.search_inbox("newer_than:3d", max_results=25, category="all")
+            search_result = gmail_service.search_inbox("newer_than:7d", max_results=50, category="all")
         except RuntimeError as e:
             logger.warning(f"Inbox reply check: could not search inbox: {e}")
             return []
@@ -227,6 +227,17 @@ def check_inbox_for_replies() -> list:
         return []
 
 
+_CATEGORY_EMOJI = {
+    'interview': '🎯',
+    'assessment': '📝',
+    'offer': '🎉',
+    'rejection': '❌',
+    'reminder': '⏰',
+    'applied': '✅',
+    'verification': '🔐',
+}
+
+
 def _notify_new_matches(new_matches: list):
     try:
         from services import telegram_service
@@ -237,14 +248,24 @@ def _notify_new_matches(new_matches: list):
             return
         for entry in new_matches:
             suggestion = FOLLOW_UP_SUGGESTIONS.get(entry['category'], 'Consider sending a follow-up.')
+            emoji = _CATEGORY_EMOJI.get(entry['category'], '📬')
             title_part = f" — {entry['title'][:60]}" if entry['title'] else ""
+            snippet = entry.get('snippet', '')
+            snippet_line = f"\n\"{snippet[:120]}\"" if snippet else ""
+            date_line = f"\nReceived: {entry['date'][:10]}" if entry.get('date') else ""
             message = (
-                f"Reply from {entry['company']}{title_part}\n"
-                f"{entry['category_label']}: {entry['subject'][:100]}\n"
+                f"{emoji} Reply from {entry['company']}{title_part}\n"
+                f"Subject: {entry['subject'][:100]}\n"
+                f"Type: {entry['category_label']}"
+                f"{date_line}"
+                f"{snippet_line}\n"
                 f"{suggestion}"
             )
+            buttons = {"inline_keyboard": [[
+                {"text": "Mark Handled", "callback_data": f"mark_handled:{entry['message_id']}"}
+            ]]}
             for chat_id in chat_ids:
-                telegram_service.send_message_sync(chat_id, message)
+                telegram_service.send_message_sync(chat_id, message, reply_markup=buttons)
         logger.info(f"Inbox reply check: notified Telegram of {len(new_matches)} new matched repl(y/ies)")
     except Exception as e:
         logger.warning(f"Failed to send inbox-reply Telegram notification: {e}")

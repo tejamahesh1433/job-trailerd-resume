@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://api.telegram.org/bot{token}"
 
-DATA_DIR = os.getenv("DATA_DIR", "data")
+DATA_DIR = os.getenv("DATA_DIR") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 KNOWN_CHATS_FILE = os.path.join(DATA_DIR, "telegram_chats.json")
 RESUME_SELECTION_FILE = os.path.join(DATA_DIR, "telegram_resume_selection.json")
 SETTINGS_FILE = os.path.join(DATA_DIR, "telegram_settings.json")

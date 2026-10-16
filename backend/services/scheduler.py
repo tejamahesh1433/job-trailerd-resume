@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("main")
 
-DATA_DIR = os.getenv("DATA_DIR", "data")
+DATA_DIR = os.getenv("DATA_DIR") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 SCHEDULE_CONFIG_FILE = os.path.join(DATA_DIR, "daily_search_schedule.json")
 
 SCHEDULE_TZ = ZoneInfo("America/New_York")
@@ -60,18 +60,45 @@ def get_schedule_info() -> dict:
     }
 
 
-def set_schedule(enabled: bool, hour: int = DEFAULT_HOUR, minute: int = DEFAULT_MINUTE):
-    _save_config({"enabled": enabled, "hour": hour, "minute": minute})
+def set_schedule(
+    enabled: bool,
+    hour: int = DEFAULT_HOUR,
+    minute: int = DEFAULT_MINUTE,
+    query: str = None,
+    platforms: list = None,
+    work_types: list = None,
+    contract_types: list = None,
+):
+    existing = _load_config()
+    config = {
+        "enabled": enabled,
+        "hour": hour,
+        "minute": minute,
+        "query": query if query is not None else existing.get("query", DEFAULT_QUERY),
+        "platforms": platforms if platforms is not None else existing.get("platforms", DEFAULT_PLATFORMS),
+        "work_types": work_types if work_types is not None else existing.get("work_types", DEFAULT_WORK_TYPES),
+        "contract_types": contract_types if contract_types is not None else existing.get("contract_types", DEFAULT_CONTRACT_TYPES),
+    }
+    _save_config(config)
+
+
+def get_search_params() -> dict:
+    """Return the saved search params (query, platforms, work_types, contract_types)
+    falling back to defaults — single source of truth for both the scheduler loop
+    and the Telegram /search command."""
+    config = _load_config()
+    return {
+        "query": config.get("query", DEFAULT_QUERY),
+        "platforms": config.get("platforms", DEFAULT_PLATFORMS),
+        "work_types": config.get("work_types", DEFAULT_WORK_TYPES),
+        "contract_types": config.get("contract_types", DEFAULT_CONTRACT_TYPES),
+    }
 
 
 async def daily_search_loop(run_search_fn):
     """Sleeps until the configured time (default 10:00 AM America/New_York) every day,
-    then runs the default Command Center search. `run_search_fn` must match
-    _run_command_center_search's signature: (query, platforms, work_types, contract_types)
-    and is synchronous/blocking — it is run via asyncio.to_thread so it doesn't stall
-    the event loop (and every other in-flight request) for the minutes it can take.
-    Re-reads the config on every iteration so enabling/disabling takes effect on the
-    next tick without restarting the backend."""
+    then runs the Command Center search using the saved config params. Re-reads config
+    on every iteration so changes take effect on the next tick without restarting."""
     global _last_run_at, _last_run_result
     while True:
         config = _load_config()
@@ -95,8 +122,12 @@ async def daily_search_loop(run_search_fn):
             continue
 
         try:
-            logger.info("Running scheduled daily Command Center search")
-            result = await asyncio.to_thread(run_search_fn, DEFAULT_QUERY, DEFAULT_PLATFORMS, DEFAULT_WORK_TYPES, DEFAULT_CONTRACT_TYPES)
+            params = get_search_params()
+            logger.info(f"Running scheduled daily search: query={params['query']!r} platforms={params['platforms']}")
+            result = await asyncio.to_thread(
+                run_search_fn,
+                params["query"], params["platforms"], params["work_types"], params["contract_types"],
+            )
             _last_run_at = datetime.now(SCHEDULE_TZ).isoformat()
             _last_run_result = {"count": result.get("count", 0), "rejected_count": result.get("rejected_count", 0)}
             logger.info(f"Scheduled search complete: {_last_run_result}")
