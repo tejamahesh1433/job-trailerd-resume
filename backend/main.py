@@ -2503,7 +2503,7 @@ async def _scan_resume_core(
         _tailoring_happened = False
 
         # ── Decide: skip tailoring, reuse existing, or create new ──
-        if score >= 85 and not has_user_notes:
+        if score >= 90 and not has_user_notes:
             # Base resume already strong — no bullet/summary tailoring, but still append any
             # skills this JD requires that the base skills table is missing (additive only)
             working_bytes, skills_added, unmatched_keywords, dropped_skills = _apply_skills_additions(file_bytes, result, base_resume_text=resume_text, tailoring_mode=tailoring_mode)
@@ -2511,10 +2511,10 @@ async def _scan_resume_core(
                 f.write(working_bytes)
             after_score = score  # No bullet tailoring done; keep actual score
             replacements = []
-            logger.info(f"Score {score}% >= 85% for {company_name} — no bullet tailoring needed; "
+            logger.info(f"Score {score}% >= 90% for {company_name} — no bullet tailoring needed; "
                         f"added {len(skills_added)} missing skills")
             with open(diff_path, "w", encoding="utf-8") as f:
-                f.write(f"Score: {score}% — already above 85%, no bullet tailoring needed.\n")
+                f.write(f"Score: {score}% — already above 90%, no bullet tailoring needed.\n")
                 _write_skills_diff(f, skills_added, unmatched_keywords, dropped_skills)
                 _write_rejected_diff(f, rejected_edits)
 
@@ -2857,7 +2857,7 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
     has_user_notes = bool(ai_notes and ai_notes.strip())
     _tailoring_happened = False
 
-    if score >= 85 and not has_user_notes:
+    if score >= 90 and not has_user_notes:
         # Same as the interactive path: no bullet tailoring, but still add missing required skills
         working_bytes, skills_added, unmatched_keywords, dropped_skills = _apply_skills_additions(file_bytes, result, base_resume_text=resume_text, tailoring_mode=tailoring_mode)
         with open(file_path, "wb") as f:
@@ -2865,7 +2865,7 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
         after_score = score  # No bullet tailoring done; keep actual score
         replacements = []
         with open(diff_path, "w", encoding="utf-8") as f:
-            f.write(f"Score: {score}% — already above 85%, no bullet tailoring needed.\n")
+            f.write(f"Score: {score}% — already above 90%, no bullet tailoring needed.\n")
             _write_skills_diff(f, skills_added, unmatched_keywords, dropped_skills)
             _write_rejected_diff(f, rejected_edits)
 

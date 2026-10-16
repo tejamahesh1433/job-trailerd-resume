@@ -273,7 +273,7 @@ export default function App() {
 
   const fetchPersonalDocs = async () => {
     try {
-      const res = await fetch('${API_BASE}/api/documents');
+      const res = await fetch(`${API_BASE}/api/documents`);
       const data = await res.json();
       if (res.ok) setPersonalDocs(data.documents || {});
     } catch { /* silent */ }
@@ -286,7 +286,7 @@ export default function App() {
       const fd = new FormData();
       fd.append('doc_type', docType);
       fd.append('file', file);
-      const res = await fetch('${API_BASE}/api/documents/upload', { method: 'POST', body: fd });
+      const res = await fetch(`${API_BASE}/api/documents/upload`, { method: 'POST', body: fd });
       if (res.ok) {
         await fetchPersonalDocs();
         setFuAttach(prev => ({ ...prev, [docType]: true }));
@@ -300,7 +300,7 @@ export default function App() {
 
   const fetchResumes = async () => {
     try {
-      const res = await fetch('${API_BASE}/api/resumes');
+      const res = await fetch(`${API_BASE}/api/resumes`);
       if (!res.ok) return;
       const data = await res.json();
       setStoredResumes(data);
@@ -316,14 +316,14 @@ export default function App() {
 
   const fetchHistory = async () => {
     try {
-      const res = await fetch('${API_BASE}/api/history?limit=200');
+      const res = await fetch(`${API_BASE}/api/history?limit=200`);
       if (res.ok) setHistory(await res.json());
     } catch { /* ignore */ }
   };
 
   const checkGmailStatus = async () => {
     try {
-      const res = await fetch('${API_BASE}/api/gmail/status');
+      const res = await fetch(`${API_BASE}/api/gmail/status`);
       if (res.ok) {
         const data = await res.json();
         setGmailConnected(data.connected);
@@ -335,14 +335,14 @@ export default function App() {
 
   const fetchUsage = async () => {
     try {
-      const res = await fetch('${API_BASE}/api/usage');
+      const res = await fetch(`${API_BASE}/api/usage`);
       if (res.ok) setUsageStats(await res.json());
     } catch { /* ignore */ }
   };
 
   const fetchProfile = async () => {
     try {
-      const res = await fetch('${API_BASE}/api/profile');
+      const res = await fetch(`${API_BASE}/api/profile`);
       if (res.ok) {
         const data = await res.json();
         setProfileText(data.content || '');
@@ -395,7 +395,7 @@ export default function App() {
     setSavingToGmail(true);
     setGmailSaved(false);
     try {
-      const res = await fetch('${API_BASE}/api/gmail/save-draft', {
+      const res = await fetch(`${API_BASE}/api/gmail/save-draft`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -418,7 +418,7 @@ export default function App() {
 
   const handleDisconnectGmail = async () => {
     try {
-      await fetch('${API_BASE}/api/gmail/disconnect', { method: 'POST' });
+      await fetch(`${API_BASE}/api/gmail/disconnect`, { method: 'POST' });
       setGmailConnected(false);
       setGmailEmail('');
     } catch { /* ignore */ }
@@ -427,7 +427,7 @@ export default function App() {
   const handleSaveProfile = async () => {
     setProfileSaving(true);
     try {
-      const res = await fetch('${API_BASE}/api/profile', {
+      const res = await fetch(`${API_BASE}/api/profile`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: profileText }),
@@ -445,7 +445,7 @@ export default function App() {
     try {
       const form = new FormData();
       form.append('file', file);
-      const res = await fetch('${API_BASE}/api/profile/upload', { method: 'POST', body: form });
+      const res = await fetch(`${API_BASE}/api/profile/upload`, { method: 'POST', body: form });
       const data = await res.json();
       if (!res.ok) { setProfileUploadMsg(data.detail || 'Upload failed'); return; }
       setProfileText(data.profile || '');
@@ -467,7 +467,7 @@ export default function App() {
     const formData = new FormData();
     formData.append('resume', file);
     try {
-      const res = await fetch('${API_BASE}/api/resumes', { method: 'POST', body: formData });
+      const res = await fetch(`${API_BASE}/api/resumes`, { method: 'POST', body: formData });
       const data = await res.json();
       if (!res.ok) { setError(data.detail || 'Upload failed'); return; }
       await fetchResumes();
@@ -522,7 +522,7 @@ export default function App() {
     if (rerunRecordId) formData.append('rerun_id', rerunRecordId);
     if (overrideExperienceCheck) formData.append('override_experience_check', 'true');
     try {
-      const res = await fetch('${API_BASE}/api/scan', { method: 'POST', body: formData });
+      const res = await fetch(`${API_BASE}/api/scan`, { method: 'POST', body: formData });
       const data = await res.json();
       if (!res.ok) {
         if (res.status === 409 && data.detail?.duplicate_id) {
@@ -619,7 +619,7 @@ export default function App() {
 
     const handleSaveToApplications = async (job) => {
     try {
-      const res = await fetch('${API_BASE}/api/applications', {
+      const res = await fetch(`${API_BASE}/api/applications`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -735,7 +735,7 @@ export default function App() {
     setBatchJobs(jds.map((jd, i) => ({ id: i, jd, status: 'processing', result: null, error: null })));
     setBatchRunning(true);
     try {
-      const res = await fetch('${API_BASE}/api/batch-scan', {
+      const res = await fetch(`${API_BASE}/api/batch-scan`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jd_texts: jds, selected_resume: selectedResumeName, ai_notes: aiNotes.trim() || undefined }),
@@ -1010,7 +1010,7 @@ export default function App() {
     setSavingFollowUp(true);
     setFollowUpGmailSaved(false);
     try {
-      const res = await fetch('${API_BASE}/api/gmail/save-draft', {
+      const res = await fetch(`${API_BASE}/api/gmail/save-draft`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
