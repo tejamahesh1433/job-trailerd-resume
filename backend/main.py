@@ -2768,7 +2768,10 @@ async def scan_resume(request: Request, jd_text: str = Form(...), resume: Option
 
 
 def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, ai_notes: str = "",
-                       tailoring_mode: str | None = None) -> dict:
+                       tailoring_mode: str | None = None, fast_mode: bool = False) -> dict:
+    # fast_mode=True (Telegram path): skip the two score_resume AI calls (~100s saved).
+    # The AI-estimated score from analyze_resume is used instead. Dashboard calls keep
+    # fast_mode=False to get accurate measured before/after scores.
     tailoring_mode = get_tailoring_mode(tailoring_mode)
     resume_text = extract_text_from_docx(file_bytes)
 
@@ -2834,11 +2837,12 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
 
     # ── Pre-score original BEFORE the skip decision ──
     _before_score_result: dict | None = None
-    try:
-        _before_score_result = score_resume(resume_text, jd_text)
-        score = _before_score_result["final_score"]
-    except Exception as _pse:
-        logger.warning(f"Pre-scoring failed (using AI estimate for skip check): {_pse}")
+    if not fast_mode:
+        try:
+            _before_score_result = score_resume(resume_text, jd_text)
+            score = _before_score_result["final_score"]
+        except Exception as _pse:
+            logger.warning(f"Pre-scoring failed (using AI estimate for skip check): {_pse}")
 
     replacements, rejected_edits = _drop_unsupported_tool_claims(
         result.get('replacements', []), result.get('missing_keywords', []), resume_text, tailoring_mode)
@@ -2895,15 +2899,17 @@ def _process_single_jd(jd_text: str, file_bytes: bytes, original_filename: str, 
             f.write("No changes were needed. The resume already matched the job description well.\n")
 
     # ── Measured scoring (best-effort, never blocks the batch scan) ──
+    # Skipped in fast_mode (Telegram): saves ~100s; AI-estimated scores are used instead.
     measured = None
-    try:
-        with open(file_path, "rb") as _mf:
-            _final_bytes = _mf.read()
-        measured = _measure_scores(resume_text, _final_bytes, jd_text, before=_before_score_result)
-        score = measured["before"]["final_score"]
-        after_score = measured["after"]["final_score"]
-    except Exception as _me:
-        logger.warning(f"Measured scoring failed (using AI estimates): {_me}")
+    if not fast_mode:
+        try:
+            with open(file_path, "rb") as _mf:
+                _final_bytes = _mf.read()
+            measured = _measure_scores(resume_text, _final_bytes, jd_text, before=_before_score_result)
+            score = measured["before"]["final_score"]
+            after_score = measured["after"]["final_score"]
+        except Exception as _me:
+            logger.warning(f"Measured scoring failed (using AI estimates): {_me}")
 
     # ── Never-worse rule: if tailoring hurt the score, revert to original ──
     if _tailoring_happened and measured and after_score < score:
@@ -5038,6 +5044,7 @@ def _telegram_process_jd_impl(jd_text: str, chat_id: int, bypass_checks: bool = 
         result = _process_single_jd(
             jd_text, file_bytes, resume_path,
             tailoring_mode=settings.get("tailoring_mode"),
+            fast_mode=True,
         )
 
         if result.get("skipped"):
