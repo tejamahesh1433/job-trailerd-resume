@@ -236,6 +236,25 @@ async def get_me() -> dict:
         return data["result"]
 
 
+async def delete_message(chat_id: int, message_id: int) -> bool:
+    """Delete a single message. Returns True on success, False if not deletable
+    (too old, already gone, or a user message in a private chat)."""
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(_url("deleteMessage"), json={"chat_id": chat_id, "message_id": message_id})
+        return resp.status_code == 200 and resp.json().get("result") is True
+
+
+async def clear_chat_messages(chat_id: int, up_to_message_id: int, window: int = 200) -> int:
+    """Attempt to bulk-delete messages from (up_to_message_id - window) up to
+    up_to_message_id. Silently skips anything undeletable (user messages in a
+    private chat, messages older than 48 h). Returns count of deleted messages."""
+    start = max(1, up_to_message_id - window)
+    ids = list(range(start, up_to_message_id + 1))
+    tasks = [delete_message(chat_id, mid) for mid in ids]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    return sum(1 for r in results if r is True)
+
+
 async def get_updates(offset: int = 0, timeout: int = 30) -> list:
     """Long-poll for new messages and callback queries."""
     async with httpx.AsyncClient(timeout=timeout + 10) as client:

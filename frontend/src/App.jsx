@@ -250,6 +250,7 @@ export default function App() {
   const [gmailCanOrganize, setGmailCanOrganize] = useState(false);
   const [savingToGmail, setSavingToGmail] = useState(false);
   const [gmailSaved, setGmailSaved] = useState(false);
+  const [gmailSaveConfirm, setGmailSaveConfirm] = useState(false);
   // Cross-page deep link: Inbox -> Command Center job workspace
   const [pendingCommandCenterJobId, setPendingCommandCenterJobId] = useState(null);
   // Follow-up mail
@@ -259,6 +260,7 @@ export default function App() {
   const [generatingFollowUp, setGeneratingFollowUp] = useState(false);
   const [savingFollowUp, setSavingFollowUp] = useState(false);
   const [followUpGmailSaved, setFollowUpGmailSaved] = useState(false);
+  const [followUpGmailSaveConfirm, setFollowUpGmailSaveConfirm] = useState(false);
   const [inboxMessages, setInboxMessages] = useState([]);
   const [inboxLoading, setInboxLoading] = useState(false);
   const [inboxOpen, setInboxOpen] = useState(false);
@@ -390,10 +392,11 @@ export default function App() {
     else { setHistorySortBy(field); setHistorySortDir('desc'); }
   };
 
-  const handleSaveToGmail = async () => {
+  const handleSaveToGmail = async (force = false) => {
     if (!mailDraft || !activeRecordId) return;
+    if (gmailSaved && !force) { setGmailSaveConfirm(true); return; }
+    setGmailSaveConfirm(false);
     setSavingToGmail(true);
-    setGmailSaved(false);
     try {
       const res = await fetch(`${API_BASE}/api/gmail/save-draft`, {
         method: 'POST',
@@ -408,7 +411,6 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) { setError(data.detail || 'Failed to save to Gmail'); return; }
       setGmailSaved(true);
-      setTimeout(() => setGmailSaved(false), 5000);
     } catch {
       setError('Failed to save draft to Gmail');
     } finally {
@@ -515,6 +517,10 @@ export default function App() {
     setCoverLetterPath(null);
     setMailDraft(null);
     setDraftPath(null);
+    setGmailSaved(false);
+    setGmailSaveConfirm(false);
+    setFollowUpGmailSaved(false);
+    setFollowUpGmailSaveConfirm(false);
     const formData = new FormData();
     formData.append('jd_text', jdText);
     if (aiNotes.trim()) formData.append('ai_notes', aiNotes.trim());
@@ -810,6 +816,8 @@ export default function App() {
   const handleGenerateMail = async () => {
     if (!activeRecordId) { setError('Select a company first.'); return; }
     setGeneratingMail(true);
+    setGmailSaved(false);
+    setGmailSaveConfirm(false);
     setError(null);
     try {
       const res = await fetch(`${API_BASE}/api/history/${activeRecordId}/mail-draft`, { method: 'POST' });
@@ -854,8 +862,12 @@ export default function App() {
     setCoverLetterPath(null);
     setMailDraft(null);
     setDraftPath(null);
+    setGmailSaved(false);
+    setGmailSaveConfirm(false);
     setFollowUpEmail('');
     setFollowUpDraft(null);
+    setFollowUpGmailSaved(false);
+    setFollowUpGmailSaveConfirm(false);
     setInboxMessages([]);
     setInboxOpen(false);
     setSelectedMsgId(null);
@@ -1005,10 +1017,11 @@ export default function App() {
     }
   };
 
-  const handleSaveFollowUpToGmail = async () => {
+  const handleSaveFollowUpToGmail = async (force = false) => {
     if (!followUpDraft) return;
+    if (followUpGmailSaved && !force) { setFollowUpGmailSaveConfirm(true); return; }
+    setFollowUpGmailSaveConfirm(false);
     setSavingFollowUp(true);
-    setFollowUpGmailSaved(false);
     try {
       const res = await fetch(`${API_BASE}/api/gmail/save-draft`, {
         method: 'POST',
@@ -1027,7 +1040,6 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) { setError(data.detail || 'Failed to save to Gmail'); return; }
       setFollowUpGmailSaved(true);
-      setTimeout(() => setFollowUpGmailSaved(false), 5000);
     } catch {
       setError('Failed to save follow-up to Gmail.');
     } finally {
@@ -2243,9 +2255,17 @@ export default function App() {
                       </a>
                     )}
                     {gmailConnected ? (
-                      <button className="mail-act-btn mail-gmail-btn" onClick={handleSaveToGmail} disabled={savingToGmail}>
-                        {savingToGmail ? '…' : gmailSaved ? '✓ Saved to Gmail' : '✉ Save to Gmail Drafts'}
-                      </button>
+                      gmailSaveConfirm ? (
+                        <span className="draft-dup-warn">
+                          ⚠ Already saved — send again?{' '}
+                          <button className="dup-confirm-btn" onClick={() => handleSaveToGmail(true)}>Yes</button>
+                          <button className="dup-cancel-btn" onClick={() => setGmailSaveConfirm(false)}>Cancel</button>
+                        </span>
+                      ) : (
+                        <button className="mail-act-btn mail-gmail-btn" onClick={() => handleSaveToGmail()} disabled={savingToGmail}>
+                          {savingToGmail ? '…' : gmailSaved ? '✓ Saved to Gmail' : '✉ Save to Gmail Drafts'}
+                        </button>
+                      )
                     ) : (
                       <a href="${API_BASE}/api/gmail/auth" className="mail-act-btn mail-gmail-connect-btn">
                         ✉ Connect Gmail
@@ -2426,9 +2446,17 @@ export default function App() {
                       </a>
                     )}
                     {gmailConnected && (
-                      <button className="mail-act-btn mail-gmail-btn" onClick={handleSaveFollowUpToGmail} disabled={savingFollowUp}>
-                        {savingFollowUp ? '…' : followUpGmailSaved ? '✓ Saved to Gmail' : '✉ Save to Gmail Drafts'}
-                      </button>
+                      followUpGmailSaveConfirm ? (
+                        <span className="draft-dup-warn">
+                          ⚠ Already saved — send again?{' '}
+                          <button className="dup-confirm-btn" onClick={() => handleSaveFollowUpToGmail(true)}>Yes</button>
+                          <button className="dup-cancel-btn" onClick={() => setFollowUpGmailSaveConfirm(false)}>Cancel</button>
+                        </span>
+                      ) : (
+                        <button className="mail-act-btn mail-gmail-btn" onClick={() => handleSaveFollowUpToGmail()} disabled={savingFollowUp}>
+                          {savingFollowUp ? '…' : followUpGmailSaved ? '✓ Saved to Gmail' : '✉ Save to Gmail Drafts'}
+                        </button>
+                      )
                     )}
                   </div>
                 </div>

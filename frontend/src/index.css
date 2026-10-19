@@ -2125,6 +2125,28 @@ body {
 .mail-gmail-connect-btn { color: #d44638; border-color: rgba(212,70,56,0.3); text-decoration: none; text-align: center; }
 .mail-gmail-connect-btn:hover { background: rgba(212,70,56,0.06); }
 
+.draft-dup-warn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.72rem;
+  color: #c89b3c;
+  font-family: var(--font-mono);
+}
+.dup-confirm-btn, .dup-cancel-btn {
+  font-size: 0.7rem;
+  font-family: var(--font-mono);
+  padding: 0.15rem 0.5rem;
+  border-radius: 3px;
+  border: 1px solid;
+  cursor: pointer;
+  background: transparent;
+}
+.dup-confirm-btn { color: #d44638; border-color: rgba(212,70,56,0.4); }
+.dup-confirm-btn:hover { background: rgba(212,70,56,0.08); }
+.dup-cancel-btn { color: var(--muted); border-color: var(--border); }
+.dup-cancel-btn:hover { background: var(--gold-dim); }
+
 .gmail-status {
   display: flex; align-items: center; gap: 6px;
   font-size: 0.72rem; color: var(--cream-dim);

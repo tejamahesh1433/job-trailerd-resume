@@ -6110,6 +6110,7 @@ async def _telegram_poll_loop():
                         "- /interview <id> [date] - mark a job as Interviewing\n"
                         "- /resumes - pick which resume to use\n"
                         "- /settings - adjust hard-reject filters\n"
+                        "- /clear - delete old messages from this chat\n"
                         "- /status - bot & integration status\n\n"
                         "You'll also get pushed here automatically when:\n"
                         "- New matches or action items show up\n"
@@ -6140,6 +6141,13 @@ async def _telegram_poll_loop():
                         f"Next search: {next_search}\n\n"
                         f"{queue_text}"
                     ))
+                    continue
+
+                if text.startswith("/clear"):
+                    msg_id = msg.get("message_id", 0)
+                    await telegram_service.send_chat_action(chat_id, "typing")
+                    deleted = await telegram_service.clear_chat_messages(chat_id, msg_id)
+                    await telegram_service.send_message(chat_id, f"✓ Cleared {deleted} message(s) from this chat.")
                     continue
 
                 if text.startswith("/scan"):
@@ -6179,7 +6187,8 @@ async def _telegram_poll_loop():
                         "/pause / /resume - Pause or resume daily search\n"
                         "/interview <id> [date] - Mark as Interviewing\n"
                         "/resumes - Pick which resume to use\n"
-                        "/settings - Adjust hard-reject filters\n\n"
+                        "/settings - Adjust hard-reject filters\n"
+                        "/clear - Delete old messages from this chat\n\n"
                         "Or just send a Job Description (or a URL) to process it.\n"
                         "Use --- between JDs to send multiple at once."
                     ))
