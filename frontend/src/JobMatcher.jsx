@@ -1,5 +1,5 @@
 import { useState } from 'react';
-const API_BASE = import.meta.env.VITE_API_URL || '';
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080';
 
 export default function JobMatcher({ onApply }) {
   const [jdText, setJdText] = useState('');
@@ -14,7 +14,7 @@ export default function JobMatcher({ onApply }) {
     setFetchingUrl(true);
     setError(null);
     try {
-      const response = await fetch('${API_BASE}/api/job-matcher/fetch-url', {
+      const response = await fetch(`${API_BASE}/api/job-matcher/fetch-url`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: `url=${encodeURIComponent(jdUrl.trim())}`
@@ -51,7 +51,7 @@ export default function JobMatcher({ onApply }) {
       if (jdUrl.trim()) {
         body += `&source_url=${encodeURIComponent(jdUrl.trim())}`;
       }
-      const response = await fetch('${API_BASE}/api/job-matcher/analyze', {
+      const response = await fetch(`${API_BASE}/api/job-matcher/analyze`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body

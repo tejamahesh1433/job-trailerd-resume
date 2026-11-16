@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './index.css';
-const API_BASE = import.meta.env.VITE_API_URL || '';
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080';
 import JobMatcher from './JobMatcher';
 import SearchPage from './SearchPage';
 import CommandCenter from './CommandCenter';
@@ -86,20 +86,29 @@ const HISTORY_PAGE_SIZE = 20;
 
 const REFERENCES = [
   {
-    name: 'Rama krishna morakonda',
+    name: 'Feroz Mohammad',
+    company: 'Mizuho',
+    role: 'Data Engineer',
+    email: 'feroz.mohammad@mizuhogroup.com',
+    phone: '2039971768',
+    location: 'New York, NY',
+  },
+  {
+    name: 'Rama Krishna Morakonda',
     company: 'State of Tennessee',
-    role: 'Devops and Cloud Engineer',
+    role: 'DevOps and Cloud Engineer',
     email: 'ramakrishna.morakonda@tn.gov',
     phone: '3526657580',
     location: 'Nashville, Tennessee',
+    linkedin: 'https://www.linkedin.com/in/ramakrishna-morakonda-5909622bb',
   },
   {
-    name: 'Shahin Shaik',
-    company: 'Freddie Mac',
+    name: 'Sampath Odiseri',
+    company: 'Omnicell',
     role: 'Software Engineer',
-    email: 'shahin.shaik@freddiemac.com',
-    phone: '4054769257',
-    location: '',
+    email: 'sampathreddy.odiseri@omnicell.com',
+    phone: '',
+    location: 'Pittsburgh, PA',
   },
 ];
 
@@ -1722,8 +1731,9 @@ export default function App() {
                       <div className="info-address-text">{ref.role} · {ref.company}</div>
                       <div className="info-address-contact">
                         <div className="info-address-field"><span className="info-address-label">Email</span>{ref.email}</div>
-                        <div className="info-address-field"><span className="info-address-label">Phone</span>{ref.phone}</div>
+                        {ref.phone && <div className="info-address-field"><span className="info-address-label">Phone</span>{ref.phone}</div>}
                         {ref.location && <div className="info-address-field"><span className="info-address-label">Location</span>{ref.location}</div>}
+                        {ref.linkedin && <div className="info-address-field"><span className="info-address-label">LinkedIn</span><a href={ref.linkedin} target="_blank" rel="noreferrer" style={{ color: 'inherit' }}>{ref.linkedin}</a></div>}
                       </div>
                     </div>
                   ))}
@@ -2267,7 +2277,7 @@ export default function App() {
                         </button>
                       )
                     ) : (
-                      <a href="${API_BASE}/api/gmail/auth" className="mail-act-btn mail-gmail-connect-btn">
+                      <a href={`${API_BASE}/api/gmail/auth`} className="mail-act-btn mail-gmail-connect-btn">
                         ✉ Connect Gmail
                       </a>
                     )}
@@ -2570,7 +2580,7 @@ export default function App() {
               <span className="panel-title">Production Log</span>
             </div>
             {history.length > 0 && (
-              <a href="${API_BASE}/api/history/csv" className="csv-btn" download>↓ CSV Export</a>
+              <a href={`${API_BASE}/api/history/csv`} className="csv-btn" download>↓ CSV Export</a>
             )}
           </div>
 

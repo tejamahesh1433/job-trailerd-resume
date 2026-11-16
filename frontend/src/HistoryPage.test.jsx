@@ -23,7 +23,7 @@ describe('History CSV import', () => {
     expect(screen.getByText('Row 5: Company is required')).toBeInTheDocument();
     expect(refresh).toHaveBeenCalledOnce();
     const upload = fetch.mock.calls.find(([, options]) => options?.method === 'POST');
-    expect(upload[0]).toBe('http://localhost:8000/api/history/import');
+    expect(upload[0]).toBe('http://localhost:8080/api/history/import');
     expect(upload[1].body.get('file')).toBe(file);
   });
 

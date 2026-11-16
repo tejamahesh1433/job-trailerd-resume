@@ -8,7 +8,7 @@ Run: python test_job_matcher.py
 
 import requests
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = "http://localhost:8080"
 
 def run_case(name, jd_text, should_fail=False):
     """Exercise /api/job-matcher/analyze endpoint against a live server.

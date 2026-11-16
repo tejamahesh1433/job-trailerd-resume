@@ -3,7 +3,7 @@ import { JobRow } from './CommandCenter';
 import JobDetailWorkspace from './JobDetailWorkspace';
 import './index.css';
 
-const API_BASE = import.meta.env.VITE_API_URL || '';
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080';
 const PAGE_SIZE = 20;
 
 export default function JobMatches({ onBack, onSendToTailor, onSaveToApplications, selectedResumeName }) {
